@@ -45,6 +45,8 @@ static BlockLink_t xStart, xEnd;
 static size_t xFreeBytesRemaining = configADJUSTED_HEAP_SIZE;
 ```
 
+**如果外层函数未被 static 修饰，但是外层函数内调用了 static 修饰的函数，外层函数是否可被其他文件调用？**
+
 # 2 .结构体
 
 ## 对齐与大小
