@@ -46,6 +46,31 @@ adb push 1.txt /root # 把文件传输到开发板的 /root 目录
 adb pull /root/2.txt # 把开发板的文件拉到当前的文件夹
 ```
 
+## clangd
+
+编译数据库文件：
+
+``` shell
+# 在项目根目录创建build目录
+mkdir build && cd build
+
+# 生成编译数据库（关键参数）
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..  # 核心参数{insert\_element\_0\_}
+
+# 将compile_commands.json链接到项目根目录
+ln -s build/compile_commands.json ../
+```
+
+``` shell
+# 安装bear
+sudo apt install bear
+
+# 构建项目并生成编译数据库
+bear make  # 会在当前目录生成compile_commands.json
+```
+
+
+
 # 常见问题及排查
 
 ## 模块无法加载
@@ -627,6 +652,7 @@ $@  # 表示当前规则的目标名
 $<  # 第一个依赖文件
 $^  # 所有的依赖
 %   # 通配符表示
+$() # 引用变量
 
 test : a.o b.o
 	gcc -o test $^
@@ -659,6 +685,66 @@ B = $(foreach f, $(A), f.o)
 
 C = $(filter %.o, $(B))      # 从变量中的值取出符合要求格式的值
 D = $(filter-out %.o, $(B))  # 从变量中的值取出不符合要求格式的值
+```
+
+# Cmake
+
+CMake 只做两件事：编译**库**（`add_library`）、编译**可执行文件**（`add_executable`）；
+
+**两个关键路径**
+
+- 头文件路径：`target_include_directories`（编译器找头文件）；
+- 库文件路径：`link_directories`（链接器找库）；
+
+**构建顺序**
+
+先编译自定义库 → 再编译可执行文件 → 可执行文件链接库；
+
+## 实例
+
+``` cmake
+cmake_minimum_required(VERSION 3.8)
+project(MYACTUA_EtherCat)  # 仅标识工程，不参与编译、链接、头文件配置
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 1. 自定义变量
+set(IGH_PATH /home/cat/ethercat)
+
+# 2. 全局库路径
+link_directories(
+    ${IGH_PATH}/lib
+    /opt/etherlab/lib
+)
+
+# 3. 用.cpp文件创建目标库
+add_library(MYACTUA_EtherCat
+    src/motor_control.cpp
+    src/CiA402.cpp
+    src/EthercatAdapterIGH.cpp
+)
+# 4. 给目标库配置头文件路径
+target_include_directories(MYACTUA_EtherCat PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${IGH_PATH}/include
+    /opt/etherlab/include
+)
+
+# 5. 给目标库链接依赖库
+target_link_libraries(MYACTUA_EtherCat
+    ethercat
+    pthread
+    rt
+)
+
+# 6. 编译可执行文件
+add_executable(simple_test examples/simple_test.cpp)
+add_executable(debug_tool  examples/debug_tool.cpp)
+
+# 7. 可执行文件链接库
+target_link_libraries(simple_test MYACTUA_EtherCat)
+target_link_libraries(debug_tool  MYACTUA_EtherCat)
 ```
 
 # 虚拟文件系统
