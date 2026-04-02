@@ -299,5 +299,3 @@ ethercat slaves -v
 ``` shell
 dmesg | tail -n 20
 ```
-
-![image-20260401103757365](./assets/IMU连接)
