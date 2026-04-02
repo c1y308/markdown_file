@@ -867,7 +867,7 @@ struct inode {
 
 查看`/proc/devices`可以获知系统中注册的设备，第一列为主设备号，第二列为设备名。
 
-# 进程
+# 线程/进程
 
 ## 进程状态
 
@@ -915,10 +915,6 @@ root      9999  0.0  0.0      0     0 ?        D    12:00   0:00 [jbd2/sda1-8]
 # l (multi-threaded) - 多线程
 # + (foreground) - 前台进程组
 ```
-
-### 等待队列
-
-**等待队列属于"资源"，不属于"进程"**。
 
 ## 常用函数/库
 
@@ -1039,9 +1035,12 @@ int ioctl(int fd, unsigned long request, ...);
 
 ## 阻塞查询
 
-​	阻塞查询会在进程执行设备操作时如果**不能获取到资源则挂起进程**，直到满足可操作的条件后再进行操作。被挂起的进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足。
+​	阻塞查询会在线程/进程执行设备操作时如果**不能获取到资源则挂起线程/进程**，直到满足可操作的条件后再进行操作。被挂起的线程/进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足，在驱动程序中使用**等待队列**来实现阻塞线程/进程的唤醒。
 
-​	在驱动程序中使用**等待队列**来实现阻塞进程的唤醒。
+``` c
+```
+
+
 
 ``` c
 // 定义等待队列头部
@@ -1133,6 +1132,57 @@ if (fds[0].revents & POLLOUT) {
 
 
 ### `epoll`
+
+### `select`
+
+`select` 本质是**IO 多路复用**核心接口，用来**单线程同时监控多个文件描述符（fd）**，解决「单个阻塞 IO 卡住，没法处理其他 IO」的问题。
+
+---
+
+**单线程监控多个 IO**：不用开多线程，一个线程就能同时等：键盘、串口、网络 socket、设备文件（驱动节点）等多个 fd。
+
+**避免单个 IO 无限阻塞**：普通 `read` 会阻塞在**单个 fd**上，有数据才返回；`select` 阻塞在**多个 fd**上，**任意一个就绪就立刻返回**，不会死等某一个。
+
+**实现带超时的 IO 操作**：可以给阻塞加超时时间，超时就返回，不会永久卡住。
+
+**适用场景**：嵌入式串口 / 设备监控、轻量级网络服务、多 IO 事件轮询（Linux 早期经典方案）。
+
+---
+
+``` c
+#include <sys/select.h>
+#include <sys/time.h>
+
+/* 返回值：就绪的fd数量, =0(超时) */
+int select(int nfds, 
+           fd_set *readfds, 
+           fd_set *writefds, 
+           fd_set *exceptfds, 
+           struct timeval *timeout);
+```
+
+| 参数        | 含义                                                         |
+| ----------- | ------------------------------------------------------------ |
+| `nfds`      | 待监控的**最大文件描述符 + 1**（必须填，内核遍历效率要求）   |
+| `readfds`   | 读事件集合：监控这些 fd**是否有数据可读**（最常用）          |
+| `writefds`  | 写事件集合：监控这些 fd**是否可写**                          |
+| `exceptfds` | 异常事件集合：监控 fd 是否发生异常                           |
+| `timeout`   | 超时时间：- `NULL`：永久阻塞- `{0,0}`：非阻塞，立即返回- 赋值：定时阻塞，超时返回 |
+
+fd_set 是文件描述符集合，必须用以下宏操作，不能直接赋值：
+``` c
+// 清空整个fd集合
+void FD_ZERO(fd_set *set);
+
+// 将fd添加到集合中
+void FD_SET(int fd, fd_set *set);
+
+// 将fd从集合中移除
+void FD_CLR(int fd, fd_set *set);
+
+// 判断fd是否在集合中（是否就绪）
+int FD_ISSET(int fd, fd_set *set);
+```
 
 
 
@@ -1508,43 +1558,148 @@ echo 1 > /sys/class/gpio/gpio52/value
 
 ## TTY体系
 
-​	TTY的核心是：为用户的**交互式输入/输出**提供一个统一的、分层的抽象模型，是应用程序与交互式设备之间的桥梁。TTY在底层**整合了**不同的输入途径（如 input 子系统管理的键盘、直接操作 UART 硬件的串口）和输出途径（如显卡驱动、串口），然后向上一层，将其抽象成一个统一的双向“TTY设备文件”，供上层的Shell和应用进程读写。它隐藏了底层硬件（如 UART）或虚拟接口的差异，向上提供标准化的操作方式（读 / 写文件、配置参数），是 Linux 中串口通信、终端交互的基础。
-
-​	Linux 的核心思想是 “一切皆文件”，TTY 体系也遵循这一原则：**每个 TTY 设备都对应一个 “设备文件”，位于`/dev/`目录下**。应用程序无需直接操作硬件（如 UART 的寄存器），只需通过标准的文件操作（`open()`打开、`read()`读、`write()`写、`ioctl()`配置参数）操作这些设备文件，**系统内核会自动将文件操作转换为对硬件 / 虚拟设备的指令**。
+### 终端
 
 <img src="Linux开发/终端.png" alt="终端" style="zoom:50%;" />
 
-### 分层设计
+​	**物理终端**是最原始的终端形式，指的是 实际的硬件设备 ：早期：电传打字机 (Teletype, TTY)，后来：显示器 + 键盘组合的终端设备
+在现代个人电脑上，物理终端就是直接的显示器和键盘 ，没有经过软件虚拟化层。
 
-在现代 Linux 中，硬件和应用程序之间不是单层映射，而是**像千层饼一样层层递进的**。
+​	**虚拟终端**是 Linux 内核提供的软件模拟的终端 ，可以在一个物理显示器上运行多个独立的命令行会话，Ctrl + Alt + F1 ~ F6 切换到虚拟终端 1-6 (纯文本模式)；Ctrl + Alt + F7 切换回图形界面 (X11/Wayland)；
+
+​	图形界面下`Ctrl+Alt+T`打开的是**用户态的图形应用**，它本身不是内核管理的 TTY 设备 —— 如果没有**伪终端**，`shell`就找不到 “可交互的终端载体”，因此伪终端是内核提供的 “主 - 从成对的软件设备”：
+
+- **主端**：由终端模拟器（ “一个可以输入输出的交互窗口”）控制，负责接收你在图形窗口里的输入、并显示`shell`的输出，是**应用程序**。
+- **从端**：关联`shell`，让`shell`以为自己在和真实的 TTY 设备交互，终端模拟器（图形应用）就能通过伪终端“伪装” 成`shell`能识别的 TTY 设备 。
+
+---
+
+### TTY
+
+​	是 Linux 中串口通信、终端交互的基础，“TTY”是 Linux 内核中的一个**字符设备文件**（它代表一个 双向字节流通道，用户空间通过标准的 `open/read/write/ioctl` 系统调用与 TTY 设备交互）；**终端依靠 TTY 子系统工作**，但 TTY 还可以连接非终端设备（比如 GPS 模块、蓝牙串口）。
+
+​	TTY的核心是：为用户的**交互式输入/输出**提供一个统一的、分层的抽象模型，是应用程序与交互式设备之间的桥梁。TTY在底层**整合**了不同的输入途径（如 input 子系统管理的键盘、直接操作 UART 硬件的串口）和输出途径（如显卡驱动、串口），然后向上一层，将其**抽象成一个统一的双向“TTY设备文件”**，供上层的Shell和应用进程读写。它隐藏了底层硬件（如 UART）或虚拟接口的差异，向上提供标准化的操作方式（读 / 写文件、配置参数）。
+
+TTY 子系统是一个**“插线板”**：
+
+- 插线板的**上面（TTY Core）**，插着各种应用程序（Shell、cat、vim），它们只管往孔里丢字节或抓字节。
+- 插线板的**中间（Line Discipline）**，是个智能滤网，负责帮你处理退格、回车、回显和发送 SIGINT 信号。
+- 插线板的**下面（TTY Driver）**，是一根可拔插的线，**这根线连着哪里，输入输出设备就是哪一个。**
 
 当我们说“键盘输入”，从硬件到应用程序，数据其实经历了一次“接力跑”：
 
-1. **第一棒：硬件驱动与 `input` 子系统（负责“采集”）**
-   当你按下键盘上的 'A' 键，USB 驱动捕捉到电信号，交给 `input` 子系统。`input` 子系统把这个动作翻译成一个标准的事件：“按键代码 30 被按下了”。
-   *此时，数据只是一个生硬的物理动作，毫无“文本”或“终端”的概念。*
-
-2. **第二棒：虚拟控制台驱动 VT（TTY 的底层驱动）**
-   Linux 内核中有一个模块叫 `VT`（Virtual Terminal）。它是 TTY 体系中最经典的一个底层驱动（对应 `/dev/tty1` 到 `/dev/tty6`）。
-   `VT` 模块向 `input` 子系统注册了一个监听器：**“请把所有的键盘按键事件都交给我一份！”**
-   
-3. **第三棒：TTY 线路规程与核心（负责“加工和包装”）**
-   `VT` 把收到的键盘按键转换成字符（比如把按键 30 转换成字符 'a'，如果同时按了 Shift 就转换成 'A'），然后送入 **TTY 线路规程**。
-   线路规程进行回显处理、Ctrl+C 拦截等操作后，交给 **TTY Core**。
-
-4. **终点：应用程序（Shell / 你的程序）**
-   应用程序通过 `read()` 读取 `/dev/tty1`，就拿到了处理好的字符。
-
-
-对于 Shell 或者 C 语言写的程序来说，它**根本不知道也不关心**底层有个 `input` 子系统在管理键盘的 USB 中断！
-在应用程序眼里：我打开了 `/dev/tty1`，我用 `read()` 从里面读出了键盘敲击的字符，我用 `write()` 把字符写回屏幕。**是 TTY 体系把“键盘（输入）”和“显示器（输出）”打包拼接在一起，伪装成了一个统一的双向通信设备。**
-
-*   如果底层是**串口**：TTY 底层驱动直接去读写 UART 芯片的寄存器。
-*   如果底层是**本机键盘和显示器**：TTY 底层驱动（VT模块）去向 `input` 子系统要按键，去向 `drm` (显卡子系统) 要画面。
-
-**无论底层怎么变，TTY 向上层应用提供的接口（`/dev/ttyX`，`read/write`）永远不变！**
+**第一棒：硬件驱动与 `input` 子系统（负责“采集”）**
+当你按下键盘上的 'A' 键，USB 驱动捕捉到电信号，交给 `input` 子系统。`input` 子系统把这个动作翻译成一个标准的事件：“按键代码 30 被按下了”。
+*此时，数据只是一个生硬的物理动作，毫无“文本”或“终端”的概念。*
 
 ---
+
+第一问：系统怎么知道插入键盘了？（设备发现与枚举）
+
+​	**硬件电气检测：**
+​	当你把 USB 键盘插入电脑主板的 USB 接口时，接口引脚上的电平（电压）会发生跳变。主板上的 **USB 控制器 (USB Host Controller)** 瞬间捕捉到了这	个电压变化。
+
+​	**触发硬件中断：**
+​	USB 控制器立刻通过主板总线，向 CPU 发送一个**硬件中断 (IRQ)**，打断 CPU 当前的工作，报告说：“我这边的端口有新设备连上来了！”
+
+​	**内核 USB 子系统接管（枚举阶段）：**
+​	Linux 内核的 USB 驱动响应中断。它开始和这个未知设备进行对话，这叫**枚举 (Enumeration)**：	
+
+​		内核问：“你是谁？叫什么名字？干什么用的？”
+
+​		键盘内的芯片回答（发送设备描述符）：“我是某厂商的设备，我的类型是 **HID (Human Interface Device, 人机交互设备)**，我是一个键盘。”
+
+​	**加载驱动与创建节点：**
+​		内核看到“HID 键盘”，就会立刻调用 `usbhid` 驱动程序来接管它。同时，内核的输入子系统 (Input Subsystem) 会在 `/dev/input/` 目录下为它动态		创建一个设备节点（比如 `/dev/input/event3`）。
+
+​	此时，系统已经确切知道了键盘的插入，并且准备好接收数据了。
+
+---
+
+第二问：怎么知道键盘进行了输入？（中断与输入子系统）
+
+键盘插入后，平时是不消耗 CPU 资源的，直到你按下了一个键（比如 `A` 键）。
+
+​		**硬件产生扫描码 (Scancode)：**
+​		按下 `A` 键，键盘内部电路闭合，微控制器生成一串代表物理位置的二进制数据，这叫**扫描码**。键盘通过 USB 线把扫描码发给主板。
+
+​		**再次触发硬件中断：**
+​		主板 USB 控制器收到数据，再次向 CPU 发送**中断**：“有输入数据来了！”
+
+​		**中断处理程序 (ISR) 拿数据：**
+​		CPU 暂停正在运行的程序，跳转到 Linux 内核对应的**中断处理函数**。内核把扫描码（比如 `0x1E`）从硬件寄存器里读出来。
+
+​		**翻译为标准键码 (Keycode)：**
+​		扫描码是硬件相关的（不同键盘可能不一样）。内核的键盘驱动查阅一张映射表，把硬件扫描码 `0x1E` 翻译成 Linux 通用的标准键码：`KEY_A`。
+
+​		**事件分发：**
+​		驱动把 `KEY_A` 加上时间戳、按下/抬起状态，打包成一个输入事件 (Input Event)，推送到 `/dev/input/event3` 这个设备中。
+
+---
+
+**第二棒：虚拟控制台驱动 VT（TTY 的底层驱动）**
+Linux 内核中有一个模块叫 `VT`（Virtual Terminal）。它是 TTY 体系中最经典的一个底层驱动（对应 `/dev/tty1` 到 `/dev/tty6`）。
+`VT` 模块向 `input` 子系统注册了一个监听器：**“请把所有的键盘按键事件都交给我一份！”**
+
+---
+
+​	第三问：怎么知道输入的内容要进入“这个” TTY 文件？（焦点与路由机制）
+
+​	这是最核心、也是最容易迷糊的地方。键盘产生的 `KEY_A` 只是一个全局的按键事件，**内核本身并不会凭空把按键塞进某个随机的 TTY 里。**系统如何路由这个	按键，完全取决于你当前处于**纯文本控制台模式**，还是**图形桌面模式**。我们分两种情况讲清楚：
+
+​	**情况 A：纯文本界面**（比如按 Ctrl+Alt+F1 进入的黑底白字界面）
+
+​		在这种模式下，路由是由**内核直接接管**的。
+
+​		**全局变量 `fg_console` (Foreground Console)：**
+​		内核里维护着一个全局变量，叫做“前台控制台”。因为你可以用 `Alt+F1` 到 `Alt+F6` 切换 6 个不同的 TTY (tty1 到 tty6)。系统必须知道当前哪个 TTY 显示		在屏幕上，谁就是“前台”。
+
+​		**键盘驱动的精准投放：**
+​		输入子系统收到 `KEY_A` 后，将其交给内核的 `kbd`（通用键盘处理）模块。`kbd` 模块会去检查那个全局变量 `fg_console`，发现当前活动的是 `tty1`。
+
+​		**塞入 TTY 缓冲区：**
+​		于是，内核直接调用 TTY 子系统的接口，把字符 `A` 塞进 `tty1` 对应的 `tty_struct` 内部的接收缓冲区（Flip Buffer）中。正在读取 `tty1` 的 Shell 进程		就被唤醒了。
+
+​	**情况 B：图形界面**（比如 Ubuntu 桌面，开着一个终端窗口，还在听歌）
+
+​		在这种模式下，内核**完全不负责**把按键交给 TTY。路由是由**桌面系统 (Display Server, 比如 X11 或 Wayland)** 负责的。
+
+​		**图形服务器霸占输入设备：**
+   	     当你进入图形桌面时，Wayland/X11 这个超级进程会独占打开 `/dev/input/event3`（键盘设备）。所以，内核只需把 `KEY_A` 交给图形服务器，内核的		任务就结束了。
+​		**谁有焦点 (Focus)？**
+   	     桌面系统自己维护着屏幕上几十个窗口的状态。它检查发现：当前鼠标点击过、处于**活动焦点 (Active Focus)** 的窗口，是一个叫 GNOME Terminal 的		软件。
+​		**转发给终端模拟器：**
+   	     桌面系统通过进程间通信（如 Wayland 协议），把 `KEY_A` 事件发送给 GNOME Terminal 这个应用程序。
+​		**终端模拟器写文件（关键步骤）：**
+   	     GNOME Terminal 收到 `A` 之后，它是怎么把字送给 Shell 的呢？
+   	     还记得我们上一条回答提到的 **伪终端 (PTY)** 吗？GNOME Terminal 在启动时，向系统申请了一对伪终端设备（自己拿着 `/dev/ptmx` 主端，分配给 		Shell `/dev/pts/0` 从端）。
+  	     **此时，GNOME Terminal 调用系统调用：`write(pty_master_fd, "A", 1)`**。
+​	**内核 TTY 子系统的流转：**
+   	内核收到对 PTY 主端的 `write` 请求，内核 TTY 子系统像导管一样，把 `A` 传递到对应的 PTY 从端（`/dev/pts/0`）的接收缓冲区。
+​	**Shell 收到数据：**
+  	 正在读取 `/dev/pts/0` 的 Bash 进程，终于拿到了你敲下的 `A`。
+
+---
+
+​	一句话总结全流程：
+
+​	**“谁在监听键盘，谁就负责分发；谁获得了焦点，谁就接收数据。”**
+
+*   **硬件层面：** 靠电平变化发现键盘，靠中断机制捕获按键。
+*   **黑框文本模式下：** 内核自己当大管家，看当前屏幕切到了哪个 TTY (1-6)，就直接把键码塞进那个 TTY 的底层缓冲区。
+*   **图形桌面模式下：** 内核当甩手掌柜，把按键全扔给桌面环境。桌面环境看哪个**窗口**有焦点，就发给哪个程序。如果这个程序是个终端软件，它会主动通过 `write()` 系统调用，把字符写进它对应的虚拟 TTY (pts) 文件里。
+
+---
+
+**第三棒：TTY 线路规程与核心（负责“加工和包装”）**
+`VT` 把收到的键盘按键转换成字符（比如把按键 30 转换成字符 'a'，如果同时按了 Shift 就转换成 'A'），然后送入 **TTY 线路规程**。
+线路规程进行回显处理、Ctrl+C 拦截等操作后，交给 **TTY Core**。
+
+**终点：应用程序（Shell / 你的程序）**
+应用程序通过 `read()` 读取 `/dev/tty1`，就拿到了处理好的字符。
+在应用程序眼里：我打开了 `/dev/tty1`，我用 `read()` 从里面读出了键盘敲击的字符，我用 `write()` 把字符写回屏幕。**是 TTY 体系把“键盘（输入）”和“显示器（输出）”打包拼接在一起，伪装成了一个统一的双向通信设备。**
+
+### shell
 
 `shell`进程需要通过 TTY 设备接收输入（比如键盘按键）、输出结果（比如命令执行反馈）；`shell`的交互规则（比如回车换行、控制字符解析）都是基于 TTY 子系统的约定。
 
@@ -1581,10 +1736,10 @@ a@cj:~$ tty # 显示当前用户当前正在使用的终端的名称
 #define NCCS 32
 struct termios {
     // 1. 控制标志字段
-    tcflag_t c_iflag;    // 输入模式标志 (Input mode flags)
-    tcflag_t c_oflag;    // 输出模式标志 (Output mode flags)
-    tcflag_t c_cflag;    // 控制模式标志 (Control mode flags)
-    tcflag_t c_lflag;    // 本地模式标志 (Local mode flags)：控制终端驱动程序的本地行为。
+    tcflag_t c_iflag;    // 输入模式标志 (接受数据时处理方式)
+    tcflag_t c_oflag;    // 输出模式标志 (发送数据时处理方式)
+    tcflag_t c_cflag;    // 控制模式标志 (硬件控制: 波特率、数据位、校验、流控 )
+    tcflag_t c_lflag;    // 本地模式标志 (本地模式: 回显、信号、规范/原始模式 )
     
     // 2. 线路规程和控制字符
     cc_t c_line;         // 线路规程 (Line discipline)
@@ -1671,24 +1826,26 @@ VTIME     // 读取超时时间（ms）
 ``` c
 // 控制函数："tc" = Terminal Control（终端控制）; attr" = Attributes（属性）
 int tcgetattr (int __fd, struct termios *__termios_p); // 获取终端属性
-
 int tcsetattr (int __fd, int __optional_actions, const struct termios *__termios_p);  // 设置属性
     					 // TCSANOW  立即生效（Now）
 						 // TCSADRAIN // 等待所有输出完成后再生效（Drain）
 						 // TCSAFLUSH // 等待输出完成，并清空输入缓冲区后再生效（Flush）
-		          
-    
+	
+
+
+// 清空串口的输入/输出缓冲区，在配置新参数前清除旧数据    
 int tcflush(int fd, int queue_selector); // TCIFLUSH：刷新输入队列（接收缓冲区），即丢弃尚未读取的数据。
 										 // TCOFLUSH：刷新输出队列（发送缓冲区），即丢弃尚未发送的数据。
 										 // TCIOFLUSH：同时刷新输入和输出队列。
 
-int tcdrain(int fd);       // 等待所有输出完成 - 确保数据全部发送完毕
+int tcdrain(int fd);  // 等待所有输出完成 - 确保数据全部发送完毕
+
 
 int cfsetispeed (struct termios *__termios_p, speed_t __speed);   // 设置输入波特率
 int cfsetospeed (struct termios *__termios_p, speed_t __speed);   // 设置输出波特率
 ```
 
-### 示例程序
+### A100 IMU
 
 #### 定义串口类
 
@@ -1732,18 +1889,16 @@ private:
 }
 ```
 
-
-
-#### 打开与配置串口
+#### 打开并配置串口属性
 
 `O_NOCTTY (NO Controlling Terminal)` → 不成为控制终端，Linux/Unix 系统中，**串口属于「终端设备（tty）」**。
 
 系统有一个默认规则：**打开一个 tty 设备时，会自动把这个设备设为当前进程的「控制终端」**。不加的严重后果：
 
-- 进程会**绑定串口**：如果串口断开、拔线，系统会发送 `SIGHUP` 信号，**直接杀死你的进程**；
+- 进程会**绑定串口**：如果串口断开、拔线，系统会发送 `SIGHUP` 信号，直接杀死你的进程；
 - 键盘输入会干扰串口程序，导致程序异常。
 
-✅ 强制告诉系统：**我只是用串口收发数据，不要把它当成进程的控制终端！**彻底杜绝进程被意外杀死、信号干扰的问题。
+✅ 强制告诉系统：我只是用串口收发数据，不要把它当成进程的控制终端！彻底杜绝进程被意外杀死、信号干扰的问题。
 
 ---
 
@@ -1759,6 +1914,10 @@ private:
 - `read`：没数据 → 直接返回 `-1`，**不卡死程序**；
 - `write`：缓冲区满 → 直接返回，**不等待**；
 - 程序可以一边轮询串口，一边处理其他逻辑（比如界面、传感器、循环任务）。
+
+---
+
+tcflush 用于清空串口缓冲区。在这段代码中使用 TCIOFLUSH 是因为：在重新配置串口参数之前，可能有一些用旧配置接收的残留数据，如果不清理掉，read() 可能会读到这些脏数据，导致 IMU 数据解析出错。"
 
 ``` c++
 bool SerialPort::open(const std::string& device, int baudrate) {
@@ -1834,161 +1993,177 @@ void SerialPort::close() {
         std::cout << "[HARDWARE] Serial port closed" << std::endl;
     }
 }
+
+
+bool SerialPort::is_open() const {
+    return fd_ >= 0;
+}
 ```
-#### 写入与读取
+#### 读取与写入
 ``` c
-/**
- * 写入数据到串口
- * @param serial 串口结构体
- * @param data 要写入的数据
- * @param len 数据长度
- * @return 实际写入的字节数
- */
-int serial_write(serial_port_t *serial, const unsigned char *data, size_t len) {  // 使用系统调用write即可
-    if (!serial || serial->fd < 0) return -1;
-    
-    ssize_t written = write(serial->fd, data, len);
-    if (written < 0) {
-        perror("串口写入失败");
+int SerialPort::read(uint8_t* buffer, int max_len) {
+    if (fd_ < 0 || buffer == nullptr) {
         return -1;
     }
     
-    // 确保数据完全发送
-    tcdrain(serial->fd);
-    return written;
-}
-
-/**
- * 从串口读取数据（阻塞方式）
- * @param serial 串口结构体
- * @param buffer 接收缓冲区
- * @param max_len 缓冲区最大长度
- * @param timeout_ms 超时时间（毫秒）
- * @return 实际读取的字节数
- */
-int serial_read(serial_port_t *serial, unsigned char *buffer, size_t max_len, int timeout_ms) {
-    if (!serial || serial->fd < 0) return -1;
-    
     fd_set read_fds;
-    struct timeval tv;
+    struct timeval timeout;
     
     FD_ZERO(&read_fds);
-    FD_SET(serial->fd, &read_fds);
+    FD_SET(fd_, &read_fds);
     
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 10000;
     
-    // 使用select实现超时读取
-    int ret = select(serial->fd + 1, &read_fds, NULL, NULL, &tv);
+    int ret = select(fd_ + 1, &read_fds, nullptr, nullptr, &timeout);
     if (ret < 0) {
-        perror("select错误");
+        if (errno == EINTR) {
+            return 0;
+        }
+        std::cerr << "[HARDWARE ERROR] select failed: " << strerror(errno) << std::endl;
         return -1;
-    } else if (ret == 0) {
-        // 超时
+    }
+    
+    if (ret == 0) {
         return 0;
     }
     
-    // 有数据可读
-    if (FD_ISSET(serial->fd, &read_fds)) {
-        ssize_t bytes = read(serial->fd, buffer, max_len);
-        if (bytes < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                perror("串口读取失败");
-            }
-            return -1;
+    int bytes_read = ::read(fd_, buffer, max_len);
+    if (bytes_read < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
         }
-        return bytes;
+        std::cerr << "[HARDWARE ERROR] read failed: " << strerror(errno) << std::endl;
+        return -1;
     }
     
-    return 0;
+    return bytes_read;
 }
 
-/**
- * 关闭串口并恢复原始设置
- * @param serial 串口结构体
- */
-void serial_close(serial_port_t *serial) {
-    if (!serial) return;
-    
-    if (serial->fd >= 0) {
-        // 恢复原始设置
-        tcsetattr(serial->fd, TCSANOW, &serial->old_options);
-        // 清空缓冲区
-        tcflush(serial->fd, TCIOFLUSH);
-        // 关闭文件描述符
-        close(serial->fd);
+
+int SerialPort::write(const uint8_t* data, int len) {
+    if (fd_ < 0 || data == nullptr) {
+        return -1;
     }
     
-    free(serial);
-    printf("串口已关闭\n");
+    int bytes_written = ::write(fd_, data, len);
+    if (bytes_written < 0) {
+        std::cerr << "[HARDWARE ERROR] write failed: " << strerror(errno) << std::endl;
+        return -1;
+    }
+    
+    tcdrain(fd_);
+    return bytes_written;
 }
 
-```
-#### 测试函数
-```c
-// 测试函数
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("用法: %s <串口设备>\n", argv[0]);
-        printf("示例: %s /dev/ttyUSB0\n", argv[0]);
-        return 1;
+
+bool SerialPort::set_baudrate(int baudrate) {
+    if (fd_ < 0) {
+        return false;
     }
     
-    // 1. 打开串口
-    serial_port_t *serial = serial_open(argv[1], 115200);
-    if (!serial) {
-        return 1;
+    cfsetispeed(&newtio_, baudrate_to_constant(baudrate));
+    cfsetospeed(&newtio_, baudrate_to_constant(baudrate));
+    
+    if (tcsetattr(fd_, TCSANOW, &newtio_) != 0) {
+        std::cerr << "[HARDWARE ERROR] tcsetattr failed: " << strerror(errno) << std::endl;
+        return false;
     }
     
-    // 2. 测试写入
-    printf("测试: 发送 'AT\\r\\n' 到串口...\n");
-    const char *test_cmd = "AT\r\n";
-    int written = serial_write(serial, (unsigned char*)test_cmd, strlen(test_cmd));
-    printf("发送了 %d 字节\n", written);
-    
-    // 3. 测试读取
-    printf("等待响应(超时3秒)...\n");
-    unsigned char buffer[256];
-    memset(buffer, 0, sizeof(buffer));
-    
-    int total_bytes = 0;
-    for (int i = 0; i < 10; i++) {
-        int bytes = serial_read(serial, buffer + total_bytes, 
-                               sizeof(buffer) - total_bytes - 1, 300);
-        if (bytes > 0) {
-            total_bytes += bytes;
-            printf("收到 %d 字节\n", bytes);
-            
-            // 如果收到完整响应，提前退出
-            if (strstr((char*)buffer, "OK") || strstr((char*)buffer, "ERROR")) {
-                break;
-            }
-        } else if (bytes == 0) {
-            printf("读取超时\n");
-            break;
-        } else {
-            break;
-        }
+    baudrate_ = baudrate;
+    return true;
+}
+
+
+void SerialPort::flush() {
+    if (fd_ >= 0) {
+        tcflush(fd_, TCIOFLUSH);
     }
-    
-    if (total_bytes > 0) {
-        buffer[total_bytes] = '\0';
-        printf("收到数据: %s\n", buffer);
-        
-        // 十六进制显示
-        printf("十六进制: ");
-        for (int i = 0; i < total_bytes; i++) {
-            printf("%02X ", buffer[i]);
-        }
-        printf("\n");
-    }
-    
-    // 4. 关闭串口
-    serial_close(serial);
-    
-    return 0;
 }
 ```
+### 总结
+
+维度一：避开“隐形地雷”——精准的 TTY 状态配置（Raw Mode 的本质）
+因为你懂了 TTY 中间有一层叫 **“线路规程 (Line Discipline)”** 的东西，你知道它是处理字符的，IMU 发送的是**二进制传感器数据**，里面很可能包含 0x03（在 ASCII 中是 Ctrl+C）、0x0A（换行符）。
+
+如果不把 TTY 设置为**绝对的原始模式 (Raw Mode)**，内核的线路规程就会自作主张：把 0x03 拦截下来当成中断信号（导致你的程序莫名其妙被杀掉），或者把 0x0A 替换成 0x0D 0x0A，导致你的 IMU 数据包校验和 (CRC) 永远对不上！
+
+**面试话术：**
+
+> “在处理 IMU 串口通信时，我深入研究了 Linux TTY 子系统架构。为了防止内核的 N_TTY 线路规程对二进制传感数据的转义（如回显、特殊控制字符捕获），我通过 cfmakeraw() 和修改 c_lflag 等标志位，彻底旁路了线路规程的加工机制，确保应用层拿到的是纯净、无损的字节流。很多新手遇到 IMU 数据丢包或 CRC 校验失败，其实根源都在于没有理解 TTY 的工作模式。”
+
+------
+
+
+
+维度二：系统级性能调优——理解阻塞与缓冲区
+
+**普通学生：** 写一个 while(1) { read(fd, buf, 100); }，读不到数据就一直卡着。
+**你的深度：**
+你了解 TTY 的底层是有一层缓冲区（Flip Buffer）的。IMU 的频率很高（比如 400Hz），如何高效读取而不占用过多 CPU，同时不增加延迟？
+你需要深度理解 termios 里的 VMIN 和 VTIME 机制。
+
+- **VMIN=0, VTIME=0：** 非阻塞轮询（极其消耗 CPU，企业开发绝对禁止）。
+- **VMIN>0, VTIME>0：** 企业级常用的组包读取。比如 IMU 一帧数据是 32 字节。你可以设置 VMIN=32。内核 TTY 驱动收到数据后，不到 32 字节**不会唤醒**你的应用层进程，这极大减少了从内核态到用户态的上下文切换次数（Context Switch），降低了系统负载。
+
+**面试话术：**
+
+> “IMU 的数据具有高频且定长的特性。我没有使用简单的非阻塞轮询，而是结合 TTY 驱动底层的唤醒机制，通过精确调优 VMIN 和 VTIME 参数，让内核 TTY 子系统帮我做第一层的‘数据聚合’。只有当完整的一帧数据到达缓冲区时，才触发系统调用唤醒读线程。这使得我的串口接收模块在保证实时性的同时，将 CPU 占用率降到了最低。”
+
+------
+
+
+
+维度三：高并发与异步架构——结合 I/O 多路复用
+
+**普通学生：** 串口收数据就专门开一个死循环线程。如果以后加了 GPS 串口、雷达网口，就再开一堆线程。
+**你的深度：**
+既然串口 /dev/ttyS0 也是一个文件描述符 (FD)，它完全可以和网络 Socket、Eventfd 统一管理。
+
+- 使用 epoll 或 select 来监听 TTY 文件的可读事件。
+- 结合 **Ring Buffer (环形缓冲区)**：在单线程中用 epoll 监听到 TTY 有数据，立刻 read 出来塞进 Ring Buffer，然后继续去监听其他设备。另一个专门的数据处理线程从 Ring Buffer 取出数据进行解包和卡尔曼滤波计算。这种**“I/O 与 计算解耦”**是典型的企业级架构。
+
+**面试话术：**
+
+> “我将 TTY 串口读取模块设计为异步事件驱动架构。因为串口在 Linux 中也是标准的字符设备 FD，我利用 epoll 将 IMU 串口、控制端 TCP Socket 统一放入事件循环中管理。同时引入了无锁环形缓冲区(Lock-free Ring Buffer)，解决了底层 TTY 高频接收与上层姿态解算算法处理速度不匹配的生产-消费问题。”
+
+------
+
+
+
+维度四：排障与调试能力（Debug 能力是高级工程师的试金石）
+
+**普通学生：** 串口读不到数据，只会重启程序、拔插排线。
+**你的深度：**
+你知道数据流向是：硬件 -> 中断 -> TTY Buffer -> VFS -> 应用程序。排错也要一层一层剥开。
+
+1. **硬件层：** 用示波器看引脚波形。
+2. **驱动层：** 运行 dmesg | grep tty。如果看到 ttyS0: input overrun，你就知道是 CPU 负载太高，内核 TTY Flip Buffer 溢出了，数据在内核态就丢了，应用层怎么改代码都没用。
+3. **VFS 层：** 发现无法打开 /dev/ttyUSB0。你会用 lsof /dev/ttyUSB0 或 fuser 去查是不是 ModemManager 或者其他无头进程占用了 TTY 设备。
+4. **不写代码看数据：** 你知道如何使用 Linux 原生工具链排障。通过命令 stty -F /dev/ttyUSB0 raw speed 115200 配置终端，然后直接用 cat /dev/ttyUSB0 | hexdump -C 就能在终端里验证底层硬件有没有发数据过来。
+
+**面试话术：**
+
+> “在开发过程中，我不仅关注应用层代码，更注重构建完整的 Linux 系统级排障链路。遇到数据异常时，我会通过 dmesg 排查底层的 overrun 溢出，使用 lsof 排查 TTY 占用，利用 stty 和 hexdump 甩开自己写的代码，直接验证底层链路。这种定位问题的思维，帮助我在项目中快速隔离了硬件层、内核驱动层和应用层的 Bug。”
+
+------
+
+
+
+（加分项/绝杀技）：如果你想秀出极限深度
+
+你可以和面试官探讨 **“自定义内核线路规程 (Custom Line Discipline)”** 的思路，哪怕你没时间实现它。
+
+> “面试官，关于 IMU 数据接收，我还思考过一种极限优化的方案。目前我们是通过 read() 把字节流拉到用户空间，再拼装寻找帧头（比如 0x55）和校验 CRC。
+> 既然 Linux TTY 架构中间有一个灵活的线路规程（Line Discipline）层，我们完全可以编写一个自己的内核模块，注册一个新的线路规程（代替 N_TTY）。让内核直接在底层缓冲区里寻找 0x55 帧头，做 CRC 校验。只有校验通过的完整一帧 IMU 数据，才通过内核上报给应用层。应用层连解包都不用做了，直接 read() 出来就是一个结构体。这对于资源受限、要求极低延迟的嵌入式系统来说，是性能最优解。”
+
+**总结：**
+不要在简历上写“熟练使用 termios 库读取串口”。
+改成：**“基于 Linux TTY 子系统特性，设计并实现高吞吐、低延迟的 IMU 数据采集管道，通过旁路线路规程与精准调优 I/O 参数，解决了高频二进制数据的丢包与粘包问题，并结合 epoll 构建了高并发传感器数据融合框架。”**
+
+这，就是秋招拿 SSP (Super Special Offer) 的底气。
+
+![串口问题_1](./assets/串口问题_1.png)
 
 ## 驱动开发
 

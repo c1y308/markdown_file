@@ -152,51 +152,54 @@ const char *px;
 
 # 4. 函数指针
 
-- **本质**：**一个指针变量**，该指针**指向函数**（存储函数的入口地址，因此可以用来进行**软重启**）。
+**本质**：**一个指针变量**，该指针**指向函数**（存储函数的入口地址，因此可以用来进行**软重启**）。
 
-- **语法**：
-  `返回类型 (*指针变量名)  (参数列表);`
-  **关键**：`*` 必须用括号 `()` 括起来，表示 "这是一个指向函数的指针"。
+```c
+#include <stdio.h>
 
-- 作用：
+// 定义普通函数
+int add(int a, int b) { return a + b; }
+int sub(int a, int b) { return a - b; }
 
-  - 实现回调函数（如 GUI 事件处理）
-  - 创建函数表（如状态机）
-  - 提高代码灵活性（运行时动态绑定函数）
-
-  ```c
-  #include <stdio.h>
-  
-  // 定义普通函数
-  int add(int a, int b) { return a + b; }
-  int sub(int a, int b) { return a - b; }
-  
-  int main() {
-      // 声明函数指针：指向返回int、接受两个int参数的函数
-      int (*func_ptr) (int, int); 
-      
-      // 赋值：指向add函数（函数名即地址）
-      func_ptr = add; 
-      
-      // 通过指针调用函数（两种等价写法）
-      printf("Result: %d\n", (*func_ptr)(3, 4)); // 写法1：显式解引用
-      printf("Result: %d\n", func_ptr(3, 4));     // 写法2：编译器自动解引用
-      
-      // 切换指向其他函数
-      func_ptr = sub;
-      printf("Result: %d\n", func_ptr(5, 2));     // 输出 3
-  }
-  ```
+int main() {
+    // 声明函数指针：指向返回int、接受两个int参数的函数
+    int (*func_ptr) (int, int); 
+    
+    // 赋值：指向add函数（函数名即地址）
+    func_ptr = add; 
+    
+    // 通过指针调用函数（两种等价写法）
+    printf("Result: %d\n", (*func_ptr)(3, 4)); // 写法1：显式解引用
+    printf("Result: %d\n", func_ptr(3, 4));     // 写法2：编译器自动解引用
+    
+    // 切换指向其他函数
+    func_ptr = sub;
+    printf("Result: %d\n", func_ptr(5, 2));     // 输出 3
+}
+```
 
 ``` c
 // 定义了一个函数指针变量 TaskFunction_t
 void (* TaskFunction_t)( void * arg );
-、
   
+
 // 定义一个类型别名TaskFunction_t
 typedef void (* TaskFunction_t)( void * arg );
 // 声明3个同类型指针，写法和int a,b,c;一样简单
 TaskFunction_t task1, task2, task3;
+```
+
+c++：`std::function<返回值类型(参数类型列表)> 变量名`;
+
+``` c++
+// 存储一个返回 int、接受两个 int 参数的函数
+std::function<int(int, int)> my_func;
+// 存储一个返回 void、接受一个 const IMUData_t& 参数的函数
+std::function<void(const IMUData_t&)> callback;
+
+
+using IMUCallback_t = std::function<void(const IMUData_t&)>;
+void set_imu_callback(IMUCallback_t callback) { imu_callback_ = callback; }
 ```
 
 
