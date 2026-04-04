@@ -88,6 +88,7 @@ git checkout test.c // 直接将工作区的文件回滚到上一版本
 # 链接到远程仓库（git会自动执行）
 git remote add origin git@gitee.com:cjysdl1/quard-star.git
 
+git remote set-url origin git@github.com:yourname/new-repo-name.git
 # 将本地分支推送到远程的 origin 仓库。
 git push -u origin 本地分支名
 # 之后只需使用：

@@ -276,8 +276,6 @@ sudo make install
 
 安装后，头文件默认路径为 `/opt/etherlab/include`，库文件为 `/opt/etherlab/lib`。
 
-
-
 ``` shell
 ethercat slaves -v
 ```
@@ -291,6 +289,236 @@ ethercat slaves -v
 ---
 
 <video src="./assets/电机测试.mp4"></video>
+
+# 脉塔电机
+
+## 代码框架
+
+### 架构
+
+``` c
+            ┌─────────────────────────────────────────────────────────────────┐
+            │                        用户应用层（非实时）                       │
+            │   - 业务逻辑、监控、日志、网络通信                                │
+            │   - 通过 send_command() 发送异步指令                             │
+            │   - 通过 get_status() 获取电机状态                               │
+            └───────────────────────────┬─────────────────────────────────────┘
+                                        │ ThreadSafeQueue（线程安全队列）
+                                        ▼
+            ┌─────────────────────────────────────────────────────────────────┐
+            │                    实时控制线程（SCHED_FIFO, 1ms 周期）           │
+            │  ┌──────────────────────────────────────────────────────────┐   │
+            │  │ while(running_) {                                        │   │
+            │  │   process_commands();   // 处理用户指令                   │   │
+            │  │   update();             // PDO 收发 + 状态机              │   │
+            │  │   update_status();      // 发布状态快照                   │   │
+            │  │   clock_nanosleep();    // 精确周期控制                   │   │
+            │  │ }                                                        │   │
+            │  └──────────────────────────────────────────────────────────┘   │
+            └───────────────────────────┬─────────────────────────────────────┘
+                                        │ EtherCAT Adapter
+                                        ▼
+                                ┌───────────────┐
+                                │  EtherCAT 总线 │
+                                │  电机驱动器     │
+```
+
+| 改进点     | 实现方式                                  | 效果                     |
+| ---------- | ----------------------------------------- | ------------------------ |
+| 实时性保证 | 独立线程 + SCHED_FIFO 调度 + 绝对时间睡眠 | 控制周期抖动 < 100μs     |
+| 解耦设计   | 生产者 - 消费者模式，线程安全队列         | 用户逻辑与控制完全分离   |
+| 异步指令   | send_command () 非阻塞调用                | 用户无需关心控制周期     |
+| 状态发布   | 状态快照 + 回调机制                       | 支持监控、日志等扩展功能 |
+
+### 数据流图
+
+``` c
+用户线程                           实时控制线程
+   │                                    │
+   │  send_command()                    │
+   ├──────────────────────────────────► │ process_commands()
+   │     ThreadSafeQueue                │      │
+   │                                    │      ▼
+   │                                    │  update() ──► EtherCAT
+   │                                    │      │
+   │                                    │      ▼
+   │  get_status()                      │ update_status_snapshot()
+   │ ◄──────────────────────────────────┤      │
+   │     status_snapshot_               │      │
+   │     (mutex protected)              │      ▼
+   │                                    │  status_callback_()
+   │                                    │
+```
+
+### 执行流
+
+``` c
+用户调用 controller.start()
+           │
+           ▼
+    ┌──────────────────────────────────────────┐
+    │  start() 方法                            │
+    │  ├─ running_ = true                      │
+    │  ├─ std::thread(&MYACTUA::rt_thread_func, this)  ← 创建新线程
+    │  │                                       │
+    │  │   ┌───────────────────────────────────┼─────────────────────┐
+    │  │   │  新线程（实时控制线程）            │                     │
+    │  │   │                                   │                     │
+    │  │   │  rt_thread_func() {              │                     │
+    │  │   │    while (running_) {            │                     │
+    │  │   │      process_commands();         │  1ms 周期循环       │
+    │  │   │      update({});                 │                     │
+    │  │   │      update_status_snapshot();   │                     │
+    │  │   │      clock_nanosleep(...);       │                     │
+    │  │   │    }                             │                     │
+    │  │   │  }                               │                     │
+    │  │   └───────────────────────────────────┼─────────────────────┘
+    │  │                                       │
+    │  └─ pthread_setschedparam(...) ← 设置实时优先级
+    └──────────────────────────────────────────┘
+           │
+           ▼
+    start() 返回，用户线程继续执行
+    （实时线程在后台持续运行）
+```
+
+
+
+## 线程安全队列
+
+支持阻塞/非阻塞/超时三种模式，无锁设计不适用（指令需要可靠传递）
+
+``` c++
+#pragma once
+
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+
+namespace myactua {
+
+/* 线程安全队列 */
+template<typename T>
+class ThreadSafeQueue {
+public:
+    ThreadSafeQueue() = default;
+    ~ThreadSafeQueue() = default;
+
+    void push(const T& value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(value);
+        cond_.notify_one();
+    }
+
+    void push(T&& value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(std::move(value));
+        cond_.notify_one();
+    }
+
+    bool pop(T& value, int timeout_ms = -1) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (timeout_ms > 0) {
+            if (!cond_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                               [this] { return !queue_.empty(); })) {
+                return false;
+            }
+        } else if (timeout_ms == 0) {
+            if (queue_.empty()) {
+                return false;
+            }
+        } else {
+            cond_.wait(lock, [this] { return !queue_.empty(); });
+        }
+        value = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::queue<T> empty;
+        std::swap(queue_, empty);
+    }
+
+private:
+    mutable std::queue<T> queue_;
+    mutable std::mutex mutex_;
+    std::condition_variable cond_;
+};
+
+} // namespace myactua
+
+```
+
+## 模式切换实现
+
+``` c++
+/* 状态机切换电机控制模式 */
+void MYACTUA::handle_mode_switching(MotorState& motor)
+{
+    uint16_t sw = motor.rx.status_word;
+
+    switch (motor.mode_switch_step)
+    {
+        case ModeSwitchStep::IDLE:
+            motor.mode_switch_step = ModeSwitchStep::SET_MODE_CLEAR_DISABLE;
+            break;
+
+        case ModeSwitchStep::SET_MODE_CLEAR_DISABLE:
+            motor.tx.op_mode = motor.target_mode;
+            motor.tx.target_pos = motor.rx.pos;
+            motor.tx.target_vel = 0;
+            motor.tx.target_torque = 0;
+            motor.tx.control_word = CMD_SHUTDOWN;
+            motor.mode_switch_step = ModeSwitchStep::ENABLE;
+            break;
+
+        case ModeSwitchStep::ENABLE:
+            if (!is_switched_on(sw) && !is_operation_enabled(sw)) {
+                if (is_ready_to_switch_on(sw)) {
+                    motor.tx.control_word = CMD_SWITCH_ON;
+                    motor.mode_switch_step = ModeSwitchStep::OPERATING;
+                } else {
+                    motor.tx.control_word = CMD_SHUTDOWN;
+                }
+            } else
+                motor.tx.control_word = CMD_SHUTDOWN;
+            break;
+
+        case ModeSwitchStep::OPERATING:
+            if(is_switched_on(sw)){
+                if (is_operation_enabled(sw)) {
+                    motor.mode_switch_step = ModeSwitchStep::DONE;
+                } else {
+                    motor.tx.control_word = CMD_ENABLE_OPERATION;
+                }
+            }else
+                motor.tx.control_word = CMD_SWITCH_ON;
+            break;
+
+            case ModeSwitchStep::DONE:
+                if (motor.rx.op_mode == motor.target_mode) {
+                    motor.mode_switch_step = ModeSwitchStep::IDLE;
+                    motor.step = MotorStep::RUNNING;
+                }
+                break;
+    }
+}
+```
+
+
 
 # IMU
 
