@@ -172,7 +172,72 @@ git merge feature
 git push origin main
 ```
 
+## 合并仓库
 
+### 无本地仓库
+
+你的**电机主仓库**：`~/Myactua_Ethercat`
+
+你有 **IMU 远程仓库地址**（去你的代码托管平台：GitHub/Gitee/GitLab 复制克隆地址）
+
+目标：把远程 IMU 代码 → 电机仓库的 `/src/imu/a100` 文件夹
+
+---
+
+直接关联远程 IMU 仓库，合并代码，一步到位：
+
+``` shell
+# 1. 进入电机主仓库
+cd ~/Myactua_Ethercat
+
+# 2. 添加远程IMU仓库（取名 imu）
+git remote add imu 你的IMU远程仓库地址
+
+# 3. 拉取远程IMU的所有代码和提交历史
+git fetch imu
+
+# 4. ✅ 核心：将IMU代码(远程仓库) 直接合并(绑定)到 src/imu/a100 目录
+# 自动创建所有文件夹，无需手动新建！
+# 如果IMU分支是 master，把 main 改成 master
+git subtree add --prefix=src/imu/a100 imu main --squash
+
+# 5. 推送到远程电机仓库（保存合并结果）
+git push origin main
+```
+
+`fatal: working tree has modifications. Cannot add.` 的核心是：`git subtree add` 命令**强制要求工作区完全干净（无任何未提交的修改、无未跟踪文件）**。要么提交更改，要么放弃更改，要么使用`git stash`暂存所有未提交的修改。
+
+---
+
+想删除 IMU 远程关联（后续不用了）：
+
+``` shell
+git remote remove imu
+```
+
+**只更新imu代码：**
+
+✅ 不是普通的 `git pull imu`
+
+✅ 而是 **`git subtree pull`**（subtree 专属更新命令）:
+
+````shell
+git subtree pull --prefix=src/imu/a100_imu imu master --squash
+````
+
+- `--prefix=src/imu/a100_imu`：告诉 Git → **只更新这个绑定的文件夹**
+- `imu`：你关联的 IMU 远程仓库名
+- `master`：IMU 仓库的分支
+- `--squash`：把更新压缩成 1 条提交，保持日志干净
+
+执行后，会**自动把 IMU 远程仓库的最新代码，拉取并覆盖到 `src/imu/a100_imu` 文件夹里**。
+
+**推送imu代码：**
+
+``` shell
+# 反向推送：只把电机仓库里的imu代码 → 推回 IMU 远程仓库
+git subtree push --prefix=src/imu/a100_imu imu master
+```
 
 #  安装与初始化
 
