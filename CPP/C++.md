@@ -1,3 +1,123 @@
+# 关键词
+
+## `constexpr`
+
+`constexpr` 是 **C++11** 引入的核心关键词，意为 “常量表达式”（constant expression），用于**强制变量、函数或对象在编译期完成计算或初始化**，而非运行期。它是 C++ 实现 “编译期编程”（Compile-time Programming）的关键工具，核心目标是**提升性能**（将运行期计算移至编译期）和**增强类型安全**。
+
+---
+
+- **`const`**：表示 “只读”，值可以在**运行期**确定（如 `const int x = rand();` 合法）。
+- **`constexpr`**：表示 “编译期常量”，值必须在**编译期**就能计算出来（如 `constexpr int x = rand();` 非法，因为 `rand()` 是运行期函数）。
+
+简单来说：**`constexpr` 一定是 `const`，但 `const` 不一定是 `constexpr`**。
+
+---
+
+与define：核心差异体现在**类型安全、作用域、内存占用、调试性**等维度。以下是详细对比：
+
+ 1. 类型安全
+
+- **变量**：有明确的类型（如 `int`、`double`），编译器会进行**类型检查**，避免类型不匹配错误。
+- **`#define`**：是**预处理器的文本替换**，无类型概念，仅做字符串替换，容易引发隐式类型转换或逻辑错误。
+
+ 2. 作用域
+
+- **变量**：有严格的作用域（块级作用域、函数作用域、文件作用域等），可通过 `static`/ 命名空间限制访问范围。
+- **`#define`**：作用域是**从定义点到文件结束**，或通过 `#undef` 提前取消，无块级作用域，容易污染命名空间。
+
+ 3. 内存占用与符号
+
+- **变量**：（非优化情况下）会占用内存，有**内存地址**，可通过 `&` 取地址；`const`/`constexpr` 变量可能被优化为 “编译期常量”，但本质仍有类型和符号。
+- **`#define`**：仅做文本替换，**不占用内存**，无内存地址，也不会出现在符号表中。
+
+---
+`constexpr` 变量：必须用**常量表达式**初始化（即编译期能确定值的表达式，如字面量、其他 `constexpr` 变量 / 函数的返回值）。
+
+**`constexpr` 函数**：编译期可计算的函数：`constexpr` 函数的特点是：若传入的参数是常量表达式，则函数在编译期执行；若参数是运行期值，则退化为普通函数（C++14 及以后支持）。
+
+# 常用库
+
+## `<chrono>`
+
+`<chrono>` 是 C++11 引入的标准库头文件，提供了**类型安全、高精度**的时间处理功能，核心围绕 “时长”“时间点”“时钟” 三个概念设计，解决了传统 C 风格时间函数（如 `time()`、`clock()`）精度低、类型不安全的问题。
+
+### `duration`
+
+表示 “一段时间间隔”，如 3 秒、50 毫秒。定义为：
+
+``` c++
+template <class Rep, class Period = ratio<1>>
+class duration;
+
+// Rep：数值类型（如 int、double），存储时长的 “数量”。
+// Period：时间单位，用 std::ratio 表示（如 ratio<1> 是秒，ratio<1, 1000> 是毫秒）。
+```
+
+**预定义时长**（为方便使用，标准库定义了常用类型）：
+
+``` c++
+using nanoseconds  = duration<long long, nano>;   // 纳秒
+using microseconds = duration<long long, micro>;  // 微秒
+using milliseconds = duration<long long, milli>;  // 毫秒
+using seconds      = duration<long long>;          // 秒
+using minutes      = duration<int, ratio<60>>;     // 分钟
+using hours        = duration<int, ratio<3600>>;   // 小时
+```
+
+### `time_point`
+
+表示 “某个时钟下的具体时刻”，定义为：
+
+``` c++
+template <class Clock, class Duration = typename Clock::duration>
+class time_point;
+
+// Clock：关联的时钟类型（见下文）。
+// Duration：时间精度，默认为时钟的 native 精度。
+```
+
+### 时钟
+
+提供 “获取当前时间点” 的接口，标准库定义了三种时钟：
+
+| 时钟类型                | 特性                                                         | 适用场景                       |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------ |
+| `system_clock`          | 系统范围的实时时钟（可手动调整，如 NTP 同步），关联 Unix 时间戳。 | 获取日历时间、跨进程同步。     |
+| `steady_clock`          | 单调时钟（不可调整，时间点严格递增），精度通常高于 `system_clock`。 | 性能计时、测量时间间隔。       |
+| `high_resolution_clock` | 实现定义的 “最高精度时钟”（通常是 `system_clock` 或 `steady_clock` 的别名）。 | 高精度计时（需结合平台验证）。 |
+
+**典型用法：**
+
+``` c++
+#include <chrono>
+#include <iostream>
+
+void expensive_function() {
+    // 模拟耗时操作
+    for (volatile int i = 0; i < 100000000; ++i);
+}
+
+int main() {
+    // 1. 获取开始时间点
+    auto start = std::chrono::steady_clock::now();
+    
+    // 2. 执行待测量代码
+    expensive_function();
+    
+    // 3. 获取结束时间点，计算时长
+    auto end = std::chrono::steady_clock::now();
+    auto duration = end - start; // 类型为 steady_clock::duration（通常是纳秒级）
+    
+    // 4. 时长转换为毫秒输出
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+    std::cout << "耗时: " << ms.count() << " 毫秒\n";
+    
+    return 0;
+}
+```
+
+
+
 # 命名空间
 
 `namespace`（命名空间作用域）是 C++ 为解决命名冲突、规范化代码作用域设计的核心语法，它是**纯编译期特性**（运行时完全不存在），底层依靠编译器的**名字修饰（Name Mangling）** 实现唯一标识。
