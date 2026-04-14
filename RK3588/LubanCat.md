@@ -605,6 +605,75 @@ void MYACTUA::handle_mode_switching(MotorState& motor)
 }
 ```
 
+## DEBUG
+
+### 通信波动
+
+如果`STOP`状态一直保持，应停在`STEP=STOPPED, MODE_SWITCH_STEP=IDLE`。 这次“小概率异常”主要是因为`STOP`不是锁存态，会被运行期状态覆盖。
+
+1.`motors_test`只做了初始化，然后监控，没有再发控制命令 ；初始化里是“启动线程后，异步入队一次STOP” ；`STOP`执行时会把每个电机设成`STOPPED/IDLE`。
+
+2.但在每个控制周期里，只要`isConfigured==false`，代码会直接把`step`改成`IDLE`：
+
+ ```c++
+   /* 设置电机目标值 */
+   for (size_t i = 0; i < _motors.size(); i++)
+   {
+       if (!_adapter->isConfigured(_motors[i].slave_index)) {
+           _motors[i].step = MotorStep::IDLE;
+           continue;
+       }
+       double val = (i < setvalues.size()) ? setvalues[i] : _motors[i].setpoint;
+       process_single_motor(_motors[i], val);
+   }
+ ```
+
+3.`isConfigured`来自`online && operational`的1ms刷新，存在瞬时抖动可能一旦`STOPPED`被覆盖成`IDLE`，后续重新`configured`时就会重新进入使能/运行/模式切换流程，不再保证停在`STOPPED/IDLE`。
+
+所以现象本质上是：运行期从站状态瞬时波动 + 当前状态机覆盖策略，导致看到“偶发不在STOPPED/IDLE”。
+
+| 方案                                                    | 改动范围              | 效果（保持STOPPED/IDLE） | 风险/代价                       | 复杂度 |
+| :------------------------------------------------------ | :-------------------- | :----------------------- | :------------------------------ | :----- |
+| STOP锁存（推荐）                                        | MYACTUA状态机         | 高，最直接               | 需定义“谁来解锁”（通常RESTART） | 中     |
+| isConfigured去抖（如连续N周期才判离线）                 | EtherCAT适配层        | 中高，能降“小概率抖动”   | 离线检测变慢一点                | 中     |
+| 控制状态与通信状态解耦（掉线不改step，单独标comm_lost） | MYACTUA快照与打印逻辑 | 高，语义最清晰           | 需要调整监控显示/诊断习惯       | 中高   |
+| 上层motors_test周期性重发STOP心跳                       | 仅测试程序            | 中，见效快               | 治标不治本，命令冗余            | 低     |
+| 只优化实时环境（调度、CPU隔离、IRQ绑定）                | 部署层                | 中，减少触发概率         | 运维成本高，不保证根治          | 中高   |
+
+---
+
+**方案一：**通信波动通常不会导致“队列层面”的命令丢失，但会导致**执行层面的“等价丢失”**（尤其是轨迹点）。
+
+- 命令入队不会丢：`send_command -> ThreadSafeQueue::push` 是互斥队列，无主动丢弃逻辑。
+- 命令处理不依赖通信状态：实时线程每周期先`process_commands()`，把队列清空。
+- 但通信断时不下发PDO：`comm_ok=false`就跳过`process_single_motor`和`send`。
+
+按命令类型评估：
+
+- `STOP/RESTART/SET_MODE`：大多不会“永久丢失”，因为它们写入的是持久状态（`step/target_mode`），通信恢复后会继续生效。
+- `SET_SETPOINTS`：是“最后值覆盖”语义，断链期间的中间轨迹点会被后续值覆盖，恢复后只会执行最新 `setpoint`。
+
+高风险边界：
+
+- 若通信波动期间你执行`deinit`，`STOP`虽入队，但50ms后线程就停，可能来不及在链路恢复后发到从站。
+
+当前设计是**state-based / last-write-wins**，不是“每条命令必达且可确认”的transaction模型。对状态命令较稳，对高频轨迹命令会有时序丢点。
+
+**方案二**：`comm_ok`可以记录每个电机从站是否在线，如果此轮`update({})`中发现为离线状态，则进行不下发这`process_commands()`中的指令，在下轮周期再进行发送（**store-and-forward 重试**、语义上接近 **at-least-once（尽力不丢）**）。
+
+**优点**
+
+- 能吸收短时链路抖动，避免“一次离线就把这周期命令丢掉”。
+- 如果按FIFO延迟发送，可保持命令顺序。
+- 主站侧可实现，不一定要立刻改从站协议。
+
+**缺点**
+
+- 只能保证“最终发送”，不能保证“最终执行”，没有ACK就无法闭环确认。
+- 离线恢复后会积压回放，带来时延抖动和突发下发，并且长时间离线会导致队列增长，需要上限与丢弃策略。
+- 可能执行“过期命令”（比如轨迹点、旧姿态目标），有安全风险。
+- 若是全局门控，一个从站掉线会阻塞全部电机（头阻塞）。
+
 # IMU
 
 查看是否连接：

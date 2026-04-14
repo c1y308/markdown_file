@@ -260,3 +260,35 @@ else
 > 除此之外，我还注意到补丁对全系网卡驱动的 `_irq` 关中断操作进行了降级，并引入了 `migrate_disable` 来替代 `preempt_disable`，以及实现了定时器的 `ktimersd` 线程化。这些机制共同协作，才让我在后来的压力测试中，将抖动压制到了 50 微秒以内。”
 
 只要你能把这几段话流利地说出来，面试官大概率会在心里直接给你打个 **A+**。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+**版本A：简历（秋招）**
+1. 主导12轴 EtherCAT 电机控制链路可靠性优化（1 kHz 控制周期），定位并修复“`STOP` 命令提前判成功、`STEP` 异常进入 `RUNNING`”的状态机缺陷。  
+2. 设计并落地离散命令生命周期状态机（`QUEUED/APPLY_PENDING/VERIFYING/DONE/FAILED`），引入基于状态字的成功判定、重试节流、超时与重试上限机制，提升断链/抖动场景下命令执行确定性。  
+3. 保持连续 `set_points` 的 state-based / last-write-wins 语义，兼顾实时性与鲁棒性；补充 `comm_ok` 通信可观测性与运行模式可读化输出（`CSP/CSV/CST`），提升现场调试效率。  
+
+**版本B：组会汇报（周末）**
+
+1. 问题背景：在 `motors_test` 中，按预期发送了全局 `STOP`，但现场偶发看到 `STEP=RUNNING`，与“应停在 `STOPPED`”不一致。  
+2. 第一轮排查：确认控制链路为 `RobotInterface -> MYACTUA -> EtherCAT`，发现通信抖动时历史逻辑会覆盖控制状态，导致状态语义与通信状态耦合。  
+3. 第一版改进：将通信状态从控制状态中解耦，引入 `comm_ok`；离线时不再强制改写 `STEP`，只标记通信状态并暂停发送。  
+4. 第二轮问题：在“离散命令重试”初版中，存在“先判成功、后apply”的顺序缺陷。启动早期 `operation_enabled=0` 时，`STOP` 被提前判成功并出队，实际未进入 `STOPPED` 分支。  
+5. 最终方案：采用离散命令完整生命周期状态机。命令经历 `QUEUED -> APPLY_PENDING -> VERIFYING -> DONE/FAILED`，并增加 `deadline/max_retry`。只有先 apply，再通过状态字连续稳定满足判据，才算成功。  
+6. 判据策略：`STOP/RESTART/SET_MODE` 全部通过状态字与回传模式判定（并结合 fault/error_code），避免只依赖本地软件状态。  
+7. 实时语义取舍：离散命令按 at-least-once 思路做可靠化；连续 `SET_SETPOINTS` 保持 last-write-wins，避免轨迹堆积回放导致延迟。  
+8. 当前结果：构建已通过，控制语义更清晰，命令失败可显式化（超时/故障/重试超限）；下一步是做实机长时间压测与参数整定（重试周期、超时、稳定窗口）。
