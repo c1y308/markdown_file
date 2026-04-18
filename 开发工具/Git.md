@@ -41,6 +41,8 @@ git checkout v1.0
 git checkout -b 新分支名
 ```
 
+---
+
 如果使用`git push origin HEAD:<远程分支名>`强行提交会导致灾难：把`master`指针指向commit B：
 
 ``` shell
@@ -51,7 +53,7 @@ A → B  C → D  (C、D 还在！但被 master 抛弃了)
 
 ✅ **commit C、D 没有被删除**（还存在于 Git 仓库里）
 
-❌ **远程 master 分支的历史里，再也看不到 C、D 了**：Git 的提交历史，是【单向向后追溯】的，不是正向看的！每个 commit **只记录自己的「父节点」（上一个提交），从不记录「子节点」（下一个提交）**分支指针指向谁，就**只从这个 commit 往回翻历史**，永远**不会往下找后续的 commit**。
+❌ **远程 master 分支的历史里，再也看不到 C、D 了**：Git 的提交历史，是【单向向后追溯】的，不是正向看的！每个 commit **只记录自己的「父节点」（上一个提交），从不记录「子节点」（下一个提交）**分支指针指向谁，就只从这个 commit 往回翻历史，永远不会往下找后续的 commit。
 
 别人拉取 master 代码，只能拿到 A→B，C、D 直接消失！
 
@@ -69,6 +71,10 @@ git merge temp_motor_id
 
 # 4. 正常推送到远程 main（标准推送，不会覆盖远程历史）
 git push origin main
+
+# 4.1 如果有冲突，解决之后：
+git commit -m "merge temp"
+
 
 # 5. （可选）删除临时分支
 git branch -d temp_motor_id

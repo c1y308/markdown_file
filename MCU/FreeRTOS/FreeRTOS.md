@@ -1,37 +1,52 @@
 **事件驱动（Event-Driven）+ 阻塞等待（Blocking）”**的架构。
 
-# 0. 中断
+# 中断
 
 注意区分**中断的抢占优先级**，和**任务优先级**。
 
-<img src="mdpic/优先级.png" alt="优先级" style="zoom:80%;" />
+<img src="assets/优先级.png" alt="优先级" style="zoom:80%;" />
 
 这里的`LIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`（对应 FreeRTOS 的`configMAX_SYSCALL_INTERRUPT_PRIORITY`）是**中断抢占优先级的阈值**，规则是：
 
-- 中断的**抢占优先级数值 ≥ 该阈值**时，归 FreeRTOS 管理，可安全调用 FreeRTOS 中断安全 API（如`xQueueSendFromISR`）；
-- 中断的**抢占优先级数值 ＜ 该阈值**时，不归 FreeRTOS 管理，不能调用 FreeRTOS API。
+- 中断的**抢占优先级数值 ≥   阈值**时，归 FreeRTOS 管理，可安全调用 FreeRTOS 中断安全 API（如`xQueueSendFromISR`）；
+- 中断的**抢占优先级数值 ＜ 阈值**时，不归 FreeRTOS 管理，不能调用 FreeRTOS API。
 
 因此，当`LIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5`时，**优先级 5 的中断归 FreeRTOS 管理**（因为 5 ≥ 5，满足条件）；而优先级 0~4（数值＜5）的中断不归 FreeRTOS 管理。
 
+# 启动OS
+    在**系统上电的时候第一个执行的是启动文件里面由汇编编写的复位函数Reset_Handler**，。复位函数的最后会**调用库函数__main，主要工作是初始化系统的堆和栈，最后调用 C 中的 main 函数，从而去到 C 的世界。**
+``` c
+Reset_Handler PROC
+EXPORT Reset_Handler [WEAK]
+IMPORT __main
+IMPORT SystemInit
+LDR R0, =SystemInit
+BLX R0 
+LDR R0, =__main
+BX R0
+ENDP
+```
+
 # 链表
 
-## 根节点与节点
+## 链表/节点
 
-根节点既是初始节点也是末节点，**根节点结构体内节点用结构体表示，还包含此链表的信息(有多少个节点，节点索引指针)。**
+根节点既是初始节点也是末节点，根节点结构体内节点用结构体表示，还包含此链表的信息(有多少个节点，节点索引指针)。
 
-注意链表结构体内的内容，主要记录**链表挂在了多少节点，节点索引**以及根节点三个信息。
+注意链表结构体内的内容，主要记录**链表挂在了多少节点，节点索引**以及**根节点**三个信息。
 
 ``` c
 typedef struct xLIST
 {
-    MiniListItem_t xListEnd;      // 链表根节点
-    ListItem_t* pxIndex;  		  // 节点索引指针，用于遍历链表（指向当前正在运行的任务）。初始化指向根节点
-    UBaseType_t uxNumberOfItems;  // 该链表下有多少个节点
+    MiniListItem_t xListEnd;      	// 链表根节点
+    ListItem_t    *pxIndex;  		// 节点索引指针，用于遍历链表（指向当前正在运行的任务）。初始化指向根节点
+    UBaseType_t    uxNumberOfItems; // 该链表下有多少个节点
 }List_t;
     
+
 typedef struct xLIST_ITEM
 {
-	TickType_t xItemValue;           // 赋值值，帮助链表排序
+	TickType_t xItemValue;           // 辅助值，帮助链表排序
 	struct xLIST_ITEM* pxNext;       // 结构体指针，指向链表上一个节点
 	struct xLIST_ITEM* pxPrevious;   // 结构体指针，指向链表下一个节点
     
@@ -40,7 +55,7 @@ typedef struct xLIST_ITEM
 	void* pvContainer; //该节点所在的链表 (链表节点初始化将其设为NULL)
 }ListItem_t;
 ```
-## 链表/节点的初始化
+## 初始化
 
 链表结构体主要包含此链表的信息：节点数(不包含根节点)；节点索引；根节点。
 
@@ -51,7 +66,8 @@ void vListInitialise(List_t* const pxList)
 	pxList->pxIndex = (listItem_t*) &pxList->xListEnd;  // 初始化索引指向链表的根节点
 	
 	pxList->xListEnd->xItemValue = portMAX_DELAY;  // 辅助排序值最大
-	pxList->xListEnd->pxNext = (listItem_t*) &pxList->xListEnd;    //指向自身
+    
+	pxList->xListEnd->pxNext = 	   (listItem_t*) &pxList->xListEnd;    //指向自身
 	pxList->xListEnd->pxPrevious = (listItem_t*) &pxList->xListEnd;//指向自身
 }
 
@@ -61,11 +77,11 @@ void vListInitialiseItem( ListItem_t * const pxItem )
     pxItem->pxContainer = NULL;
 }
 ```
-## 插入节点
+## 插入/删除
 
-节点的插入不会更新链表的`pxIndex`链表指针，初始化时默认指向根节点，运行过程中指向当前运行的任务节点，为动态根节点。
+节点的插入不会更新链表的`pxIndex`链表指针，初始化时默认指向根节点，**运行过程中指向当前运行的任务节点且为动态根节点**。
 
-只有将节点按照排序值插入时，`pxList->xlistEnd`才是原始的根节点。
+只有将节点按照排序值插入时，才把`pxList->xlistEnd`原始的根节点作为**静态根节点**。
 
 ``` c
 //将节点插入到链表尾部(将任务插入就绪列表)
@@ -82,6 +98,7 @@ void vListInsertEnd(List_t* const pxList, ListItem_t* const pxNewListItem)
     
 	pxlist->unxNumberOfItems++;
 }
+
 
 //将节点按照辅助排序顺序插入(将任务插入延时列表)
 void vListInsert(List* const pxList, ListItem_t* const pxNewListItem)
@@ -111,6 +128,7 @@ void vListInsert(List* const pxList, ListItem_t* const pxNewListItem)
     pxList->uxNumberOfItems++;
 }
 
+
 // 将链表节点从链表中移除
 UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 {
@@ -127,6 +145,9 @@ UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 }
 ```
 ## 其他操作
+
+**节点对应的TCB操作：**
+
 ``` c
 /* 初始化节点指向的 TCB */
 #define listSET_LIST_ITEM_OWNER( pxListItem, pxOwner )\
@@ -135,7 +156,11 @@ UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 /* 获取节点指向任务的TCB */
 #define listGET_LIST_ITEM_OWNER( pxListItem )\
 ( ( pxListItem )->pvOwner )
+```
 
+**节点的辅助排序值操作：**
+
+``` c
 /* 初始化节点排序辅助值 */
 #define listSET_LIST_ITEM_VALUE( pxListItem, xValue )\
 ( ( pxListItem )->xItemValue = ( xValue ) )
@@ -143,34 +168,39 @@ UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 /* 获取节点排序辅助值 */
 #define listGET_LIST_ITEM_VALUE( pxListItem )\
 ( ( pxListItem )->xItemValue )
+```
 
-/* 获取链表根节点的节点计数器的值 */
-#define listGET_ITEM_VALUE_OF_HEAD_ENTRY( pxList )\
-( ( ( pxList )->xListEnd ).pxNext->xItemValue )
+**获取和根节点相关信息：**
 
+``` c
 /* 获取链表的入口节点 */
 #define listGET_HEAD_ENTRY( pxList )\
 ( ( ( pxList )->xListEnd ).pxNext )
 
-/* 获取节点的下一个节点 */
-#define listGET_NEXT( pxListItem )\
-( ( pxListItem )->pxNext )
-
-/* 获取链表的最后一个节点 */
+/* 获取链表的静态最后（最前）节点 */
 #define listGET_END_MARKER( pxList )\
 ( ( ListItem_t const * ) ( &( ( pxList )->xListEnd ) ) )
 
-/* 判断链表是否为空 */
-#define listLIST_IS_EMPTY( pxList )\
-( ( BaseType_t ) ( ( pxList )->uxNumberOfItems == ( UBaseType_t ) 0 ) )
+/* 获取链表根节点的排序辅助值的值 */
+#define listGET_ITEM_VALUE_OF_HEAD_ENTRY( pxList )\
+( ( ( pxList )->xListEnd ).pxNext->xItemValue )
+```
 
-configASSERT( pxTasksWaitingForBits->xListEnd.pxNext!= (ListItem_t *) &(pxTasksWaitingForBits->xListEnd) );
+**获取链表记录的信息：**
 
-
+``` c
 /* 获取链表的节点数 */
 #define listCURRENT_LIST_LENGTH( pxList )\
 ( ( pxList )->uxNumberOfItems )
 
+/* 判断链表是否为空 */
+#define listLIST_IS_EMPTY( pxList )\
+( ( BaseType_t ) ( ( pxList )->uxNumberOfItems == ( UBaseType_t ) 0 ) )
+```
+
+**获取下一个需要执行任务对应的节点：**
+
+``` c
 /* 获取(当前pxIndex指向节点)的下一个节点的TCB  (遍历链表) */
 #define listGET_OWNER_OF_NEXT_ENTRY( pxTCB, pxList ) \
 { \
@@ -186,11 +216,12 @@ configASSERT( pxTasksWaitingForBits->xListEnd.pxNext!= (ListItem_t *) &(pxTasksW
     ( pxTCB ) = pxConstList->pxIndex->pvOwner; \
 }
 ```
-# 任务
+
+# 任务管理
 
 
 
-![任务切换](mdpic/任务切换.png)
+![任务切换](assets/任务切换.png)
 
 ## 栈
   栈是单片机**`RAM`**里面一段连续的内存空间，每个任务拥有各自独立的栈，这个栈空间通常是一个预先定义好的全局数组，也可以是动态分配的一段内存空间，但它们都存在于 `RAM` 中，基本单位为字(32位）。
@@ -709,7 +740,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
 M3 和 M4 的寄存器组一共有16个寄存器，其中`R0-R12`这13个寄存器是通用寄存器，`R13`是 SP 寄存器，`r14`是 LR 寄存器，`R15`是 PC 寄存器。
 
-<img src="mdpic/M3寄存器组.png" alt="M3寄存器组" style="zoom:50%;" />
+<img src="assets/M3寄存器组.png" alt="M3寄存器组" style="zoom:50%;" />
 
 - **通用寄存器**：**R0-R12**寄存器。
 
@@ -763,7 +794,7 @@ static StackType_t* pxInitialiseStack( StackType_t    *pxTopOfStack,
 
 将**任务的函数地址**以及**参数**存储以及**当前任务寄存器的值（寄存器组+程序状态寄存器xPSR组）**到任务栈中（R13 SP寄存器保存进任务的`TCB->pxtopofstack`）。初始化完成后的任务栈如下图所示：
 
-![初始化完成后的任务栈](mdpic/初始化完成后的任务栈.png)
+![初始化完成后的任务栈](assets/初始化完成后的任务栈.png)
 
 而外设寄存器如`UART,GPIO,TIMER,iic`等是由意法半导体公司分配的，通过**内存访问指令**（如 `LDR`, `STR`) 来读写特定的内存地址。每个外设寄存器都有一个在芯片**内存映射 (Memory Map)** 中独一无二的**绝对地址**。操作外设，本质上就是向这些地址读写数据。
 
@@ -1145,7 +1176,7 @@ BaseType_t xStartScheduler(void){
 
 调用厂商提供的`CMSIS`库中的函数来设置这些寄存器（`#include"stm32f4xx.h"`）或者通过访问映射的内存地址。
 
-![SCB寄存器](mdpic/SCB寄存器.png)
+![SCB寄存器](assets/SCB寄存器.png)
 
 在ARM架构中有两个堆栈指针：
 
@@ -1195,7 +1226,7 @@ CPSIE F ; // FAULTMASK=0 ;开异常
 
 `PRIMASK` 和 `FAULTMASK` 是 Cortex-M内核里面三个中断屏蔽寄存器中的两个，还有一个是 `BASEPRI`，有关这三个寄存器的详细用法如下：
 
-![内核中断屏蔽寄存器](mdpic/内核中断屏蔽寄存器.png)
+![内核中断屏蔽寄存器](assets/内核中断屏蔽寄存器.png)
 
 调用`taskYIELD()`将 `PendSV` 的悬起位置 1，当没有其它中断运行的时候响应` PendSV `中断，去执行我们写好的 `PendSV`中断服务函数，在里面实现任务切换。
 
@@ -1665,19 +1696,6 @@ portRECORD_READY_PRIORITY( uxPriority, uxTopReadyPriority )
 
 #endif /* configUSE_PORT_OPTIMISED_TASK_SELECTION */
 
-```
-# 启动OS
-​    在**系统上电的时候第一个执行的是启动文件里面由汇编编写的复位函数Reset_Handler**，。复位函数的最后会**调用库函数__main，主要工作是初始化系统的堆和栈，最后调用 C 中的 main 函数，从而去到 C 的世界。**
-``` c
-Reset_Handler PROC
-EXPORT Reset_Handler [WEAK]
-IMPORT __main
-IMPORT SystemInit
-LDR R0, =SystemInit
-BLX R0 
-LDR R0, =__main
-BX R0
-ENDP
 ```
 # 4. 消息队列
 ## 4.1 队列机制与控制块
