@@ -75,6 +75,264 @@ int main() {
 
 几乎所有企业 C++ 编码规范：**所有单参数构造函数，默认必须加 explicit**。
 
+## `const`与`mutable`
+
+关键词`const`多才多艺：
+
+- 面对**变量**：
+
+  - 既可以修饰**`namespace`**或类外部的**全局常量**；
+
+  - 也可以修饰在**文件、函数、区块作用域**中被声明为`static`的对象；
+
+  - 同样也可也修饰**`class`内部**的`static`和`non-static`**成员变量**；
+
+---
+
+- 面对**函数**（最具有威力）在一个函数声明式内`const`可以和函数返回值、参数、函数自身（如果是成员函数）产生关联：
+
+  - 修饰**返回值**：
+
+    - 场景一：按 **return by reference(pointer)** 时，保护类的内部状态，打破封装
+
+      这是现代 C++ 中最常见、也最重要的 `const` 返回值用法。当你想让外部读取类内部的一个大型对象（如 `std::string` 或 `std::vector`），为了提高性能你会选择**按引用返回**（避免拷贝）。但如果不加 `const`，外部就可以轻易修改类的内部数据，破坏了面向对象的封装性。
+
+      ``` c++
+      class Student {
+      private:
+          std::string name;
+      public:
+          Student(const std::string& n) : name(n) {}
+          
+          // 危险：返回了内部成员的普通引用
+          std::string& getName() { 
+              return name; 
+          }
+      };
+      
+      int main() {
+          Student student("Alice");
+          
+          // 灾难发生：外部不小心修改了 student 内部的名字！
+          student.getName() = "Bob"; 
+          
+          return 0;
+      }
+      ```
+
+      ---
+
+    - 场景二：按值返回自定义对象时，防止“无意义的赋值”导致的隐藏 bug.
+
+      这种用法在**自定义对象的操作符重载**中特别常见。假设我们自己实现了一个有理数类（`Rational`），并且重载了乘法操作符 `*`。如果程序员在写条件判断时，不小心把等于运算符 `==` 错写成了赋值运算符 `=`，会发生什么？
+
+      ``` c++
+      class Rational {
+          // ... 省略具体实现 ...
+      };
+      
+      // 返回一个普通的 Rational 对象
+      Rational operator*(const Rational& lhs, const Rational& rhs);
+      
+      int main() {
+          Rational a, b, c;
+          
+          // 程序员的本意是判断 a*b 是否等于 c： if (a * b == c)
+          // 但不小心漏打了一个 '='：
+          if (a * b = c) {  
+              // ...
+          }
+          return 0;
+      }
+      ```
+
+      在这个例子中，`a * b` 会产生一个临时的右值对象。如果不加 `const`，C++ 允许你对这个临时对象进行赋值操作（`a * b = c`）。这行代码**可以正常编译运行**，但它只是修改了一个马上就会被销毁的临时变量，不仅毫无意义，而且会导致 `if` 语句永远计算为 `true`（或者根据重载情况引发其他怪异行为），这种 bug 在庞大的代码库中极难排查。
+
+      虽然上面提到的按值返回 `const` 对象在 C++98 时代被奉为经典准则，但在 C++11 引入了**移动语义（Move Semantics）**之后，情况发生了变化：在现代 C++ 中，**极度不推荐按值返回 `const` 对象**。因为返回 `const` 对象会**阻止编译器使用移动构造函数或移动赋值运算符**。`const` 意味着不可修改，而“移动”本质上需要“窃取”（修改）右值内部的资源。如果返回值是 `const`，编译器就只能退化去调用昂贵的拷贝构造函数，从而拖慢程序性能，现在很多编译器已经可以进行警告⚠。
+
+      ---
+
+  - 修饰**参数**：
+
+    修饰参数没什么好说的，应该在必要使用它们的时候进行使用。
+
+    ---
+
+  - 修饰**函数自身（如果是成员函数）**：
+
+    在 C++ 中，在类的成员函数声明末尾加上 `const`（例如 `void print() const;`），被称为**常量成员函数**。它向编译器和代码的阅读者做出了一个极其重要的承诺：“这个函数绝对不会修改该对象（`this`指针的指向）内部的**任何成员变量**（非 `static` 变量，因为 `static` 修饰的不属于该对象）”。这在 C++ 的设计哲学中被称为 **“常量正确性（Const Correctness）”**。
+
+    ---
+
+    - 场景一：配合`pass by reference to const`，解决“只能看不能摸”的编译报错
+
+      这是 `const` 成员函数存在的最核心原因。在 C++ 中，为了避免对象拷贝带来性能损耗，我们通常会将对象通过**常量引用（`const ClassName&`）**传递给函数。一旦成员变量被 `const`修饰就变为常量对象，**编译器就规定：这个常量对象，只能调用被 `const` 修饰的成员函数**。如果调用了普通的非 `const` 函数，编译器会害怕那个函数悄悄修改了对象，从而破坏了 `const` 的承诺，发生编译器报错。
+
+      ``` c++
+      #include <iostream>
+      #include <string>
+      
+      class BankAccount {
+      private:
+          double balance;
+      public:
+          BankAccount(double b) : balance(b) {}
+      
+          // 逻辑上只是读取余额，但忘记加 const 修饰
+          double getBalance() { 
+              return balance; 
+          }
+      };
+      
+      // 审计函数：为了不拷贝账户对象，且保证不篡改数据，使用 const 引用传参
+      void auditAccount(const BankAccount& account) {
+          // 💥 编译报错！
+          // 错误信息类似：不能将 "this" 指针从 "const BankAccount" 转换为 "BankAccount &"
+          std::cout << "当前余额: " << account.getBalance() << std::endl; 
+      }
+      
+      int main() {
+          BankAccount myAccount(1000.0);
+          auditAccount(myAccount);
+          return 0;
+      }
+      ```
+
+      ---
+
+    - 场景二：逻辑常量 vs 物理常量（`mutable` 关键字的用武之地）
+
+      有时候我们会遇到一种很纠结的场景：从外部使用者的“逻辑”上看，调用这个函数并没有修改对象的状态，应该加上`const`；但在类内部的“物理”实现上，为了性能或记录，我们又确实需要修改某个隐藏变量。
+
+      举个例子：我们有一个计算特别耗时的数学对象。为了优化，我们想加一个“缓存（Cache）”。当第一次请求数据时，计算并存入缓存；后续请求直接返回缓存。
+
+      **矛盾点：** 获取数据的方法 `getData()` 在逻辑上绝对应该是个 `const` 函数（因为它不改变数学对象的本质）。但如果把它标记为 `const`，它内部就无法给缓存变量赋值了！解决方案：`const` 成员函数配合 `mutable` 关键字。
+
+      ``` c++
+      #include <iostream>
+      
+      class HeavyMathObject {
+      private:
+          int baseValue;
+          
+          // mutable 关键字：允许该变量即使在 const 成员函数中也能被修改！
+          mutable bool isCached;
+          mutable int cachedResult;
+      
+      public:
+          HeavyMathObject(int val) : baseValue(val), isCached(false), cachedResult(0) {}
+      
+          // 逻辑上，获取结果不会改变对象的外部状态，所以必须是 const
+          int getResult() const {
+              if (!isCached) {
+                  std::cout << "正在进行极其耗时的计算..." << std::endl;
+                  // 正常情况下 const 函数里不能修改成员变量
+                  // 但因为 isCached 和 cachedResult 被 mutable 修饰，这里被允许了！
+                  cachedResult = baseValue * baseValue * baseValue; // 假装很耗时
+                  isCached = true;
+              } else {
+                  std::cout << "直接返回缓存..." << std::endl;
+              }
+              return cachedResult;
+          }
+      };
+      
+      int main() {
+          // 即使对象是 const 的，也能完美运作
+          const HeavyMathObject obj(10);
+          
+          std::cout << obj.getResult() << std::endl; // 触发计算
+          std::cout << obj.getResult() << std::endl; // 直接返回缓存
+          
+          return 0;
+      }
+      ```
+
+      **解析：** 这个场景展示了 C++ 设计的精妙之处。`const` 成员函数不仅是对外的一份“契约”（我不改变状态），在内部实现遇到特殊情况时，C++ 也给了你 `mutable` 这样一个小后门，让你可以完美兼顾**“外部接口的常量安全性”**和**“内部实现的灵活性”**。
+
+      ---
+
+      物理常量性 vs 逻辑常量性
+
+      编译器是一个极其死板的机器，它只懂得**“物理常量性”**：
+
+      - **编译器的视角**：只要你在这个函数里修改了对象所在内存的哪怕一个比特（Bit）的数据，我就认为你改变了对象，我就不准你加 `const`。
+
+      但是，作为写代码的人类，我们关注的是**“逻辑常量性”**：
+
+      - **程序员的视角**：从外部调用者的角度看，调用这个函数之后，对象的**业务逻辑状态和外部表现**有没有发生变化？如果没有，那它在逻辑上就是 `const` 的。
+      
+      `mutable` 的出现，**绝不仅仅是为了自洽或打补丁，而是为了在“死板的编译器”和“灵活的业务逻辑”之间搭建一座桥梁。** 它的真正含义是告诉编译器：“这个变量不属于对象的逻辑状态（它是底层的脏活累活/基础设施），请你对它网开一面。”
+      
+      ---
+      
+      既然改了值，为什么还要硬声明为 `const`？
+      
+      因为 `const` 是一份**对外的契约**，而不是**对内的枷锁**。
+      
+      假设你写了一个类库给别人用，如果你的获取数据函数 `getData()` 没有加 `const`，会导致一个致命的连锁反应：
+      
+      1. 别人无法将你的对象作为 `const Type&` 传参。
+      2. 别人无法把你的对象放进某些要求 `const` 的标准库容器中。
+      3. 别人在看代码时，不敢确定调用 `getData()` 会不会产生破坏性的副作用（比如把数据清空了）。
+      
+      声明为 `const`，是向所有的使用者保证：**“放心调用吧，对于你关心的核心数据，我绝对原封不动。”** 至于内部偷偷摸摸做了什么（比如写了条日志、更新了下缓存），调用者根本不需要，也不应该关心。这就是面向对象中“封装”的精髓。
+      
+      ---
+      
+      mutable 是不可或缺的：一个最硬核的实战证明
+      
+      **如果没有 `mutable`，整个面向对象的多线程编程就彻底崩溃了。**那就是**互斥锁（Mutex）**。
+      
+      假设我们有一个账户类，在多线程环境下运行。我们要提供一个查询余额的接口：
+      
+      ``` c++
+      #include <mutex>
+      
+      class ThreadSafeAccount {
+      private:
+          double balance;
+          // 注意这里的 mutable
+          mutable std::mutex mtx; 
+      
+      public:
+          ThreadSafeAccount(double b) : balance(b) {}
+      
+          // 查询余额，逻辑上绝对应该是一个 const 操作！
+          double getBalance() const {
+              // 锁定互斥锁（注意：lock() 操作会修改 mtx 的内部状态！）
+              std::lock_guard<std::mutex> lock(mtx); 
+              
+              return balance; // 安全地读取
+          }
+      };
+      ```
+      
+      1. 外部调用 `getBalance()`，纯粹是为了“看一眼”余额，这个函数在业务逻辑上 **必须是 `const`**。
+      2. 为了保证多线程安全，读取前必须对 `std::mutex` 加锁（`lock()`）。
+      3. **加锁这个动作，本质上是在修改 `mtx` 对象的内部状态！**
+      
+      如果 C++ 没有 `mutable` 关键字，将陷入死局：
+      
+      - 你要么把 `getBalance()` 的 `const` 去掉。但这样一来，所有传进来的 `const ThreadSafeAccount&` 都无法查询余额了，这极其荒谬。
+      - 你要么强行用指针强转等黑魔法绕过编译器的检查，这会导致未定义行为。
+      
+      正因为有了 `mutable`，你可以把 `mtx` 标记为“可变的”。这完美地表达了语义：**`mtx` 只是为了保证线程安全的底层管道设施，它不属于账户的“业务数据（balance）”。因此，修改管道设施，并不违背账户对象作为 `const` 的承诺。**
+    
+    ---
+    
+    在 C++ 开发中，有一个几乎所有资深程序员都会遵守的铁律： **只要一个成员函数没有修改对象状态的意图，就请毫不犹豫地在它末尾加上 `const`。**
+    
+    这不仅仅是为了避免上述的编译错误，更是为了让代码自我记录（Self-documenting）。当你看到一个 `const` 函数时，你不用去阅读它的源码，就能放心地在任何安全级别要求高的地方（如并发读取）调用它。
+
+---
+
+- 面对**指针**：也可以指出指针自身（指针常量`char* const p;`）、指针所指之物（常量指针`const char *p`）或者二者都是`const char* const p;`（都不是）常量。
+
+---
+
+- 面对**迭代器**：声明一个迭代器为`const` (例如`const std::vector<int>::iterator iter = vec.begin())`则和声明一个**指针常量**一样，`iter`本身不可改变：`*iter = 10;(合法)  iter++;(非法)`；如果是希望**常量指针的效果**（迭代器指向的值不可以改变）则应该使用`std::vector<int>::const_iterator`类型。
+
 # 常用库
 
 ## `<chrono>`

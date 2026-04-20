@@ -64,7 +64,7 @@ patch -p1 < patch-6.1.xx-rt36.patch
 +++ b/kernel/sched/core.c	2024-01-01 00:00:00
 ```
 
-#### `.rej`文件
+#### 解决冲突文件
 
 查找冲突文件：
 
@@ -141,11 +141,42 @@ find . -name "*.rej"
 
 ```
 
+#### 测试实时性
 
+``` shell
+# 安装工具
+apt install -y python git
+
+# 下载 cyclictest 的源码
+git clone https://github.com/jlelli/rt-tests.git
+
+# 进入源码目录
+cd rt-tests
+
+# 编译源码（如果有报错，应该是依赖没弄好，根据缺失的依赖安装即可）
+make -j4
+```
+
+使用**cyclictest**工具进行测试，明确参数含义：
+
+| 参数        | 含义                                                         | 对应你的测试场景                                             |
+| ----------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| `-p 99`     | 设置测试线程的 SCHED_FIFO 实时优先级为 99（Linux 最高实时优先级） | 模拟 EtherCAT 主站线程的最高优先级调度                       |
+| `-m`        | 锁定测试线程的内存，禁止 swap 交换到磁盘                     | 避免内存换入换出带来的延迟抖动，和 EtherCAT 工程最佳实践一致 |
+| `-n`        | 使用`nanosleep`高精度纳秒级计时                              | 适配工业控制微秒级的实时精度要求                             |
+| `-i 1000`   | 线程唤醒间隔为 1000us（1ms）                                 | 完全匹配 EtherCAT 最常用的 1ms 通信周期                      |
+| `-l 100000` | 总计循环测试 10 万次                                         | 测试总时长约 100 秒，你当前截图是测试中途的结果              |
+| `sudo`      | root 权限执行                                                | 只有 root 才能设置最高实时优先级，操作正确                   |
+
+``` shell
+sudo ./cyclictest -p 99 -m -n -i 1000 -l 100000
+```
+
+`cyclictest` 延迟 > 200μs → 通信易超时。
 
 ### 支持EtherCAT
 
-#### ighEtherCAT
+#### 编译模块
 
 ``` shell
 # 进入 ethercat_igh 目录
@@ -169,10 +200,6 @@ make modules ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -C /home/dev/Luban
 ```
 
 编译生成的用户态文件保存在 ethercat_igh 的 `output` 目录下，生成的 `ko` 模块文件保存在 `master/ec_master.ko` 和`devices/stmmac/ec_stmmac.ko`。
-
-#### 内核优化
-
-
 
 ## 安装新内核
 
@@ -276,7 +303,7 @@ dmesg | grep EtherCAT
 
 验证无报错后，重启系统，再次执行`lsmod | grep ec_`，即可确认模块已开机自动加载。
 
-### 设备权限管理
+### 修改设备权限
 
 ![img](./assets/ethercat权限错误.png)
 
@@ -308,17 +335,31 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-### 实现EtherCAT主站
+### IGH应用接口
 
-#### IGH
+`ecrt.h` 是 **IgH EtherCAT Master（EtherLab 开源 EtherCAT 主站协议栈）** 为 Linux 用户空间提供的**核心实时应用编程接口（API）头文件**，全称是 EtherCAT Real-Time header，是开发 EtherCAT 主站实时控制程序的核心入口，所有用户态 EtherCAT 主站应用都需要包含该头文件，才能调用协议栈的核心能力。
 
- IgH EtherCAT Master，是一个**内核态**的开源 EtherCAT 主站栈，专门为 Linux 设计，是工业领域最成熟的硬实时 EtherCAT 主站实现之一。
+该头文件仅归属于 IgH EtherCAT Master 开源主站，SOEM 等其他 EtherCAT 主站方案不使用该头文件。
 
-**运行层级**：运行在 Linux 内核空间，**直接接管网卡驱动**， bypass 操作系统网络协议栈，延迟极低、抖动极小，适合硬实时运动控制（比如机器人、伺服电机）。
+---
 
-**部署要求**：需要编译安装内核模块（`ec_master`），并将专用网卡绑定到 EtherCAT 主站。
+**内核能力封装与接口隔离**
 
-**性能**：实时性极强，抖动可控制在微秒级，是工业级场景的首选。
+它将内核态 EtherCAT 主站驱动的核心能力**封装为用户态可直接调用的标准 C 接口**，隐藏了内核模块、`/dev/EtherCAT0`设备节点的底层操作细节，开发者无需深入内核驱动，即可完成 EtherCAT 主站的全流程开发。
+
+**核心数据与类型规范定义**
+
+定义了 EtherCAT 主站开发的**核心数据结构**、**句柄类型**、状态枚举、错误码与常量，比如`ec_master_t`（主站实例句柄）、`ec_slave_config_t`（从站配置句柄）、`ec_domain_t`（过程数据域句柄）等，统一了用户程序与协议栈之间的数据交互格式。
+
+**全生命周期 API 声明**
+
+声明了 EtherCAT 主站从初始化、配置、运行到释放的全流程函数原型，覆盖实时通信、从站管理、分布式时钟同步、对象字典访问等所有核心功能，是用户程序调用主站能力的唯一标准入口。
+
+**实时数据交互辅助工具**
+
+提供了过程数据（PDO）的位读写、大小端转换、浮点型数据读写等宏与辅助函数，简化硬实时循环内的 PDO 数据操作，保证执行时间的确定性，适配工业实时控制场景。
+
+---
 
 安装`ecrt.h`：
 
@@ -337,9 +378,7 @@ sudo make install
 
 安装后，头文件默认路径为 `/opt/etherlab/include`，库文件为 `/opt/etherlab/lib`。
 
-``` shell
-ethercat slaves -v
-```
+
 
 ## 电机
 
@@ -835,6 +874,16 @@ dmesg -T | grep -Ei "EtherCAT|SAFEOP|watchdog|AL"
    sudo chrt -f 90 ./stop_read_status
    
    sudo ./stop_read_status
+   
+   sudo MYACTUA_ECAT_DC_ASSIGN_ACT=0 ./ID_test
+   
+   sudo MYACTUA_ECAT_DC_ASSIGN_ACT=0x300 MYACTUA_ECAT_DC_SYNC0_CYCLE_NS=1000000 MYACTUA_ECAT_DC_SYNC0_SHIFT_NS=200000 ./ID_test
+   sudo MYACTUA_ECAT_DC_ASSIGN_ACT=0x300 MYACTUA_ECAT_DC_SYNC0_CYCLE_NS=1000000 MYACTUA_ECAT_DC_SYNC0_SHIFT_NS=300000 ./ID_test
+   sudo MYACTUA_ECAT_DC_ASSIGN_ACT=0x300 MYACTUA_ECAT_DC_SYNC0_CYCLE_NS=1000000 MYACTUA_ECAT_DC_SYNC0_SHIFT_NS=500000 ./ID_test
+   
+   
+   cd /home/cat/Myactua_Ethercat/src/motors/build
+   
    ````
 
 2. 固定网卡参数并关 EEE：
@@ -855,34 +904,310 @@ dmesg -T | grep -Ei "EtherCAT|SAFEOP|watchdog|AL"
 
 ---
 
-解决方法：
+toolName: todo_write
+            
+status: success
+          
+Todos updated: 4 items
+          
 
-1. 推荐做法：用 `systemd` 固定实时调度
 
-   service里设置：
+​            
+toolName: view_folder
+​            
+status: success
+​          
+/home/cat/Myactua_Ethercat
+​          
 
-   - CPUSchedulingPolicy = fifo
-   - CPUSchedulingPriority = 90
-   - LimitRTPRIO = 95
 
-这样以后只要 systemctl start xxx，就自动是实时优先级。
+​            
+toolName: file_search
+​            
+status: success
+​          
+file_pattern: **/*.xml
+​          
 
-   2.轻量做法：给可执行文件 `CAP_SYS_NICE`
 
-```shell
-sudo setcap cap_sys_nice+ep /home/cat/Myactua_Ethercat/src/inference/build/motors_test 
+​            
+toolName: file_search
+​            
+status: success
+​          
+file_pattern: **/ID_test*
+​          
+
+
+​            
+toolName: view_folder
+​            
+status: success
+​          
+/home/cat/Myactua_Ethercat/src
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/examples/ID_test.cpp
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
+​          
+让我继续查看ESI文件中的DC相关配置和SyncManager部分，以及EtherCAT适配器的实现代码。
+​        
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
+​          
+
+
+​            
+toolName: file_search
+​            
+status: success
+​          
+file_pattern: **/*EthercatAdapter*
+​          
+
+
+​            
+toolName: file_search
+​            
+status: success
+​          
+file_pattern: **/*motor_control*
+​          
+
+
+​            
+toolName: search_by_regex
+​            
+status: success
+​          
+query: Dc|dc|Sync|sync|OpSync|Sync0|Sync1|AssignActivate
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.hpp
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
+​          
+
+
+​            
+toolName: search_by_regex
+​            
+status: success
+​          
+query: SyncMan|Sm|Mailbox|CycleTime|SafeopOp
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
+​          
+
+
+​            
+toolName: view_files
+​            
+status: success
+​          
+​            
+filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
+​          
+
+
+toolName: todo_write
+​            
+status: success
+​          
+Todos updated: 4 items
+​          
+现在我已经完整地查看了项目代码和ESI文件，下面进行详细分析。
+​        
+​            
+toolName: todo_write
+​            
+status: success
+​          
+Todos updated: 4 items
+​          
+
+#### DC同步导致OP慢 & 关闭DC后通信异常的可能原因
+
+---
+
+#### 一、关键代码和ESI配置回顾
+
+##### 1. 代码中的DC配置（[EthercatAdapterIGH.cpp:175](file:///home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp#L175)）
+
+```cpp
+ecrt_slave_config_dc(sc[i], 0x0300, 1000000, 4400000, 0, 0);
 ```
 
-之后直接运行：
+参数含义：
+| 参数              | 值                | 含义                         |
+| ----------------- | ----------------- | ---------------------------- |
+| `assign_activate` | `0x0300`          | DC-Synchron模式（与ESI一致） |
+| `sync0_cycle`     | `1000000` (1ms)   | Sync0周期 = 1ms              |
+| `sync0_shift`     | `4400000` (4.4ms) | **Sync0偏移时间 = 4.4ms**    |
+| `sync1_cycle`     | `0`               | 无Sync1                      |
+| `sync1_shift`     | `0`               | 无Sync1偏移                  |
 
-```shell
-/home/cat/Myactua_Ethercat/src/inference/build/motors_test 
+##### 2. ESI文件中的DC定义（[MT-Device 250702.xml:1977-1989](file:///home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml#L1977-L1989)）
+
+```xml
+<Dc>
+  <OpMode>
+    <Name>Synchron</Name>
+    <Desc>SM-Synchron</Desc>
+    <AssignActivate>#x0</AssignActivate>       <!-- 无DC，仅SM同步 -->
+  </OpMode>
+  <OpMode>
+    <Name>DC</Name>
+    <Desc>DC-Synchron</Desc>
+    <AssignActivate>#x300</AssignActivate>      <!-- DC同步模式 -->
+    <CycleTimeSync0 Factor="1">0</CycleTimeSync0>  <!-- 默认周期=0，需主站配置 -->
+    <CycleTimeSync1 Factor="1">0</CycleTimeSync1>
+  </OpMode>
+</Dc>
 ```
 
-你代码里本来就会 pthread_setschedparam，有这个能力后通常就不需要 chrt 了。
-注意：每次重新编译后，setcap 需要重新执行一次。
+ESI还定义了关键超时：
+```xml
+<SafeopOpTimeout>9000</SafeopOpTimeout>  <!-- Safe-OP → OP 超时 9秒 -->
+```
 
-### 数据并发错误
+---
+
+#### 二、为什么开启DC后从站进入OP很慢？
+
+##### 原因1：**Sync0 Shift Time (4.4ms) 严重偏大** — 最可能的核心原因
+
+这是最可疑的参数。`sync0_shift = 4,400,000ns = 4.4ms`，而周期只有 `1ms`。
+
+**Shift Time 的含义**：Sync0脉冲相对于参考时钟上升沿的相位偏移。它定义了从站应该在参考时间点之后多久触发Sync0中断来锁存PDO数据。
+
+**4.4ms偏移的问题**：
+
+- 从站期望在参考时钟后4.4ms收到Sync0信号
+- 但主站周期只有1ms，意味着主站在每个1ms周期发送数据
+- 从站等待4.4ms才触发Sync0，相当于要等4个多周期
+- 这导致从站在Safe-OP状态下反复尝试同步但无法在预期时间窗口内完成数据交换
+- IGH主站在DC同步过程中需要反复调整参考时钟漂移，直到从站确认同步成功
+- **偏移值不合理使得同步收敛非常慢**，甚至可能需要多次重试才能进入OP
+
+**合理的Shift Time应该是多少**：
+- 通常Shift Time应远小于Cycle Time，典型值为0或几十微秒
+- 它的目的是给从站留出处理时间（从收到帧到Sync0触发之间的时间）
+- 对于1ms周期，Shift Time通常设为 `0` 或一个较小的值（如100~500μs），而不是4.4ms
+
+##### 原因2：**ESI中CycleTimeSync0默认为0**
+
+ESI文件中 `<CycleTimeSync0 Factor="1">0</CycleTimeSync0>` 默认值为0，表示从站没有预设的DC周期期望。虽然代码中设置了1ms，但从站固件可能需要一定时间来"适应"主站配置的DC周期，特别是在首次同步时。
+
+##### 原因3：**SafeopOpTimeout = 9秒**
+
+ESI定义了9秒的Safe-OP到OP超时。当DC同步困难时，从站可能在这个超时内反复尝试同步，导致整体等待时间很长。
+
+##### 原因4：**多从站DC同步收敛**
+
+系统配置了10个从站（含转发站），所有从站都需要同时完成DC同步才能进入OP。Shift Time不合理时，每个从站的同步都可能很慢，整体等待时间叠加。
+
+---
+
+#### 三、为什么关闭DC后秒进OP，但无法正常通信？
+
+##### 原因1：**伺服电机控制环路依赖DC同步**
+
+这是最根本的原因。伺服电机（特别是CSP/CSV/CST模式）的内部控制环路需要精确的时序参考：
+
+- **DC模式下**：从站的Sync0中断在每个周期的固定时刻触发，从站在该时刻锁存PDO数据并执行控制算法。主站和从站的控制环路严格同步，位置/速度/扭矩命令在确定性时刻被采样和执行。
+- **无DC模式（SM-Sync）**：从站仅在收到新的SM事件（即收到主站帧）时处理数据，没有固定的时间基准。数据处理的时刻取决于帧到达的时间，而这个时间有抖动。
+
+**对于CSP（周期同步位置）模式**，电机固件通常**强制要求DC同步**，因为：
+- 位置插补需要精确的周期时序
+- 多轴协调运动需要所有轴在同一时刻更新
+- 没有DC同步，电机可能拒绝使能或无法正确执行位置命令
+
+##### 原因2：**从站内部控制环与PDO更新失步**
+
+无DC时，从站的控制环以自身晶振频率自由运行，而PDO数据的更新时刻由主站帧到达时间决定（有抖动）。这导致：
+- 从站在控制环周期中间收到新命令 → 命令被延迟到下一个控制周期执行
+- 从站刚处理完一个周期，新数据又到达 → 数据被覆盖或丢失
+- 控制环和PDO更新之间的相位关系不确定 → 通信看似正常但数据无效
+
+##### 原因3：**Sync Error Counter触发保护**
+
+ESI中定义了 `Sync Error Counter Limit`（对象0x1C32:2 / 0x1C33:2），在无DC模式下，从站可能检测到同步错误（因为期望的同步机制不存在），累计超过阈值后进入错误状态，导致通信中断。
+
+##### 原因4：**Watchdog行为不同**
+
+DC模式下，从站通过Sync0信号来重置看门狗；无DC模式下，从站通过SM事件重置看门狗。如果从站固件在无DC时对看门狗的处理不同，可能导致数据被认为无效。
+
+---
+
+#### 四、总结与建议方向
+
+| 现象             | 根因                                                | 优先级   |
+| ---------------- | --------------------------------------------------- | -------- |
+| DC开启时OP慢     | **Sync0 Shift Time = 4.4ms 远大于Cycle Time = 1ms** | ⭐⭐⭐ 最高 |
+| DC开启时OP慢     | 多从站同步收敛叠加                                  | ⭐⭐       |
+| 关闭DC后通信异常 | 电机CSP模式强制要求DC同步                           | ⭐⭐⭐ 最高 |
+| 关闭DC后通信异常 | 控制环与PDO更新失步                                 | ⭐⭐       |
+
+**核心结论**：问题不是"要不要用DC"（电机必须用DC），而是**DC参数配置不当**。最关键的修改方向是将 `sync0_shift` 从 `4400000` 调整为一个合理值（如 `0` 或一个小于cycle_time的值），这样DC同步应该能快速完成，从站可以正常进入OP并通信。
+
+如果需要我进一步协助调整DC参数或排查其他细节，请告诉我。
+
+#### 数据并发错误
 
 **问题闭环总结（嵌入式实时控制视角）**
 
