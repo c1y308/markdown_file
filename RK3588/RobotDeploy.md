@@ -398,11 +398,47 @@ sudo make install
 
 在这个阶段，要告诉系统：我要用哪个主站？我要建几个域？网络里有哪些从站？它们各自需要交换什么数据？
 
-##### 核心数据结构
+---
 
-PDO 映射的三层嵌套是 IgH 中最容易绕晕的部分。为了配置从站要交互什么数据，IgH 使用了三层嵌套的结构体，从微观到宏观依次是：`Entry -> PDO -> Sync Manager`。三个结构体层层嵌套，最终将最顶层的 `ec_sync_info_t` 数组传给 `ecrt_slave_config_pdos()` 函数。
+首先需要请求并独占一个 EtherCAT 主站实例：
+
+``` c++
+//参数： master_index 通常为 0（代表系统中的第一个主站 eth0 或配置的第一个网卡）。
+//返回： ec_master_t* 主站句柄。
+
+ecrt_request_master(unsigned int master_index);
+```
 
 ---
+
+然后在主站下创建一个新的过程数据域（Domain），它是一块连续的内存区域，它将分散在各个从站的 PDO Entry 聚合到主站的一块连续内存中。域用于合并多个从站的数据，以便用一个以太网帧进行交换：
+
+``` c++
+//返回： ec_domain_t* 域句柄。
+ecrt_master_create_domain(ec_master_t *master);
+```
+
+---
+
+获取特定从站的配置句柄。**需要提供从站的物理位置或别名，以及它的身份信息（厂家 ID 和产品代码）以便主站校验**。
+
+``` c++
+// 返回： ec_slave_config_t* 从站配置句柄。
+ecrt_master_slave_config(ec_master_t *master, uint16_t alias, uint16_t position, uint32_t vendor_id, uint32_t product_code);
+
+
+const uint16_t position = kSlavePositions[i];
+sc[i] = ecrt_master_slave_config(master, 0, position, VID_PID);
+```
+
+---
+
+PDO 映射的三层嵌套是 IgH 中最容易绕晕的部分。为了配置从站要交互什么数据，IgH 使用了三层嵌套的结构体，从微观到宏观依次是：`Entry -> PDO -> Sync Manager`，最终将最顶层的 `ec_sync_info_t` 数组传给 `ecrt_slave_config_pdos()` 函数。
+
+在实际代码中`ecrt_domain_reg_pdo_entry_list()` 注册 PDO entry 时，需要在当前 `slave config` 里查找这些 entry 属于哪个 PDO/SyncManager。也就是说它依赖前面已经通过 `ecrt_slave_config_pdos(sc[i], EC_END, device_syncs)` 建好的 PDO assignment/mapping。IGH 文档里 `ecrt_slave_config_reg_pdo_entry()` 也说明它会搜索已分配的 PDO；如果 entry 没有被映射，会报错。
+
+---
+
 
 第一层：`ec_pdo_entry_info_t` (PDO 条目 - 最微观的数据)：定义一个**具体的数据字典对象**（如“控制字”、“目标位置”）。
 
@@ -455,7 +491,10 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
 };
 
 ```
-> 为什么需要PDO层？
+
+这连续的 8 个字节，就是一个 **PDO（纸箱）**！ 在初始化阶段用 `ec_pdo_info_t` 把散装变量打包成 PDO，本质上就是**在帮 FMMU 划定这块连续的物理内存区域**。到了实时阶段，硬件就盲目地、疯狂地搬运这个“纸箱”，根本不管里面装的是什么。
+
+> 为什么需要PDO层而不直接用PDO entry进行数据传输？
 
 - **硬件固化的“纸箱号（PDO Index）”限制**
 
@@ -467,7 +506,7 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
 
   但 EtherCAT 的实时报文（跑 PDO 数据时）是“高铁抓包，绝不停车”模式： **一个包含所有电机数据的以太网大包，从主站发出来，穿过 1 号电机、2 号电机、3 号电机……它在经过每个电机网口的时候，根本不停留！** 在报文穿过网卡芯片（ESC）的那几十纳秒内，芯片内部的FMMU（现场总线内存管理单元）硬件电路，会像高铁上的机械臂一样，瞬间从飞驰的报文里把属于自己的数据“抠”下来，同时把自己的状态数据“塞”进去。
 
-  **这和 PDO 有什么关系？** 机械臂（FMMU）是个纯粹的傻瓜硬件，它不懂什么是“控制字”，什么是“索引 0x6040”。 它唯一能听懂的指令是：**“等报文经过时，把报文的第 100 到 108 字节，按位复制到我本地 DPRAM 的第 16 到 24 字节。”**
+  机械臂（FMMU）是个纯粹的傻瓜硬件，它不懂什么是“控制字”，什么是“索引 0x6040”。 它唯一能听懂的指令是：**“等报文经过时，把报文的第 100 到 108 字节，按位复制到我本地 DPRAM 的第 16 到 24 字节。”**因此我们需要拿到直接操作这些数据的**内存指针和偏移量 (Offset)**。
 
   ``` c++
   // ec_pdo_entry_reg_t 用于将程序变量指针与物理硬件的字典索引绑定。
@@ -478,7 +517,7 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
       uint32_t product_code; // 产品代码
       uint16_t index;        // 要读取/写入的字典索引 (如 0x6040)
       uint8_t subindex;      // 子索引
-      unsigned int *offset;  // 【核心】这是一个输出参数！IgH会自动算出该变量在内存里的偏移量，并存入这个指针指向的变量。
+      unsigned int *offset;  // 【核心】输出参数！IgH会自动算出该变量在内存里的偏移量，并存入这个指针指向的变量。
       unsigned int *bit_position; // 如果不是字节对齐的布尔值，这里会返回位偏移
   } ec_pdo_entry_reg_t;
   
@@ -500,6 +539,8 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
       {0, 0, 0, 0, 0, 0, nullptr, nullptr} // 结束标志
   };
   
+  
+  // 将 PDO 字典条目注册到 Domain 中。这个函数会在内部计算每个变量在 Domain 共享内存中的**字节偏移量（Offset）**，并将结果写回提供的变量中。
   if (ecrt_domain_reg_pdo_entry_list(domain1, reg)) 
   {
       std::cerr << "注册从站 PDO 条目失败，逻辑索引 " << i
@@ -507,8 +548,6 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
       return false;
   }
   ```
-
-  这连续的 8 个字节，就是一个 **PDO（纸箱）**！ 在初始化阶段用 `ec_pdo_info_t` 把散装变量打包成 PDO，本质上就是**在帮 FMMU 划定这块连续的物理内存区域**。到了实时阶段，硬件就盲目地、疯狂地搬运这个“纸箱”，根本不管里面装的是什么。
 
   拯救单片机：把通信交还给纯硬件
 
@@ -553,7 +592,7 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
 ---
 
 
-第三层：`ec_sync_info_t` (同步管理器 - 管理数据的收发通道（**进行数据发送**）)：EtherCAT 通过 Sync Manager (SM) 来管理数据的读写方向。通常 SM2 用于主站写（RxPDO），SM3 用于主站读（TxPDO）。
+第三层：`ec_sync_info_t` (同步管理器 - 管理数据的收发通道)：EtherCAT 通过 Sync Manager (SM) 来管理数据的读写方向。通常 SM2 用于主站写（RxPDO），SM3 用于主站读（TxPDO）。它是 EtherCAT 从站控制器（ESC芯片）内部的**硬件通道**，负责管理双端口 RAM (DPRAM) 的访问，防止主站和从站同时读写同一块内存。
 
 ``` c++
 typedef struct {
@@ -572,123 +611,6 @@ ec_sync_info_t EthercatAdapterIGH::device_syncs[] = {
     {3, EC_DIR_INPUT,  1, &EthercatAdapterIGH::device_pdos[1], EC_WD_DISABLE},
     {0xff, EC_DIR_INVALID, 0, nullptr, EC_WD_DEFAULT}
 }; 
-```
-
-##### 核心API
-
-请求并独占一个 EtherCAT 主站实例：
-
-``` c++
-//参数： master_index 通常为 0（代表系统中的第一个主站 eth0 或配置的第一个网卡）。
-//返回： ec_master_t* 主站句柄。
-
-ecrt_request_master(unsigned int master_index);
-```
-
----
-
-在主站下创建一个新的过程数据域（Domain）。域用于合并多个从站的数据，以便用一个以太网帧进行交换：
-
-``` c++
-//返回： ec_domain_t* 域句柄。
-ecrt_master_create_domain(ec_master_t *master);
-```
-
----
-
-获取特定从站的配置句柄。**需要提供从站的物理位置或别名，以及它的身份信息（厂家 ID 和产品代码）以便主站校验**。
-
-``` c++
-// 返回： ec_slave_config_t* 从站配置句柄。
-ecrt_master_slave_config(ec_master_t *master, uint16_t alias, uint16_t position, uint32_t vendor_id, uint32_t product_code);
-```
-
----
-
-极其重要！它**告诉从站的 Sync Manager (同步管理器) 应该如何配置，以及映射哪些 PDO 数据**：
-
-``` c++
-ecrt_slave_config_pdos(ec_slave_config_t *sc, unsigned int n_syncs, const ec_sync_info_t syncs[]);
-
-
-ec_sync_info_t EthercatAdapterIGH::device_syncs[] = {
-    {0, EC_DIR_OUTPUT, 0, NULL, EC_WD_DISABLE},
-    {1, EC_DIR_INPUT,  0, NULL, EC_WD_DISABLE},
-    {2, EC_DIR_OUTPUT, 1, &EthercatAdapterIGH::device_pdos[0], EC_WD_ENABLE},
-    {3, EC_DIR_INPUT,  1, &EthercatAdapterIGH::device_pdos[1], EC_WD_DISABLE},
-    {0xff, EC_DIR_INVALID, 0, nullptr, EC_WD_DEFAULT}
-};   
-
-ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
-    // RX 主站发送
-    {0x1600, 7, &EthercatAdapterIGH::device_pdo_entries[0]},
-    // TX 主站接收
-    {0x1a00, 7, &EthercatAdapterIGH::device_pdo_entries[7]},
-};
-
-ec_pdo_entry_info_t EthercatAdapterIGH::device_pdo_entries[] = {
-    {0x6040, 0x00, 16},  // 控制字
-    {0x607a, 0x00, 32},  // 目标位置
-    {0x60ff, 0x00, 32},  // 目标转速
-    {0x6071, 0x00, 16},  // 目标扭矩
-    {0x6072, 0x00, 16},  // 最大扭矩
-    {0x6060, 0x00, 8},   // 设置运行模式
-    {0x5ffe, 0x00, 8},   // 填充字节
-    /* ========== RxPDO (主站从从站接收) ========== */
-    {0x6041, 0x00, 16},   // 状态字
-    {0x6064, 0x00, 32},   // 实际位置
-    {0x606c, 0x00, 32},   // 实际转速
-    {0x6077, 0x00, 16},  // 实际扭矩
-    {0x603f, 0x00, 16},  // 错误码
-    {0x6061, 0x00, 8},   // 运行模式
-    {0x5ffe, 0x00, 8},   // 填充字节
-};
-```
-
----
-
-将 PDO 字典条目注册到 Domain 中。这个函数会在内部计算每个变量在 Domain 共享内存中的**字节偏移量（Offset）**，并将结果写回提供的变量中。
-
-``` c++
-ecrt_domain_reg_pdo_entry_list(ec_domain_t *domain, const ec_pdo_entry_reg_t *pdo_entry_regs);
-
-
-
-// 注册 PDO 条目到 Domain
-/*
-ec_pdo_entry_reg_t
-uint16_t alias;       从站别名 (Alias)
-uint16_t position;    从站物理位置 (Position)
-uint32_t vendor_id;   厂家 ID (Vendor ID)
-uint32_t product_code;产品代码 (Product Code)
-uint16_t index;       对象字典索引 (Index)
-uint8_t subindex;     对象字典子索引 (Subindex)
-unsigned int *offset; 偏移量变量的指针 (Pointer to offset variable)
-unsigned int *bit_pos;位偏移指针 (Pointer to bit position)
-*/
-ec_pdo_entry_reg_t reg[] ={
-    {0, position, VID_PID, 0x6040, 0, &slave_offsets[i].off_ctrl_word, nullptr},
-    {0, position, VID_PID, 0x607A, 0, &slave_offsets[i].off_target_pos, nullptr},
-    {0, position, VID_PID, 0x60FF, 0, &slave_offsets[i].off_target_vel, nullptr},
-    {0, position, VID_PID, 0x6071, 0, &slave_offsets[i].off_target_torque, nullptr},
-    {0, position, VID_PID, 0x6072, 0, &slave_offsets[i].off_max_torque, nullptr},
-    {0, position, VID_PID, 0x6060, 0, &slave_offsets[i].off_mode_of_op, nullptr},
-
-    {0, position, VID_PID, 0x6041, 0, &slave_offsets[i].off_status_word, nullptr},
-    {0, position, VID_PID, 0x6064, 0, &slave_offsets[i].off_pos, nullptr},
-    {0, position, VID_PID, 0x606C, 0, &slave_offsets[i].off_vel, nullptr},
-    {0, position, VID_PID, 0x6077, 0, &slave_offsets[i].off_torque, nullptr},
-    {0, position, VID_PID, 0x603F, 0, &slave_offsets[i].off_error, nullptr},
-    {0, position, VID_PID, 0x6061, 0, &slave_offsets[i].off_mode_disp, nullptr},
-    {0, 0, 0, 0, 0, 0, nullptr, nullptr} // 结束标志
-};
-
-if (ecrt_domain_reg_pdo_entry_list(domain1, reg)) 
-{
-    std::cerr << "注册从站 PDO 条目失败，逻辑索引 " << i
-              << "，物理位置 " << position << "\n";
-    return false;
-}
 ```
 
 ---
@@ -712,13 +634,7 @@ void ecrt_slave_config_dc(
 // 在实际调试中，AssignActivate (0x0300) 和 Sync0 Shift (100000) 这两个参数是需要根据具体硬件手册和系统性能进行微调的。
 ```
 
-
-
-
-
-
-
-
+**完整代码：**
 
 ``` c++
 bool EthercatAdapterIGH::init(const char* ifname) 
@@ -916,8 +832,6 @@ void EthercatAdapterIGH::sendPhysical() {
     ecrt_master_send(master);
 }
 ```
-
-
 
 
 
