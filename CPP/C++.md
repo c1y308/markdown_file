@@ -863,7 +863,7 @@ enum DiscreteFailReason {
 
 
 
-## std库的函数/类
+## 标准库
 
 **Linux 的 `open` 不是 `std` 函数，** 它是**操作系统提供的系统调用**，和 C++ 标准库无关，`std` 是 C++ **跨平台标准库**，里面全是语言自带的、所有系统（Windows/Linux/Mac）都能用的函数 / 类。
 
@@ -880,9 +880,9 @@ enum DiscreteFailReason {
 2. 字符串相关（**注意：在`cstring`中也定义了全局函数**）：
 
    ``` c++
-   std::string()   // 字符串类（你自己写MyString就是模仿它）
-   std::strlen()   // 字符串长度（C标准库移植到std里）
-   std::strcmp()   // 字符串比较
+   std::string();   // 字符串类（你自己写MyString就是模仿它）
+   std::strlen();   // 字符串长度（C标准库移植到std里）
+   std::strcmp();   // 字符串比较
    ```
 
 3. **容器**：
@@ -912,9 +912,11 @@ enum DiscreteFailReason {
 6. **其他工具函数**：
 
    ``` c++
-   std::move      // 移动语义
-   std::shared_ptr// 智能指针
-   std::thread    // 线程
+   std::move();      // 移动语义
+   std::shared_ptr();// 智能指针
+   std::thread();    // 线程
+       
+   std::isfinite();  // 不是无穷大（Infinity）且不是非数字（NaN, Not-a-Number）返回 true。
    ```
 
 # 设计类
