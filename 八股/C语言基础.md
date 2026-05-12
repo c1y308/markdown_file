@@ -168,7 +168,7 @@ int main() {
     
     // 通过指针调用函数（两种等价写法）
     printf("Result: %d\n", (*func_ptr)(3, 4)); // 写法1：显式解引用
-    printf("Result: %d\n", func_ptr(3, 4));     // 写法2：编译器自动解引用
+    printf("Result: %d\n",   func_ptr (3, 4));     // 写法2：编译器自动解引用
     
     // 切换指向其他函数
     func_ptr = sub;
