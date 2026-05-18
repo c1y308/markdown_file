@@ -1,3 +1,315 @@
+# GTest
+
+GTest 的安装非常便捷：
+
+``` shell
+sudo apt-get install libgtest-dev
+```
+
+## 核心用法
+
+下面是一个简单的例子，展示了如何使用 `TEST` 宏定义测试用例：
+
+``` c++
+// 包含 GTest 头文件
+#include <gtest/gtest.h>
+
+// 定义一个名为 "HelloTest" 的测试套件，其中包含一个名为 "BasicAssertions" 的测试用例
+TEST(HelloTest, BasicAssertions) {
+  // 期待两个 C 风格字符串不相等
+  EXPECT_STRNE("hello", "world");
+  // 期待 7 * 6 的结果等于 42
+  EXPECT_EQ(7 * 6, 42);
+}
+
+// 主函数，运行所有测试
+int main(int argc, char **argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+其中，`TEST` 宏的 `HelloTest` 是**测试套件名**，用于归类相关测试；`BasicAssertions` 是**测试用例名**。
+
+### 断言
+
+断言是验证代码行为的基石。GTest 提供两大类宏-[-31](https://developer.aliyun.com/article/1419710)：
+
+- **`EXPECT_\*` 系列**：非致命断言。失败时，测试会继续执行，一个用例可报告多个错误，是首选方式。
+- **`ASSERT_\*` 系列**：致命断言。失败时，**立即终止**当前测试函数。常用于**后续逻辑依赖当前断言**的情况，如指针非空检查[-8](https://cloud.tencent.cn/developer/information/当expect在子例程失败时，如何让googletest打印整个跟踪-article)[-31](https://developer.aliyun.com/article/1419710)。
+
+常用宏如下表：
+
+| 断言宏                                                       | 参数示例 | 验证逻辑            |
+| :----------------------------------------------------------- | :------- | :------------------ |
+| `EXPECT_TRUE(val)` / `ASSERT_TRUE(val)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)[-31](https://developer.aliyun.com/article/1419710) | `val`    | `val` 为 `true`     |
+| `EXPECT_FALSE(val)` / `ASSERT_FALSE(val)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `val`    | `val` 为 `false`    |
+| **`EXPECT_EQ(a, b)`** / `ASSERT_EQ(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a == b`            |
+| **`EXPECT_NE(a, b)`** / `ASSERT_NE(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a != b`            |
+| **`EXPECT_LT(a, b)`** / `ASSERT_LT(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a < b`             |
+| **`EXPECT_GT(a, b)`** / `ASSERT_GT(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a > b`             |
+| `EXPECT_STREQ(a, b)` / `ASSERT_STREQ(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)[-31](https://developer.aliyun.com/article/1419710) | `a, b`   | C风格字符串内容相同 |
+| `EXPECT_STRNE(a, b)` / `ASSERT_STRNE(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)[-31](https://developer.aliyun.com/article/1419710) | `a, b`   | C风格字符串内容不同 |
+
+> **💡 小技巧**：在断言宏后添加 `<< "自定义错误信息"` 可输出诊断信息，方便定位失败原因-[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)。
+
+### 测试夹具(Test Fixtures)
+
+当多个测试需要**相同的初始化或清理代码**时，可使用 `TEST_F` 宏。它利用类来管理共享资源（**不是共享同一个对象实例**，而是多个测试用例**共享同一套初始化和清理逻辑**，以及**共享相同的成员变量定义**），每个测试独立运行，互不干扰-[-18](https://blog.csdn.net/u012294613/article/details/124683483)。
+
+步骤如下[-18](https://blog.csdn.net/u012294613/article/details/124683483)[-19](https://blog.csdn.net/sinat_14854721/article/details/122806611)：
+
+1. 定义一个公有继承自 `::testing::Test` 的类。
+2. 在 `protected:` 区域声明测试需共享的成员变量。
+3. 可重写 `SetUp()` 和 `TearDown()` 以准备和释放资源（更推荐）[-18](https://blog.csdn.net/u012294613/article/details/124683483)。
+
+```c++
+// 1. 定义夹具类
+class MyTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // 3. 在每个测试前分配资源
+        value_ = new int(100);
+    }
+    void TearDown() override {
+        // 3. 在每个测试后释放资源
+        delete value_;
+        value_ = nullptr;
+    }
+    // 2. 共享的成员变量
+    int* value_;
+};
+
+// 使用 TEST_F 宏，并传入夹具类名 MyTest
+TEST_F(MyTest, TestInitialValue) {
+    EXPECT_EQ(*value_, 100);
+}
+
+TEST_F(MyTest, TestModifyValue) {
+    *value_ = 200;
+    EXPECT_EQ(*value_, 200);
+}
+```
+
+> **🔑 关键区别**：`TEST` 宏用于独立测试，不共享环境，简单直接[-21](https://blog.csdn.net/YZJincsdn/article/details/147477183)。`TEST_F` 宏用于基于夹具的测试，共享配置资源，能大幅减少重复代码[-21](https://blog.csdn.net/YZJincsdn/article/details/147477183)。
+
+# Cmake
+
+## 项目入口
+
+### 最低版本声明与项目定义
+
+``` cmake
+cmake_minimum_required(VERSION 3.14)
+project(RCom VERSION 1.0.0 LANGUAGES CXX)
+```
+
+知识点：
+
+| 命令                                       | 含义                                                         |
+| ------------------------------------------ | ------------------------------------------------------------ |
+| `cmake_minimum_required(VERSION X.Y)`      | 必须放在第一行。声明构建所需的 CMake 最低版本。CMake 会根据这个版本启用对应的策略（Policy），保证行为一致性 |
+| `project (名称 VERSION x.y LANGUAGES CXX)` | 定义项目名、版本号、编程语言。LANGUAGES CXX 表示只启用 C++，CMake 不会去检测 C 编译器，加速 configure 阶段 |
+
+执行 project() 后，CMake 自动设置以下变量：
+
+- `${PROJECT_NAME} = RCom`
+- `${PROJECT_VERSION} = 1.0.0`
+- `${PROJECT_SOURCE_DIR} = /home/cat/RCom`
+- `${PROJECT_BINARY_DIR} = <build目录>`
+- `${RCom_VERSION} 系列（由项目名派生）`
+
+### C++标准设置
+
+``` cmake
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+```
+
+知识点：
+
+| 变量                             | 作用                                                         |
+| -------------------------------- | ------------------------------------------------------------ |
+| `CMAKE_CXX_STANDARD`             | 指定 C++ 标准版本（11/14/17/20/23）                          |
+| `CMAKE_CXX_STANDARD_REQUIRED` ON | 表示如果编译器不支持该标准则报错停止。OFF 则降级到最近似标准 |
+| `CMAKE_CXX_EXTENSIONS` OFF       | 禁用编译器扩展（如 GNU 的 typeof），保证代码的标准可移植性   |
+
+这三者通常一起使用，是一种最佳实践。等价于编译选项 -std=c++17 （无 gnu++17 扩展）。
+
+### 编译器警告选项
+
+``` cmake
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+```
+
+知识点：
+
+- `CMAKE_CXX_COMPILER_ID` ：CMake 内置变量，值为 GNU 、 Clang 、 MSVC 、 AppleClang 等
+- `MATCHES` ：CMake 的条件判断操作符，支持正则表达式
+- `add_compile_options()` ： 全局 添加编译选项，对所有 target（库/可执行文件）生效
+
+关键区别辨析：
+
+| 命令                       | 作用域                                 |
+| -------------------------- | -------------------------------------- |
+| `add_compile_options()`    | 全局，影响当前目录及所有子目录         |
+| `target_compile_options()` | 仅影响指定 target                      |
+| `set(CMAKE_CXX_FLAGS ...)` | 全局字符串追加，但不推荐（覆盖风险高） |
+
+### 设置变量 / 条件编译
+
+``` c++
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+endif()
+if(ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
+```
+
+知识点—— `option() `：
+
+``` c++
+option(<变量名> "<描述>" <默认值>)
+```
+
+这是 CMake 的 布尔开关 ，默认值是 OFF 。用户可以通过命令行覆盖：
+
+``` shell
+cmake -B build -DENABLE_ASAN=ON
+cmake -B build -DENABLE_TSAN=ON
+```
+
+知识点——Sanitizer 配置要点：
+
+- ASan （AddressSanitizer）：检测内存越界、use-after-free、double-free 等
+- TSan （ThreadSanitizer）：检测数据竞争（data race）
+- ASan 和 TSan 互斥 ，不能同时开启
+- -fno-omit-frame-pointer ：保留栈帧指针，让错误报告中的调用栈更完整
+- add_link_options() ：CMake 3.13+ 引入，为链接阶段添加选项。ASan/TSan 在链接阶段也 必须 传入相同的 -fsanitize= 标志，因为它们需要链接对应的运行时库
+
+### CTest与子目录
+
+``` cmake
+enable_testing()
+
+add_subdirectory(base)
+add_subdirectory(base_test)
+```
+
+知识点—— `enable_testing()` ：
+
+调用后，CMake 启用 CTest 测试框架。之后 add_test() 定义的测试才能被 ctest 命令发现和运行：
+
+``` shell
+cmake -B build
+cmake --build build
+cd build && ctest
+```
+
+知识点—— `add_subdirectory()` ：
+
+CMake 项目组织的核心命令。工作原理：
+
+1. **CMake 进入子目录，处理其中的 CMakeLists.txt**
+
+2. 子目录中定义的 target 和变量会 **向上传播** 到父作用域
+
+3. 普通变量 不会自动回传（除非使用 set(... PARENT_SCOPE) ）
+
+## 子目录
+
+这个项目的子目录处理顺序是：
+
+### 创建库
+
+先处理 base/ → 定义 RCom_base 这个 INTERFACE 库
+
+``` cmake
+add_library(RCom_base INTERFACE)
+target_include_directories(RCom_base INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+```
+
+知识点——库类型：
+
+| 类型      | 含义                                                         |
+| --------- | ------------------------------------------------------------ |
+| STATIC    | 静态库，后缀`.a`                                             |
+| SHARED    | 动态库，后缀`.so`                                            |
+| INTERFACE | 仅头文件库，无编译产物，只传递头文件路径、编译选项、依赖等配置 |
+| MODULE    | 插件 / 动态加载模块，不可直接链接使用                        |
+| OBJECT    | 仅编译生成`.o`目标文件，不进行归档打包                       |
+
+### 依赖管理
+
+``` cmake
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0
+)
+FetchContent_MakeAvailable(googletest)
+```
+
+**FetchContent** 是 CMake 3.11 引入的模块，在 configure 阶段自动下载外部依赖。与 ExternalProject 相比， FetchContent 在 configure 阶段 完成下载，使得依赖的 target 在当前项目中 直接可用 （ ExternalProject 则在 build 阶段下载，需要额外的集成手段）。
+
+三步工作流：
+
+1. `include(FetchContent)` — 加载模块
+
+2. `FetchContent_Declare(...)` — 声明资源（但不下载）
+
+3. `FetchContent_MakeAvailable(...) `— 下载、配置、使 target 可用
+
+下载后，你可以直接链接 gtest_main （这是 Google Test 自带的带 main 函数的库），无需手动写 main() 。
+
+### 链接库 / 生成可执行文件
+
+再处理 base_test/ → 使用 RCom_base 库链接测试。
+
+``` c++
+add_executable(unbounded_queue_test
+    unbounded_queue_test.cpp
+)
+target_link_libraries(unbounded_queue_test PRIVATE  // PRIVATE 表示不对外传播
+    RCom_base
+    gtest_main
+)
+add_test(NAME unbounded_queue_test COMMAND unbounded_queue_test)  // 向CTest注册测试
+																  // NAME是名称，COMMAND 是要运行的可执行文件
+add_executable(macros_test
+    macros_test.cpp
+)
+target_link_libraries(macros_test PRIVATE
+    RCom_base
+    gtest_main
+)
+add_test(NAME macros_test COMMAND macros_test)
+
+```
+
+### target 命令族
+
+现代 CMake 推荐使用 target-centric 风格，避免全局污染：
+
+``` cmake
+add_library / add_executable          ← 定义 target
+target_include_directories()          ← 设置 include 路径
+target_compile_definitions()          ← 设置宏定义
+target_compile_options()              ← 设置编译选项
+target_link_libraries()               ← 设置链接库
+target_sources()                      ← 追加源文件
+```
+
 # 关键词
 
 关键词的两大类别：内存布局 vs 访问权限
@@ -139,7 +451,7 @@ uintptr_t address = reinterpret_cast<uintptr_t>(int_ptr);
 | **`const_cast`**       | 编译时       | 去除或增加 `const`/`volatile` 限定符           | 危险           | 只能改变指针/引用的修饰符，**绝不能**用于修改真正的 const 对象。 |
 | **`reinterpret_cast`** | 编译时       | 无关指针类型转换、指针与整数类型转换           | 极度危险       | 直接按位重解释，完全没有安全性可言，极易引发段错误或不可移植的 bug。 |
 
-### 实践建议
+### 使用经验
 
 1. **首选 C++ 风格：** 坚决废弃 C 风格的强转 `(int)x`。C++ 的 `cast` 语法更长，这本身就是一种设计——让你在敲代码时多思考一下“这个转换真的必要且安全吗？”，同时也方便在代码库中 `grep` 查找隐患。
 2. **默认使用 `static_cast`：** 当你需要转换且知道转换是良性的时。
@@ -852,7 +1164,6 @@ int main() {
   }
   ```
 
-  
 
 ---
 
@@ -869,7 +1180,120 @@ decltype(x)   a = x; // a 是 int
 decltype((x)) b = x; // b 是 int& (引用了 x)
 ```
 
+## `std::atomic<>`
 
+`std::atomic` 是 C++11 引入的一套底层原子操作接口，它解决的核心问题是多线程环境下对共享变量进行无锁、线程安全操作时的**数据竞争**与**内存可见性**问题。
+
+### 本质类模板
+
+`std::atomic` 是一个类模板，定义在 `<atomic>` 中：
+
+```c++
+template< class T >
+struct atomic;
+```
+
+它能包装一个类型 `T`，并提供对其的**原子读写和读-改-写操作**。
+
+- **整数类型**（`bool`, `char`, `int`, `long`, `size_t` 等）：支持 `fetch_add`、`fetch_sub`、`fetch_and`、`fetch_or`、`fetch_xor` 及对应的复合赋值运算符。
+- **指针类型**（`T*`）：支持 `fetch_add`、`fetch_sub`（按指针步长缩放）。
+- **浮点类型**（`float`, `double` 等，C++20 起）：支持 `fetch_add`、`fetch_sub`。
+- **用户自定义类型**（平凡可复制）：只能使用 `load`、`store`、`exchange`、`compare_exchange` 等基本操作。
+
+### 核心API
+
+#### `store` / `load`
+
+``` c++
+void store(T desired, std::memory_order order = std::memory_order_seq_cst);
+T    load(std::memory_order order = std::memory_order_seq_cst) const;
+```
+
+单纯写入或读取值。可指定内存序，默认是最严格的顺序一致性。
+
+#### `exchange`
+
+``` c++
+T exchange(T desired, std::memory_order order = std::memory_order_seq_cst);
+```
+
+原子地写入新值，并返回旧值。
+
+#### CAS操作
+
+原子编程中最重要的 **CAS（Compare-And-Swap）** 操作：
+
+``` c++
+bool compare_exchange_weak(T& expected, T desired,
+                           std::memory_order success,
+                           std::memory_order failure);
+bool compare_exchange_strong(T& expected, T desired,
+                             std::memory_order success,
+                             std::memory_order failure);
+```
+
+- 若当前值等于 `expected`，则将其替换为 `desired` 并返回 `true`。
+- 否则，将当前值写入 `expected`（更新期望值）并返回 `false`。
+
+**weak vs strong**：
+
+- `strong` 保证只在值不相等时才失败；`weak` 在某些平台上可能因**伪失败**（spurious failure）而返回 `false`，即使当前值与 `expected` 相同。`weak` 通常在循环中性能更好，需配合 `while` 使用：
+
+  ```c++
+  auto val = ai.load();
+  while (!ai.compare_exchange_weak(val, val + 1));
+  ```
+
+- `success` 指定 CAS 成功时的内存序，`failure` 指定失败时的内存序。要求 `failure` 不能比 `success` 更强。
+
+### 内存序
+
+这是 `std::atomic` 最核心也最容易出错的部分。不提供内存序时默认为 `seq_cst`（最强一致性），但为优化性能常选用更宽松的顺序。C++ 提供六种内存序，分为三组：
+
+#### 顺序一致性：`seq_cst`
+
+- 所有线程观察到的所有 `seq_cst` 操作的全序一致，且总序与各线程的程序顺序不矛盾。
+- 最符合直觉，但代价高昂（尤其在非 x86 平台上需要插入完整内存屏障）。
+- 适用场景：不确定时使用，或需要全局顺序保证。
+
+#### 获取-释放 Acquire-Release
+
+- `memory_order_acquire`：用于**读**操作，保证该操作之后的所有读写不会被重排到它之前，且该读会看到所有在对应 `release` 写之前的写入。
+- `memory_order_release`：用于**写**操作，保证该操作之前的所有读写不会被重排到它之后。
+- `memory_order_acq_rel`：兼具两者，用于 **读-改-写** 操作（如 `exchange`、`fetch_add` 或成功的 `compare_exchange`）。
+- 通常成对使用：一个线程 `store` 数据后用 `release` 写入标志；另一个线程用 `acquire` 读取标志后，可安全看到所有数据。
+
+#### `memory_order_relaxed`
+
+- 只保证操作的原子性，不提供任何顺序或可见性保证。可能发生重排。
+- 适用场景：简单的计数器统计（如引用计数增加，在没有与外部内存建立同步需求时）。典型用法是 `fetch_add(1, relaxed)` 只关注最终数值，不关心与其他操作的顺序。
+
+#### 内存序的选择原则
+
+- 若操作只是递增一个不控制其他内存的计数器，可用 `relaxed`。
+- 若一个线程发布数据，另一个线程访问数据，使用 `release` + `acquire`。
+- 读-改-写操作通常在循环中采用 `acquire`/`release` 或 `acq_rel`。
+- 默认 `seq_cst` 绝对安全但速度慢，逐渐替换为更精确的顺序。
+
+## `std::atomic_flag`
+
+`std::atomic_flag` 是无锁的原子布尔类型（保证无锁），但只提供两种操作：
+
+- `test_and_set(memory_order)`：原子地设为 `true` 并返回先前值。
+- `clear(memory_order)`：原子地设为 `false`。
+
+非常适合实现自旋锁：
+
+```c++
+class SpinLock {
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+public:
+    void lock() { while (flag.test_and_set(std::memory_order_acquire)); }
+    void unlock() { flag.clear(std::memory_order_release); }
+};
+```
+
+（C++20 起 `ATOMIC_FLAG_INIT` 不再必需，默认构造已初始化为 `false`。）
 
 # 常用库
 
@@ -1160,6 +1584,9 @@ Complex operator+(const Complex &c) const{
 - 临时对象：`typename()`是创建临时对象，到下一行就死亡，没有变量名都无所谓。
 
 ## 访问修饰符
+
+- **`class`** 默认访问权限是 `private`。
+- **`struct`** 默认访问权限是 `public`。
 
 | **访问修饰符**       | **可访问范围**                         | **核心作用与设计初衷**                                       |
 | -------------------- | -------------------------------------- | ------------------------------------------------------------ |
@@ -1967,7 +2394,7 @@ SFINAE 是**Substitution Failure Is Not An Error**的缩写，即 **"替换失�
 
 **核心原理**
 
-当编译器在进行**函数模板的参数替换**时，如果替换过程中出现了语法错误（比如访问不存在的成员），编译器不会直接抛出编译错误，而是会**将这个模板从重载候选集中移除**，继续尝试匹配其他重载。都是在编译态完成。
+当编译器在进行**函数模板的参数替换**时，如果替换过程中出现了语法错误（比如访问不存在的成员），编译器不会直接抛出编译错误，而是会**将这个模板从重载候选集中移除**，继续尝试匹配其他重载。在编译态完成。
 
 ---
 
@@ -1990,6 +2417,11 @@ struct name
 
     static constexpr bool value = test(nullptr);
 };
+
+ template <typename T>
+ constexpr bool name<T>::value;
+
+DEFINE_TYPE_TRAIT(HasFoo, foo)
 ```
 
 这段代码**无法正常工作**，当`T`没有`func`成员时，会直接触发**编译错误**，而不是返回`false`。
@@ -2017,7 +2449,7 @@ struct name
 
 ## 使用场景
 
-### 函数模板
+### 模板函数
 
 可以指定类型，也可以让编译器进行参数推导：
 
@@ -2046,7 +2478,7 @@ printPair(10, "Hello");  // T1=int, T2=const char*
 printPair(3.14, true);   // T1=double, T2=bool
 ```
 
-### 类模板
+### 模板类
 
 类模板是 C++ 中实现**泛型编程**的核心机制。它允许定义一个 “通用的类”，这个类不绑定具体的数据类型（比如 int、float、string 等），而是用一个**类型参数**（比如 T）来占位。
 
@@ -2088,7 +2520,28 @@ int main() {
 }
 ```
 
-### 成员函数模板
+---
+
+**如果在类外定义模板类的成员函数：**
+
+``` c++
+template <typename T>
+BoundedQueue<T>::~BoundedQueue() {
+  if (wait_strategy_) {
+    BreakAllWait();
+  }
+  if (pool_) {
+    for (uint64_t i = 0; i < pool_size_; ++i) {
+      pool_[i].~T();
+    }
+    std::free(pool_);
+  }
+}
+```
+
+
+
+### 模板成员函数
 
 在类内部定义的**模板成员**（函数或嵌套类），类本身**不一定**是模板。
 
@@ -2152,7 +2605,119 @@ int main() {
     constexpr bool name<T>::value;                              \
 ```
 
+---
+
+- **类外定义普通类的模板成员函数：**
+
+  ``` c++
+  template <typename U>
+  void MyClass::show(U u) const {
+      // ...
+  }
+  ```
+
+- **类外定义模板类的模板成员函数：**
+
+  ``` c++
+  template <typename T>
+  template <typename U>
+  void MyClass<T>::show(U u) const{
+      // ...
+  }
+  ```
+
+  
+
 ## 模板特化
+
+### 匹配优先级
+
+当我们在代码中实例化一个模板时（例如 `DataLinkBuffer<int, 12> obj;`），编译器会按照**最特化原则 (Most Specialized Rule)** 进行匹配：
+
+1. **第一顺位：全特化。** 检查是否有完全一模一样的全特化版本。
+2. **第二顺位：偏特化。** 检查是否符合某个偏特化版本的特征。如果有多个偏特化都匹配，编译器会选择约束最严格、最具体的那一个（如果无法区分谁更具体，会报二义性编译错误）。
+3. **第三顺位：主模板。** 如果以上都没有匹配，使用通用的主模板。
+
+### 全特化
+
+全特化是指**将主模板的所有参数都指定为具体的类型或数值**。它相当于为某个极度特定的场景开辟了“VIP 通道”。一旦编译器发现传入的类型与全特化完全吻合，就会毫不犹豫地选择它。
+
+**语法特点：** `template <>`（尖括号内为空），然后紧跟具体的类名和类型参数。
+
+``` c++
+// 主模板：通用的数据链路缓冲区
+template <typename T, int Size>
+class DataLinkBuffer {
+public:
+    void process() {
+        // 通用的字节流处理逻辑
+    }
+private:
+    T data[Size];
+};
+
+
+// 全特化：针对 IMUSensorData 并且 Size=1 的情况
+template <>
+class DataLinkBuffer<IMUSensorData, 1> {
+public:
+    void process() {
+        // 针对 IMU 数据的定制解析逻辑
+        // 可能包含特定的 CRC 校验、大小端转换或卡尔曼滤波预处理
+    }
+private:
+    IMUSensorData imu_data;
+};
+```
+
+### 偏特化
+
+偏特化介于主模板和全特化之间。它**只指定了部分模板参数，或者对参数的某种“特征”进行了限制**（比如限定为指针类型、引用类型、特定的数组长度等）。
+
+**核心注意点：** C++ 标准规定，**只有类模板（Class Templates）可以被偏特化，函数模板（Function Templates）不能偏特化**（但可以通过函数重载来达到类似效果）。
+
+``` c++
+// 1. 通用双参数类模板
+template <typename T, typename U>
+class Pair {
+public:
+    T first;
+    U second;
+    void show() { cout << "通用模板: " << first << "," << second << endl; }
+};
+
+// 2. 偏特化：固定 U = int，T 任意
+template <typename T>  // 保留未指定的参数
+class Pair<T, int> {   // 部分定制
+public:
+    T first;
+    int second;
+    void show() { cout << "偏特化(U=int): " << first << "," << second << endl; }
+};
+```
+
+限制类型（指针/引用）：
+
+``` c++
+// 1. 通用类模板
+template <typename T>
+class MyData {
+public:
+    T value;
+    void show() { cout << "通用模板: " << value << endl; }
+};
+
+// 2. 偏特化：T 是【指针类型】时生效
+template <typename T>
+class MyData<T*> {  // 类型限制：指针
+public:
+    T* value;
+    void show() { cout << "指针偏特化: " << *value << endl; }
+};
+```
+
+
+
 ## 可变参数模板
 
 variadic templates（since C++11）。把调用者传入的参数分为一个（和argc和argv不一样：可变模板第一个参数不用是参数的数量，可以随便做任何事情）和一包。
@@ -2161,7 +2726,7 @@ variadic templates（since C++11）。把调用者传入的参数分为一个（
 
 ``` c++
 template <typename T, typename... Types>
-void print(const T& FirstArg, const Types&... args){
+void print(const T &FirstArg, const Types&... args){
     cout<< FirstArg<<end;
     print(args...);
 }
@@ -2788,7 +3353,7 @@ void MYACTUA::enqueue_discrete_command(const ControlCommand& cmd)
 
 栈是存在于某一个作用域的一块内存空间，例如函数本身会形成一个栈来放置它接受的参数、返回地址、`local object`，只要离开作用域就会消失。
 
-### new/delete
+### new / delete
 
 <img src="./assets/new一个类的过程.png" alt="new一个类的过程" style="zoom: 33%;" />
 
@@ -2827,6 +3392,53 @@ void MYACTUA::enqueue_discrete_command(const ControlCommand& cmd)
 当用`new[]`分配数组时，编译器会在实际数组内存的前方额外分配一小块内存来存储数组的元素个数（这个信息对程序员不可见，但编译器会用到）。
 
 `array new`要搭配`array delete`也就是`delete[]`，让编译器知道是要删除一个数组，会**多次调用析构函数**，不然会导致析构函数未调用发生内存泄漏。
+
+#### placement new
+
+**Placement new** 是 C++ 中一种特殊的 `new` 表达式，它允许你在**已经分配好的内存**上构造对象，而不会重新分配内存。普通 `new` 做了两件事：
+
+1. 调用 `operator new` 分配原始内存；
+2. 在这块内存上调用构造函数，创建对象。
+
+而 placement new 会**跳过第一步**，只做第二步：在你提供的内存地址上直接调用构造函数。
+
+``` c++
+// 普通 new：分配 + 构造
+Foo* p = new Foo(42);
+
+// placement new：在指定地址构造
+#include <new>   // 必须包含这个头文件，或者显式声明 placement new
+void* buffer = malloc(sizeof(Foo));
+Foo* p2 = new (buffer) Foo(42);   // 在 buffer 位置构造一个 Foo
+```
+
+---
+
+用 placement new 构造的对象，**不能使用 `delete`**，只能显式调用析构函数，然后自行回收内存。
+
+```c++
+obj->~MyClass();          // 析构对象
+// 然后再释放 pool 或其他内存
+```
+
+`delete` 会先析构再释放内存，但这里的“内存”不是用 `operator new` 分配的，所以 `delete` 会导致未定义行为。
+
+---
+
+不要对 placement new 数组使用 `delete[]`
+
+``` c++
+new (buffer) int[10]();
+```
+
+这样的数组也不能 `delete[]`，必须手动循环析构：
+
+``` c++
+for (int i = 0; i < 10; ++i)
+    arr[i].~int();   // 对于标量类型其实可以省略
+```
+
+
 
 ## 智能指针
 
@@ -2988,4 +3600,3 @@ public:
 double imag(const double & im) const { ... }
 double imag(const double   im) const { ... }
 ```
-
