@@ -227,28 +227,107 @@ CMake 项目组织的核心命令。工作原理：
 
 ## 子目录
 
-这个项目的子目录处理顺序是：
+### 构建库
 
-### 创建库
+先处理 base/ → 定义 RCom_base 这个 INTERFACE 库：
 
-先处理 base/ → 定义 RCom_base 这个 INTERFACE 库
+1.使用`add_library`命令来声明一个库目标，告诉 CMake 需要构建什么类型的库以及由哪些**源文件**组成。
+
+``` cmake
+add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
+            [EXCLUDE_FROM_ALL]
+            [source1] [source2 ...])
+```
+
+**库类型**
+
+| 类型          | 说明                                                         |
+| :------------ | :----------------------------------------------------------- |
+| **STATIC**    | 静态库（`.a` / `.lib`），编译时链接到可执行文件              |
+| **SHARED**    | 动态库/共享库（`.so` / `.dll`），运行时加载                  |
+| **MODULE**    | 插件式动态库，不会被直接链接，通常用 `dlopen` 加载           |
+| **OBJECT**    | 只编译源文件为目标文件（`.o`/`.obj`），不打包成库，可用于后续组合 |
+| **INTERFACE** | 不生成实际的二进制文件，只携带使用要求（头文件路径、编译选项等），通常用于 header-only 库 |
+
+---
+
+2.`target_include_directories` —— **指定头文件搜索路径**
+
+这个命令用于为指定的目标添加头文件包含目录。它可以精确控制这些路径的传播范围，是现代 CMake 中替代全局 `include_directories` 的推荐方式。
+
+```cmake
+target_include_directories(<target>
+    <INTERFACE|PUBLIC|PRIVATE> [items1...]
+    <INTERFACE|PUBLIC|PRIVATE> [items2...] ...)
+```
+
+- `<target>`：必须是由 `add_library` 或 `add_executable` 创建的目标。
+- 路径项通常是绝对路径或相对路径（相对于当前 `CMakeLists.txt`），常用 `CMAKE_CURRENT_SOURCE_DIR` 来构造。
+
+**传播控制关键字的含义**：这是整个命令的精华，用来管理依赖关系中的包含路径传递：
+
+- **PRIVATE**
+  包含目录只对 `<target>` 自身的编译有效，不会传递给依赖它的其他目标。
+  适用于：**库内部使用的头文件，不暴露给使用者**。
+- **INTERFACE**
+  包含目录不会用于 `<target>` 自己的编译，但会传递给所有直接链接了该目标的其他目标。适用于：header-only 库（`INTERFACE` 库）或者提供纯接口依赖的场景。
+- **PUBLIC**
+  同时具有 `PRIVATE` 和 `INTERFACE` 的效果：既用于自己的编译，也传递给依赖者。
+  适用于：库的公共头文件目录，库自身和外部使用者都需要。
+
+假设库的结构如下：
+
+```cmake
+my_lib/
+├── include/          # 公共头文件
+│   └── my_lib/
+│       └── api.h
+├── src/              # 私有实现
+│   ├── internal.h
+│   └── impl.cpp
+└── CMakeLists.txt
+```
+
+在 `CMakeLists.txt` 中应这样写：
+
+```cmake
+add_library(my_lib STATIC src/impl.cpp)
+
+target_include_directories(my_lib
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include   # 使用者需要找到 api.h
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src       # 只有 my_lib 自己编译时需要 internal.h
+)
+```
+
+当另一个目标 `app` 链接 `my_lib` 时：
+
+```cmake
+add_executable(app main.cpp)
+target_link_libraries(app PRIVATE my_lib)
+```
+
+- `app` 会自动获得 `include/` 目录作为包含路径，从而能 `#include "my_lib/api.h"`。
+- 但 `app` **不会**获得 `src/` 目录，因此无法包含 `internal.h`，实现了良好的封装。
+
+对于 `header-only` 库（`INTERFACE` 库）：
+
+```cmake
+add_library(my_header_lib INTERFACE)
+target_include_directories(my_header_lib INTERFACE include/)
+```
+
+这里使用 `INTERFACE`，因为库本身没有编译步骤，所有包含需求都传递给使用者。
+
+如果不显式指定类型，默认行为由全局变量 `BUILD_SHARED_LIBS` 决定：`ON` 时生成动态库，`OFF` 时生成静态库。
 
 ``` cmake
 add_library(RCom_base INTERFACE)
 target_include_directories(RCom_base INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 ```
 
-知识点——库类型：
-
-| 类型      | 含义                                                         |
-| --------- | ------------------------------------------------------------ |
-| STATIC    | 静态库，后缀`.a`                                             |
-| SHARED    | 动态库，后缀`.so`                                            |
-| INTERFACE | 仅头文件库，无编译产物，只传递头文件路径、编译选项、依赖等配置 |
-| MODULE    | 插件 / 动态加载模块，不可直接链接使用                        |
-| OBJECT    | 仅编译生成`.o`目标文件，不进行归档打包                       |
-
-### 依赖管理
+### 外部依赖
 
 ``` cmake
 include(FetchContent)
@@ -327,6 +406,92 @@ CV 类型限定符 (CV-Qualifiers)
   - 当你写下 `const` 时，你是在对**编译器**下指令：在语义分析阶段，拦截一切试图修改这块内存地址的写操作（Write Access）。
 
 >  语义定语的优先级：先定“生死”，再定“权限”。
+
+## `typedef`
+
+**几乎是理解所有 `typedef` 声明的通用方法：**
+
+1. **去掉 `typedef`**  
+2. **看它声明了什么类型的变量**  
+3. **把这个变量的类型命名为这个变量名**
+
+这个办法之所以万能，是因为 `typedef` 的语法设计本身就是完全模仿变量声明的。不管声明多复杂，它都适用。
+
+---
+
+### 最简单的指针
+```cpp
+typedef _Tp* pointer;
+```
+- 去掉 `typedef` → `_Tp* pointer;`
+- `pointer` 是 `_Tp*` 类型的变量  
+- 所以 `pointer` 被定义为 `_Tp*` 的别名
+
+---
+
+### 数组
+```cpp
+typedef int Arr[10];
+```
+- 去掉 `typedef` → `int Arr[10];`  
+- `Arr` 是“长度为10的 int 数组”  
+- 所以 `Arr` 就是 `int[10]` 的别名  
+
+使用：
+```cpp
+Arr a;  // 等价于 int a[10];
+```
+
+---
+
+### 函数指针
+```cpp
+typedef void (*FuncPtr)(int);
+```
+- 去掉 `typedef` → `void (*FuncPtr)(int);`  
+- 这是一个函数指针 `FuncPtr`，指向“参数为 int，返回 void”的函数  
+- 所以 `FuncPtr` 就是该函数指针类型的别名  
+
+使用：
+```cpp
+void foo(int x) {}
+FuncPtr f = foo; // 等价于 void (*f)(int) = foo;
+```
+
+---
+
+### 更复杂的函数返回指针
+```cpp
+typedef int* (*PF)(double);
+```
+- 去掉 `typedef` → `int* (*PF)(double);`  
+- `PF` 是一个指针，指向“参数为 double，返回 `int*`”的函数  
+- 所以 `PF` 就是这个函数指针类型的别名
+
+---
+
+### 为什么这个办法总能成功？
+因为 C/C++ 的声明语法规定：**声明一个变量时，类型修饰符（`*`、`[]`、`()`）是围绕变量名展开的**。  
+`typedef` 只是把“变量名”这个位置换成了“类型别名”，其他完全不变。
+
+---
+
+### 一个容易踩坑的小例外
+当 `typedef` 和 `const` 等限定符混用时，需要注意修饰的对象是谁。例如：
+```cpp
+typedef char* pstring;
+const pstring cstr;  // cstr 的类型是 char* const（指针本身是常量），而非 const char*
+```
+这里 `const` 修饰的是整个 `pstring` 这个类型，而 `pstring` 本身是指针，所以 `const` 会作用于指针本身.这不影响你用“去 typedef 看变量”的方法理解原始声明，只是使用别名时需要留意它已经是一个打包好的完整类型。
+
+你可能会下意识地把 `const pstring` 直接展开成 `const char*`，但这是**错误的文本替换思维**。
+在 C++ 的类型系统中，**`const char*` 是“指向 `const char` 的指针”（指针可变，指向的内容不可变），这与“指针本身是常量”完全是两个不同类型**。
+
+---
+
+所以你总结的心法完全正确：  
+**把 `typedef` 当成在声明一个变量，这个变量的“类型”就是你想定义的别名。**  
+以后不管碰到多复杂的 `typedef`，用这招都能一步步推出来。
 
 ## 类型转换
 
@@ -1245,6 +1410,82 @@ bool compare_exchange_strong(T& expected, T desired,
   ```
 
 - `success` 指定 CAS 成功时的内存序，`failure` 指定失败时的内存序。要求 `failure` 不能比 `success` 更强。
+
+---
+
+CAS 配合 `do-while` 的核心判断是：**循环体里的操作能不能在 CAS 失败后安全重来或丢弃**。
+
+适合放进 `do-while` 的内容：
+
+```cpp
+do {
+    new_value = old_value + 1;
+} while(!atomic.compare_exchange_weak(old_value, new_value));
+```
+
+这类通常是：
+
+- 根据 `old_value` 计算 `new_value`读取候选值，但**失败后可以覆盖或丢弃**
+- 不修改共享结构
+- 不释放内存
+- 不通知其他线程
+
+比如 `BoundedQueue::Enqueue` 里：
+
+```cpp
+do {
+    new_tail = old_tail + 1;
+    if(full)
+        return false;
+} while(!tail_.compare_exchange_weak(old_tail, new_tail));
+```
+
+这里循环里只是计算和判断，CAS 失败后重新算即可。
+
+不适合放进 `do-while` 的内容：
+
+```cpp
+do {
+    old_tail->next = node;
+    old_tail->release();
+    size_.fetch_add(1);
+} while(!tail_.compare_exchange_weak(old_tail, node));
+```
+
+这类不适合，因为这些操作已经改变了外部状态：
+
+- 链接链表节点
+- 修改共享内存结构
+- 增减引用计数
+- `delete/free`
+- `size_++ / size_--`
+- `notify/wakeup`
+- 写入日志、发送消息、提交任务等不可撤销动作
+
+CAS 失败时，这些动作已经发生，可能导致重复链接、重复计数、提前释放、状态损坏。
+
+一个简单准则：
+
+```cpp
+do {
+    准备 candidate;
+    
+  检查是否允许;
+} while(!CAS(old, candidate));
+
+CAS成功后的提交动作;
+```
+
+也就是：**do-while 里放“准备”，CAS 成功后放“提交”。**
+
+对于 `compare_exchange_weak` 还要特别注意：它允许“伪失败”，也就是说即使值没变也可能返回失败。所以循环体必须能安全重复执行。`compare_exchange_strong` 虽然没有这种常规伪失败语义，但并发失败仍然很常见，原则上也一样。
+
+放到你的两个队列里：
+
+- `BoundedQueue::Enqueue`：适合，循环里只是计算 `new_tail` 和判断满。
+- `BoundedQueue::Dequeue`：基本可行，因为提前读 `pool_` 是可覆盖的，但更稳妥的风格是 CAS 成功后再写 `*element`。
+- `UnboundedQueue::Enqueue`：CAS 循环里不应放 `old_tail->next = node`、`release()`、`size_++`。
+- `UnboundedQueue::Dequeue`：CAS 循环里不应提前 `release old_head` 或 `size_--`，只能在 CAS 成功后做。
 
 ### 内存序
 
@@ -2759,250 +3000,6 @@ void print(const T &FirstArg, const Types&... args){
   - `print(args...);` 展开为 `print(arg1, arg2, arg3);`
   - `print(&args...);` 展开为 `print(&arg1, &arg2, &arg3);` （对每个参数取地址后再传递）
 
-# array与vector
-
-数组不保证其内容被初始化，而`vector`则保证。
-
-## 定义数组（C风格）
-
-在C/C++中，以下情况需要显式指明数组大小：
-
-- **不提供初始化列表时（无enum/数组内容）**：如果定义数组时不初始化，必须指定大小。例如：
-
-  ```c
-  int arr[10]; // 必须指明大小
-  ```
-
-
-- **数组是局部变量且未初始化**：如果数组是局部变量且未初始化，必须指定大小：
-
-  ```c
-  void func() {
-      int arr[10]; // 必须指明大小
-  }
-  ```
-- **C++的堆数组（new[]）**：在C++中用`new`分配数组时必须指明大小：
-
-  ```c
-  int *arr = new int[10]; // 必须指明大小
-  ```
-
-
-- **数组是头文件中的声明**：如果在头文件中声明一个数组（非定义），通常需要指定大小：
-
-  ```c
-  // header.h
-  extern int arr[10];
-  ```
-
-
-- **数组作为函数参数（且以数组形式声明）**：可以省略第一维的大小（比如`int arr[]`），但其他维度必须指明。例如：
-
-  ```c
-  void func(int arr[]);    // 合法，一维数组可以省略大小
-  void func(int arr[][10]); // 多维数组必须指明其他维度
-  ```
-
-- **字符串数组**的大小会多包含一个`\0`，C++中对字符串处理的函数如`strlen()`，`strcmp()`等在`cstring`库中。
-
-  ```c
-  char src[] = "Hello, World!";
-  char dest[20] = {0};
-  memcopy(dest, src, strlen(src) + 1); // +1 包含 '\0'
-  ```
-
-- **字符串数组存储的是指向字符串的指针！**修改字符串数组某个下标的字符串本质是修改这个下标存储的指针指向的地址。
-
-## array容器
-
-在 C++ 中，`std::array` 是 C++11 引入的容器，旨在作为**原生数组**（C-style array）的现代替代品。它完美地兼顾了原生数组的**高性能**和标准库容器的**安全性与易用性**。
-
-要使用 `std::array`，需要包含头文件 `<array>`。
-
-``` c++
-#include <iostream>
-#include <array>
-#include <algorithm>
-
-int main() {
-    // 定义：std::array<类型, 大小>
-    std::array<int, 5> arr = {1, 2, 3, 4, 5};
-
-    // 访问元素
-    std::cout << "第一个元素: " << arr[0] << std::endl;      // 不进行越界检查
-    std::cout << "第二个元素: " << arr.at(1) << std::endl;   // 越界会抛出异常（更安全）
-
-    // 获取大小
-    std::cout << "数组大小: " << arr.size() << std::endl;
-
-    return 0;
-}
-```
-
-
-
-## vector容器
-
-### 本质特性
-
-- **连续内存存储**：和普通数组一样，元素在内存中紧挨着，支持**随机访问**（下标 O (1) 访问）
-- **动态扩容**：元素超出当前容量时，自动申请更大内存，迁移元素，释放旧内存
-
-​	当 `size == capacity` 时插入元素，vector 会自动扩容：扩容会重新分配内存→拷贝 / 移动元素→释放旧内存，**迭代器会全部失效**
-
-​	GCC：**1.5 倍扩容**；MSVC：**2 倍扩容**
-
-- **模板类**：可存储任意类型（int、char、结构体、类对象、指针等），**不能直接存引用**
-- **尾部操作高效**：尾插 / 尾删 O (1)，中间插入 / 删除 O (n)（需移动元素）
-
-vector 内部通过**三个指针**管理内存：
-
-1. `_Start`：指向数组起始地址
-2. `_Finish`：指向**最后一个有效元素的下一个位置**（对应 size）
-3. `_EndOfStorage`：指向分配内存的末尾（对应 capacity）
-
-> `size`：实际存储的元素个数
->
-> `capacity`：当前已分配的总容量（≥size）
-
----
-
- 1. 迭代器失效问题（高频坑点）
-
-以下操作会导致迭代器失效：
-
-1. **扩容操作**：push_back、emplace_back、resize、reserve 等（重新分配内存）
-2. **中间插入 / 删除**：insert、erase（元素移动，迭代器位置偏移）
-
-> 解决：操作后重新获取迭代器，不要保存旧迭代器
-
- 2. 连续内存特性
-
-- vector 元素一定是**连续内存**，可通过`data()`或`&v[0]`传给 C 语言接口
-- 不同于 list（链表，非连续）、deque（分段连续）
-
- 3. 存储对象的要求
-
-- 存储自定义对象时，类需支持**拷贝构造 / 移动构造**（vector 扩容 / 拷贝会用到）
-- 不能存储**引用**（引用无独立内存，无法拷贝），可存指针
-
-### 构造函数
-
-| 构造方式      | 语法                          | 说明                                                    |
-| ------------- | ----------------------------- | ------------------------------------------------------- |
-| 默认构造      | `vector<T> v;`                | 创建空 vector                                           |
-| 带大小构造    | `vector<T> v(n);`             | 创建 n 个元素，值为类型默认值（int=0，对象 = 默认构造） |
-| 大小 + 初始值 | `vector<T> v(n, val);`        | 创建 n 个值为 val 的元素                                |
-| 拷贝构造      | `vector<T> v1(v2);`           | 拷贝 v2 所有元素                                        |
-| 移动构造      | `vector<T> v(std::move(v2));` | 转移 v2 资源，v2 变空                                   |
-| 迭代器区间    | `vector<T> v(arr, arr+5);`    | 用数组 / 其他容器迭代器初始化                           |
-| 初始化列表    | `vector<T> v{1,2,3,4};`       | C++11 直接初始化                                        |
-
-示例：
-
-``` c++
-vector<int> v1;                  // 空
-vector<int> v2(5);               // 5个0
-vector<int> v3(5, 10);           // 5个10
-vector<int> v4(v3);              // 拷贝v3
-vector<int> v5{1,2,3,4,5};       // 初始化列表
-int arr[] = {1,2,3};
-vector<int> v6(arr, arr+3);      // 数组初始化
-```
-
-### 迭代器（Iterator）
-
-vector 支持**随机访问迭代器**，用于遍历 / 操作元素，常用迭代器函数：
-
-| 函数                    | 作用                                         |
-| ----------------------- | -------------------------------------------- |
-| `v.begin()`             | 指向**第一个元素**的迭代器                   |
-| `v.end()`               | 指向**最后一个元素的下一个位置**（左闭右开） |
-| `v.rbegin()`            | 反向迭代器，指向最后一个元素                 |
-| `v.rend()`              | 反向迭代器，指向第一个元素前一位置           |
-| `v.cbegin()`/`v.cend()` | 常量迭代器（不能修改元素）                   |
-
-``` c++
-vector<int> v{1,2,3};
-// 1. 迭代器遍历
-for(vector<int>::iterator it = v.begin(); it != v.end(); ++it){
-    cout << *it << " ";
-}
-// 2. C++11 范围for
-for(auto x : v) cout << x << " ";
-// 3. 下标遍历（最常用）
-for(int i=0; i<v.size(); ++i) cout << v[i] << " ";
-```
-
-### 操作函数
-
-#### 核心容量函数
-
-| 函数                | 作用                                 | 时间复杂度 |
-| ------------------- | ------------------------------------ | ---------- |
-| `v.size()`          | 获取实际元素个数                     | O(1)       |
-| `v.capacity()`      | 获取当前总容量                       | O(1)       |
-| `v.empty()`         | 判断是否为空（size=0）               | O(1)       |
-| `v.resize(n)`       | 调整**元素个数**为 n，多删少补默认值 | O(n)       |
-| `v.resize(n, val)`  | 调整大小为 n，新增元素值为 val       | O(n)       |
-| `v.reserve(n)`      | 预分配**容量**为 n，不改变 size      | O(n)       |
-| `v.shrink_to_fit()` | 释放多余容量，capacity=size          | O(n)       |
-
-#### 随机访问
-
-vector 支持**随机访问**，效率 O (1)：
-
-| 函数        | 作用               | 注意                                   |
-| ----------- | ------------------ | -------------------------------------- |
-| `v[i]`      | 访问第 i 个元素    | **不检查越界**，越界行为未定义         |
-| `v.at(i)`   | 访问第 i 个元素    | **检查越界**，越界抛`out_of_range`异常 |
-| `v.front()` | 获取第一个元素     | 空 vector 调用崩溃                     |
-| `v.back()`  | 获取最后一个元素   | 空 vector 调用崩溃                     |
-| `v.data()`  | 返回底层数组首地址 | 等价于 & v [0]，用于兼容 C 接口        |
-
-#### 增删改
-
-**尾部：**
-
-| 函数                   | 作用                                     |
-| ---------------------- | ---------------------------------------- |
-| `v.push_back(val)`     | 尾部插入元素 val                         |
-| `v.pop_back()`         | 删除尾部元素，无返回值                   |
-| `v.emplace_back(args)` | C++11**原位构造**元素，比 push_back 高效 |
-
-`emplace_back` vs `push_back`：
-
-- push_back：先构造临时对象，再拷贝 / 移动到 vector
-- emplace_back：直接在 vector 内存中构造对象，**少一次拷贝 / 移动**
-
----
-
-**任意位置：**
-
-| 函数                    | 作用                                | 时间复杂度          |
-| ----------------------- | ----------------------------------- | ------------------- |
-| `v.insert(pos, val)`    | 在迭代器 pos 处插入 val             | O(n)                |
-| `v.insert(pos, n, val)` | 在 pos 处插入 n 个 val              | O(n)                |
-| `v.erase(pos)`          | 删除迭代器 pos 处元素               | O(n)                |
-| `v.erase(beg, end)`     | 删除区间 [beg,end) 元素             | O(n)                |
-| `v.clear()`             | 清空所有元素，size=0，capacity 不变 | O(n)                |
-| `v.swap(v2)`            | 交换两个 vector 的所有内容          | O (1)（仅交换指针） |
-| `v.assign(n, val)`      | 赋值 n 个 val，覆盖原有元素         | O(n)                |
-| `v.assign(beg, end)`    | 用迭代器区间赋值                    | O(n)                |
-
-示例：
-
-``` c++
-vector<int> v{1,2,3};
-v.push_back(4);      // {1,2,3,4}
-v.pop_back();        // {1,2,3}
-v.insert(v.begin()+1, 9); // {1,9,2,3}
-v.erase(v.begin());  // {9,2,3}
-v.clear();           // 空
-```
-
-
-
 # 字符串类
 
 `std::string` 是 C++ 标准库提供的字符串类，本质是一个**动态字符数组**，**自动管理内存**（无需手动 malloc/free 或 new/delete），支持丰富的字符串操作函数。
@@ -3106,7 +3103,7 @@ s1.append("123", 2); // 拼接前2个字符："12"
 
 ### 比较
 
-支持所有**比较运算符**，也可使用 `compare()` 函数：
+####  `compare()` 函数
 
 - 规则：按**ASCII 码字典序**比较
 
@@ -3126,6 +3123,105 @@ cout << (a != b);  // 1
 a.compare(c);      // 0（相等）
 a.compare(b);      // 负数（a < b）
 b.compare(a);      // 正数（b > a）
+```
+
+---
+
+#### 运算符重载
+
+`std::string` 重载了全套比较运算符：`==`、`!=`、`<`、`<=`、`>`、`>=`。这些运算符有两个特点：
+
+- **基于字典序**：比较的是字符序列，默认按底层字符编码（通常 ASCII/UTF-8 码点）逐字符对比。
+- **非成员函数**：它们不是 `string` 的成员函数，而是定义在 `std` 命名空间下的全局函数，这样左右操作数都可以隐式转换（比如一个 `string` 和一个 `const char*` 比较）。
+
+**底层实现**大致等价于：
+
+``` c++
+bool operator==(const string& lhs, const string& rhs) {
+    return lhs.compare(rhs) == 0;
+}
+bool operator<(const string& lhs, const string& rhs) {
+    return lhs.compare(rhs) < 0;
+}
+```
+
+`compare` 成员函数内部又使用了 `char_traits<char>::compare`，它本质上就是逐字节/逐字符的词典序比较。
+
+---
+
+#### `Compare`对象
+
+`Compare comp` 是 STL **泛型算法或容器**用来**定制排序/等价（怎么比大小）规则**的一个参数。
+
+- **它是什么类型**：一个可调用对象（函数、函数对象、lambda），它接受两个相同类型的参数，返回 `bool`，表示“第一个参数是否应在第二个参数之前”（严格弱序）。
+- **它出现在哪里**：
+  - **算法**：`std::sort(begin, end, comp)`、`std::lower_bound(begin, end, value, comp)` 等。
+  - **容器**：`std::map<Key, Value, Compare>`、`std::set<Key, Compare>` 的第三个模板参数，默认是 `std::less<Key>`。
+
+**严格弱序要求：`Compare` 必须遵守的契约**
+
+`Compare` 不仅仅是个可调用对象，它必须满足**严格弱序**，否则容器/算法的行为是未定义的。简单来说：
+
+1. **非自反**：`comp(a, a)` 必须为 `false`。
+2. **可传递**：若 `comp(a, b) && comp(b, c)`，则 `comp(a, c)`。
+3. **等价关系可传递**：若 `equiv(a,b)` 且 `equiv(b,c)`，则 `equiv(a,c)`，其中 `equiv` 定义为 `!comp(a,b) && !comp(b,a)`。
+
+你的自定义比较器必须遵守这些规则，否则程序可能崩溃或产生无限循环
+
+---
+
+#### 自定义比较规则
+
+当你需要以非默认方式（例如不区分大小写）对 `string` 排序或存放时，就轮到 `Compare comp` 上场了。你自定义一个 `Compare` 对象，传给 `std::sort` 或者 `std::set`。
+
+示例1：对 `vector<string>` 不区分大小写排序
+
+```c++
+#include <iostream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+
+// 定义一个不区分大小写的比较函数
+bool case_insensitive_less(const std::string& a, const std::string& b) {
+    // 用 c_str() + 循环，或 C++14 的 std::mismatch，这里简化用逐字符比较
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) {
+        char ca = std::tolower(static_cast<unsigned char>(a[i]));
+        char cb = std::tolower(static_cast<unsigned char>(b[i]));
+        if (ca != cb) return ca < cb;
+    }
+    return a.size() < b.size();
+}
+
+int main() {
+    std::vector<std::string> words = {"apple", "Banana", "cherry", "APPLE"};
+    // comp 作为参数传入
+    std::sort(words.begin(), words.end(), case_insensitive_less);
+    // 输出排序结果
+    for (auto& w : words) std::cout << w << ' ';
+}
+```
+
+示例2：用 `std::set` 存放不区分大小写的 `string`
+
+```c++
+#include <set>
+
+// 比较器写成函数对象
+struct CaseInsensitiveCompare {
+    bool operator()(const std::string& a, const std::string& b) const {
+        // 逻辑同上
+        return case_insensitive_less(a, b);
+    }
+};
+
+int main() {
+    // Compare 作为模板参数，set 内部用这个对象来排序和判断唯一性
+    std::set<std::string, CaseInsensitiveCompare> words_set;
+    words_set.insert("Hello");
+    words_set.insert("HELLO");  // 视为重复，不会被插入
+}
 ```
 
 ### 查找
@@ -3201,7 +3297,7 @@ string s = arr;  // 自动转换
 
 ## 非成员函数
 
-### 字符串 ↔ 数字
+### 字符串 → 数字
 
 C++11 提供了**内置转换函数**，无需手写算法，完美支持数字与字符串互转。
 
