@@ -391,6 +391,10 @@ target_sources()                      ← 追加源文件
 
 # 关键词
 
+## `typename`
+
+
+
 关键词的两大类别：内存布局 vs 访问权限
 
 存储期与链接属性说明符 (Storage Class Specifiers)
@@ -421,7 +425,7 @@ CV 类型限定符 (CV-Qualifiers)
 
 ### 最简单的指针
 ```cpp
-typedef _Tp* pointer;
+typedef _Tp *pointer;
 ```
 - 去掉 `typedef` → `_Tp* pointer;`
 - `pointer` 是 `_Tp*` 类型的变量  
@@ -460,7 +464,7 @@ FuncPtr f = foo; // 等价于 void (*f)(int) = foo;
 
 ---
 
-### 更复杂的函数返回指针
+### 函数返回指针
 ```cpp
 typedef int* (*PF)(double);
 ```
@@ -470,7 +474,6 @@ typedef int* (*PF)(double);
 
 ---
 
-### 为什么这个办法总能成功？
 因为 C/C++ 的声明语法规定：**声明一个变量时，类型修饰符（`*`、`[]`、`()`）是围绕变量名展开的**。  
 `typedef` 只是把“变量名”这个位置换成了“类型别名”，其他完全不变。
 
@@ -482,10 +485,7 @@ typedef int* (*PF)(double);
 typedef char* pstring;
 const pstring cstr;  // cstr 的类型是 char* const（指针本身是常量），而非 const char*
 ```
-这里 `const` 修饰的是整个 `pstring` 这个类型，而 `pstring` 本身是指针，所以 `const` 会作用于指针本身.这不影响你用“去 typedef 看变量”的方法理解原始声明，只是使用别名时需要留意它已经是一个打包好的完整类型。
-
-你可能会下意识地把 `const pstring` 直接展开成 `const char*`，但这是**错误的文本替换思维**。
-在 C++ 的类型系统中，**`const char*` 是“指向 `const char` 的指针”（指针可变，指向的内容不可变），这与“指针本身是常量”完全是两个不同类型**。
+你可能会下意识地把 `const pstring` 直接展开成 `const char*`，但这是**错误的文本替换思维**。在 C++ 的类型系统中，**`const char *` 是“指向 `const char` 的指针”（指针可变，指向的内容不可变），这与“指针本身是常量”完全是两个不同类型**。
 
 ---
 
@@ -2272,6 +2272,32 @@ class HisString : public MyString{
         }
 };
 ```
+### 继承关系
+
+**继承方式决定了【基类成员在派生类里的访问权限】，同时决定【派生类对象外部能访问什么】**。
+
+先看基类自带权限：
+
+- `public`：外部、子类、自己都能访问
+- `protected`：子类、自己能访问，**外部不能**
+- `private`：只有自己能访问，子类、外部都不能
+
+> 重点：**基类的 private 成员，无论哪种继承，子类永远访问不到！**
+
+假设基类有：`public`、`protected`、`private` 成员：
+
+| 继承方式           | 基类 public → 子类中 | 基类 protected → 子类中 | 基类 private → 子类中 | 子类对象外部可访问  |
+| ------------------ | -------------------- | ----------------------- | --------------------- | ------------------- |
+| **public 继承**    | public               | protected               | 不可访问              | 只能访问基类 public |
+| **protected 继承** | protected            | protected               | 不可访问              | 都不能访问          |
+| **private 继承**   | private              | private                 | 不可访问              | 都不能访问          |
+
+简单理解：
+
+1. **public 继承：原样继承，权限不降级**（最常用）
+2. **protected 继承：public→protected，protected 不变**
+3. **private 继承：public/protected→private，彻底锁死**
+
 ### 非虚函数同名
 
 **子类可以定义与父类同名的函数（无论参数是否相同）**，但如果父类函数未声明为`virtual`，这不是 "重写 (override)"，而是**名字隐藏 (Name Hiding)**—— 子类的同名函数会完全遮蔽父类中所有同名函数。
