@@ -700,7 +700,7 @@ vector 内部通过**三个指针**管理内存：
 
 ## 核心数据结构
 
-### 三指针布局
+### 三指针实现
 
 所有主流STL实现（GCC libstdc++、MSVC、LLVM libc++以及早期的SGI STL）均采用完全相同的结构——只用三根指针描述整个容器，微软工程师Raymond Chen曾直言：“`std::vector`是那种被标准约束到基本上只有唯一一种可行实现的类型”。
 
@@ -1067,7 +1067,7 @@ public:
 2. **编译期断言**：`__normal_iterator`的第二个模板参数`_Container`用于在编译期验证迭代器是否与容器匹配，防止跨容器使用迭代器。
 3. **为未来扩展预留空间**：包装类可以增加调试检查（如越界检测），而不影响裸指针的性能——在优化编译下，包装被完全展开，仍是零开销。
 
-## 构造函数
+## 创建方式
 
 | 构造方式      | 语法                          | 说明                                                    |
 | ------------- | ----------------------------- | ------------------------------------------------------- |
@@ -1213,7 +1213,7 @@ v.clear();                // 空
 
 <img src="./assets/deque的内存模型.png" alt="deque的内存模型" style="zoom: 33%;" />
 
-**核心架构：由map和buffer构成的双层结构**。为了实现上述目标，`deque`并非采用一整块连续内存，而是独创了“中控器（map）+ 缓冲区（buffer）”的双层结构。
+**核心架构：由 map 和 buffer 构成的双层结构**。为了实现上述目标，`deque`并非采用一整块连续内存，而是独创了“中控器（map）+ 缓冲区（buffer）”的双层结构。
 
 这种分段连续的实现，既避免了`vector`扩容时复制整个内存块的昂贵开销，也规避了`list`无法随机访问和缓存局部性差的缺陷。
 
@@ -1224,12 +1224,11 @@ v.clear();                // 空
 deque 不预先分配大段连续内存，而是按需分配很多“节点”。每个节点的大小由 `__deque_buf_size` 决定：
 
 ``` c++
-// 摘自 bits/stl_deque.h
 #ifndef _GLIBCXX_DEQUE_BUF_SIZE
 #define _GLIBCXX_DEQUE_BUF_SIZE 512
 #endif
 
-template<typename _Tp>
+
 inline size_t __deque_buf_size(size_t __size) {
     return (__size < _GLIBCXX_DEQUE_BUF_SIZE
             ? size_t(_GLIBCXX_DEQUE_BUF_SIZE / __size)
@@ -1242,6 +1241,8 @@ inline size_t __deque_buf_size(size_t __size) {
 
 这样设计的目的是**平衡内存碎片和分配次数：缓冲区太小会退化成 list，太大则接近 vector 的膨胀代价**。
 
+**注意**：SGI STL 允许用户通过模板参数`_BufSiz`自定义缓冲区大小，但这不符合 C++ 标准，在后续版本中被移除。
+
 
 ### `deque`类  
 
@@ -1249,71 +1250,368 @@ inline size_t __deque_buf_size(size_t __size) {
 
 负责底层内存管理，它**持有中控数组和两个迭代器**标记整个 deque 的起始与结束。
 
-#### 初始化 map
-
-#### 动态扩容
-
-
-
-### 迭代器
-
-#### 四个指针实现
-
-![deque的iterator](./assets/deque的iterator-1779710479689-1.png)
-
-#### 操作符重载
-
-> **指针相减的结果是“元素个数”而不是字节数**。
-
-![deque的操作符重载](./assets/deque的操作符重载-1779709434304-20.png)
-
----
-
-针对`++`操作符，如果抵达当前`buffer`的边界，就调用`set_node`回到控制中心，找到下一个缓冲区，并且把`node、first、last`指针设置为下一个缓冲区，然后把`cur`指针指向`first`指针。`--`操作符同理。
-
-<img src="./assets/deque的操作符重载2.png" alt="deque的操作符重载2" style="zoom:33%;" />
-
-**针对随机访问**实现`+=`操作符重载：
-
-<img src="./assets/deque的随机访问实现.png" alt="deque的随机访问实现" style="zoom:33%;" />
-
-<img src="./assets/deque的-=实现.png" alt="deque的-=实现" style="zoom:50%;" />
-
-### G4.9版本
-
-![deque的G4.9实现](./assets/deque的G4.9实现.png)
-
-![dequeG4.9](./assets/dequeG4.9.png)
-
-## 插入操作
-
-### `push_back`
+#### 主类实现
 
 ``` c++
-void push_back(const value_type& __x) {
-    if (_M_impl._M_finish._M_cur != _M_impl._M_finish._M_last - 1) {
-        // 当前尾部缓冲区还有空间
-        _Alloc_traits::construct(_M_impl, _M_impl._M_finish._M_cur, __x);
-        ++_M_impl._M_finish._M_cur;
-    } else {
-        _M_push_back_aux(__x);  // 需要新缓冲区
+// deque主类（无_deque_base基类，所有成员直接定义在此）
+template <class T, class Alloc = alloc, size_t BufSiz = 0>
+class deque {
+public:
+    // 类型定义
+    typedef T value_type;
+    typedef value_type* pointer;
+    typedef value_type& reference;
+    typedef size_t size_type;
+    typedef ptrdiff_t difference_type;
+
+    typedef __deque_iterator<T, T&, T*, BufSiz> iterator;
+    typedef __deque_iterator<T, const T&, const T*, BufSiz> const_iterator;
+
+protected:
+    typedef pointer* map_pointer; // T**，中控器类型
+    typedef simple_alloc<value_type, Alloc> data_allocator; // 元素分配器
+    typedef simple_alloc<pointer, Alloc> map_allocator;     // 中控器分配器
+
+    // 核心成员变量
+    iterator start;    // 指向第一个元素的迭代器
+    iterator finish;   // 指向最后一个元素之后的迭代器
+    map_pointer map;   // 中控器，指向指针数组的首地址
+    size_type map_size;// 中控器的大小（指针数组的元素个数）
+
+protected:
+    // 辅助函数：获取每个缓冲区的元素个数
+    static size_type buffer_size() { return __deque_buf_size(BufSiz, sizeof(T)); }
+	
+    // —— 简单空间配置辅助 ——
+    typedef typename allocator_type::template rebind<value_type>::other node_allocator;
+    
+    // 分配/释放一个缓冲区
+    pointer allocate_node() {
+        return node_allocator().allocate(buffer_size());
+    }
+    
+    void deallocate_node(pointer p) {
+        node_allocator().deallocate(p, buffer_size());
+    }
+    
+    
+	// 分配/释放 map 
+    map_pointer allocate_map(size_type n)
+    {
+        return static_cast<map_pointer>(::operator new(n * sizeof(pointer) ));
+    }
+    
+    void deallocate_map(map_pointer p, size_type n)
+    {
+        ::operator delete(p);
+    }
+    
+    // —— map 内存管理 ——
+    void reserve_map_at_back(size_type nodes_to_add = 1)
+    {
+        if (nodes_to_add + 1 > map_size - (finish.node - map))
+            reallocate_map(nodes_to_add, false);
+    }
+
+    void reserve_map_at_front(size_type nodes_to_add = 1)
+    {
+        if (nodes_to_add > start.node - map)
+            reallocate_map(nodes_to_add, true);
+    }
+
+    void reallocate_map(size_type nodes_to_add, bool add_at_front)
+    {
+        size_type old_num_nodes = finish.node - start.node + 1;
+        size_type new_num_nodes = old_num_nodes + nodes_to_add;
+
+        map_pointer new_nstart;
+        if (map_size > 2 * new_num_nodes)
+        {
+            // map 空间足够，只需移动节点位置
+            new_nstart = map + (map_size - new_num_nodes) / 2
+                         + (add_at_front ? nodes_to_add : 0);
+            if (new_nstart < start.node)
+                copy(start.node, finish.node + 1, new_nstart);
+            else
+                copy_backward(start.node, finish.node + 1, new_nstart + old_num_nodes);
+        }
+        else
+        {
+            // map 空间不足，需要重新分配
+            size_type new_map_size = map_size + max(map_size, nodes_to_add) + 2;
+            map_pointer new_map = allocate_map(new_map_size);
+            new_nstart = new_map + (new_map_size - new_num_nodes) / 2
+                         + (add_at_front ? nodes_to_add : 0);
+            copy(start.node, finish.node + 1, new_nstart);
+            deallocate_map(map, map_size);
+            map = new_map;
+            map_size = new_map_size;
+        }
+        // 更新 start 和 finish 迭代器的 node 指针
+        start.set_node(new_nstart);
+        finish.set_node(new_nstart + old_num_nodes - 1);
+    }
+
+    // —— 填充并初始化 ——
+    void fill_initialize(size_type n, const value_type& value)
+    {
+        create_map_and_nodes(n);
+        for (map_pointer cur = start.node; cur < finish.node; ++cur)
+            uninitialized_fill(*cur, *cur + buffer_size(), value);
+        uninitialized_fill(finish.first, finish.cur, value);
+    }
+
+    void create_map_and_nodes(size_type num_elements)
+    {
+        size_type num_nodes = num_elements / buffer_size() + 1;
+        map_size = max(initial_map_size(), num_nodes + 2);
+        map = allocate_map(map_size);
+
+        // 让 start 和 finish 的 node 指向 map 的中间区域
+        map_pointer nstart  = map + (map_size - num_nodes) / 2;
+        map_pointer nfinish = nstart + num_nodes - 1;
+
+        // 为每个 node 分配缓冲区
+        for (map_pointer cur = nstart; cur <= nfinish; ++cur)
+            *cur = allocate_node();
+
+        // 设置 start 和 finish 迭代器
+        start.set_node(nstart);
+        finish.set_node(nfinish);
+        start.cur = start.first;
+        finish.cur = finish.first + num_elements % buffer_size();
+    }
+
+public:
+    // 默认构造函数：创建空deque
+    deque() : start(), finish(), map(nullptr), map_size(0) {
+        create_map_and_nodes(0);
+    }
+
+    // 构造n个值为x的元素
+    deque(size_type n, const value_type& x) : start(), finish(), map(nullptr), map_size(0) {
+        create_map_and_nodes(n);
+        iterator cur = start;
+        try {
+            for (; cur != finish; ++cur) {
+                data_allocator::construct(&*cur, x);
+            }
+        } catch (...) {
+            // 异常安全：回滚已构造的元素
+            iterator rollback = start;
+            while (rollback < cur) {
+                data_allocator::destroy(&*rollback);
+                ++rollback;
+            }
+            destroy_map_and_nodes();
+            throw;
+        }
+    }
+
+    // 拷贝构造函数
+    deque(const deque& x) : start(), finish(), map(nullptr), map_size(0) {
+        create_map_and_nodes(x.size());
+        iterator cur = start;
+        const_iterator x_cur = x.begin();
+        try {
+            for (; x_cur != x.end(); ++x_cur, ++cur) {
+                data_allocator::construct(&*cur, *x_cur);
+            }
+        } catch (...) {
+            iterator rollback = start;
+            while (rollback < cur) {
+                data_allocator::destroy(&*rollback);
+                ++rollback;
+            }
+            destroy_map_and_nodes();
+            throw;
+        }
+    }
+	
+    // ==================== 拷贝赋值 ====================
+    deque& operator=(const deque& x)
+    {
+        if (this != &x)
+        {
+            clear();
+            for (const_iterator it = x.begin(); it != x.end(); ++it)
+                push_back(*it);
+        }
+        return *this;
+    }
+    
+    // 析构函数
+    ~deque() {
+        destroy_map_and_nodes();
+    }
+
+    // 迭代器接口
+    iterator begin() { return start; }
+    iterator end() { return finish; }
+
+    // 容量接口
+    size_type size() const { return finish - start; }
+    bool empty() const { return finish == start; }
+    size_type max_size() const { return static_cast<size_type>(-1) / sizeof(value_type); }
+
+    // 元素访问接口
+    reference front() { return *start; }
+
+    reference back() {
+        iterator tmp = finish;
+        --tmp;
+        return *tmp;
+    }
+
+	//  交给迭代的[]操作符重载
+    reference operator[](size_type n) { return start[static_cast<difference_type>(n)]; }
+
+
+    // 清空deque（保留首尾两个缓冲区以提高性能）
+    void clear() {
+        // 销毁所有元素
+        for (iterator it = start; it != finish; ++it) {
+            data_allocator::destroy(&*it);
+        }
+
+        // 释放中间的缓冲区，保留首尾两个
+        map_pointer cur = start.node + 1;
+        map_pointer last = finish.node;
+        while (cur < last) {
+            deallocate_node(*cur);
+            ++cur;
+        }
+
+        // 重置迭代器
+        finish = start;
+    }
+};
+```
+
+
+
+#### `push_back`
+
+`push_back` 当尾部缓冲区未满时，直接构造并移动 `finish.cur`；满了就调用 `push_back_aux` 分配新缓冲区并挂到 map 尾端，元素 **永不搬迁**。
+
+``` c++
+void push_back(const value_type& t)
+{
+    if (finish.cur != finish.last - 1)
+    {
+        // 当前缓冲区还有空间
+        construct(finish.cur, t);
+        ++finish.cur;
+    }
+    else
+    {
+        // 当前缓冲区已满
+        push_back_aux(t);
+    }
+}
+
+void push_back_aux(const value_type& t)
+{
+    value_type t_copy = t;
+    reserve_map_at_back();
+    *(finish.node + 1) = allocate_node();
+    construct(finish.cur, t_copy);
+    finish.set_node(finish.node + 1);
+    finish.cur = finish.first;
+}
+```
+
+
+
+#### `push_front`
+
+完全对称的逻辑：先看 `start.cur` 是否不等于 `start.first`（即头部缓冲区还有空间），否则去前面加节点。
+
+``` c++
+void push_front(const value_type& t)
+{
+    if (start.cur != start.first)
+    {
+        // 当前缓冲区还有空间
+        --start.cur;
+        construct(start.cur, t);
+    }
+    else
+    {
+        // 当前缓冲区已满
+        push_front_aux(t);
+    }
+}
+
+
+void push_front_aux(const value_type& t)
+{
+    value_type t_copy = t;
+    reserve_map_at_front();
+    *(start.node - 1) = allocate_node();
+    start.set_node(start.node - 1);
+    start.cur = start.last - 1;
+    construct(start.cur, t_copy);
+}
+```
+
+#### `pop_back`
+
+**缓冲区空时释放尾节点**并回退。
+
+``` c++
+void pop_back()
+{
+    if (finish.cur != finish.first)
+    {
+        // 当前缓冲区还有元素
+        --finish.cur;
+        destroy(finish.cur);
+    }
+    else
+    {
+        // 当前缓冲区已空，释放并回退
+        deallocate_node(finish.first);
+        finish.set_node(finish.node - 1);
+        finish.cur = finish.last - 1;
+        destroy(finish.cur);
     }
 }
 ```
 
-`_M_push_back_aux` 会先检查 `_M_finish._M_node + 1` 是否已经到达 map 的尾部，若没有则直接在此处分配新缓冲区，并设置 `_M_finish`；若已满则调用 `_M_reallocate_map` 扩展 map，然后再分配新节点。
 
-### `push_front`
 
-完全对称的逻辑：先看 `_M_start._M_cur` 是否不等于 `_M_start._M_first`（即头部缓冲区还有空间），否则调用 `_M_push_front_aux` 去前面加节点。
+#### `pop_front`
 
-### `insert`
+`pop_front()` 析构头部元素，并检查当前缓冲区是否已空：
+
+``` c++
+void pop_front()
+{
+    if (start.cur != start.last - 1)
+    {
+        // 当前缓冲区还有元素
+        destroy(start.cur);
+        ++start.cur;
+    }
+    else
+    {
+        // 当前缓冲区只剩一个元素
+        destroy(start.cur);
+        deallocate_node(start.first);
+        start.set_node(start.node + 1);
+        start.cur = start.first;
+    }
+}
+```
+
+#### `insert`
 
 在中间位置插入元素时，deque 会**选择移动成本较小的一侧**：
 
-<img src="./assets/deque的insert.png" alt="deque的insert" style="zoom:50%;" />
+<img src="./assets/deque的insert.png" alt="deque的insert" style="zoom: 33%;" />
 
-![deque的插入辅助函数](./assets/deque的插入辅助函数.png)
+<img src="./assets/deque的插入辅助函数.png" alt="deque的插入辅助函数" style="zoom:33%;" />
 
 `insert_aux` 首先计算 `position` 之前的元素个数和之后的元素个数：
 
@@ -1322,24 +1620,259 @@ void push_back(const value_type& __x) {
 
 由于移动可能跨越多个缓冲区，libstdc++ 使用了非特化的 `std::copy` 算法，因为 deque 迭代器是随机访问迭代器，`std::copy` 会通过 `operator+=` 高效完成。
 
-## 删除与内存释放
-
-`pop_front()` 析构头部元素，并检查当前缓冲区是否已空：
-
-``` c++
-void pop_front() {
-    if (_M_impl._M_start._M_cur != _M_impl._M_start._M_last - 1) {
-        _Alloc_traits::destroy(_M_impl, _M_impl._M_start._M_cur);
-        ++_M_impl._M_start._M_cur;
-    } else {
-        _M_pop_front_aux();
+```c++
+ iterator insert(iterator position, const value_type& x)
+{
+    if (position.cur == start.cur)
+    {
+        push_front(x);
+        return start;
+    }
+    else if (position.cur == finish.cur)
+    {
+        push_back(x);
+        return finish - 1;
+    }
+    else
+    {
+        return insert_aux(position, x);
     }
 }
+
+
+iterator insert_aux(iterator pos, const value_type& x) {
+    difference_type index = pos - start;
+
+    // 插入点距离头部更近，将头部到插入点的元素向前移动
+    if (index < size() / 2) {
+        push_front(front());
+
+            /**/  
+        iterator front1 = start;
+        ++front1;
+
+        iterator front2 = front1;
+        ++front2;
+
+        pos = start + index;
+        iterator pos1 = pos;
+        ++pos1;
+        copy(front2, pos1, front1);
+    } 
+    // 插入点距离尾部更近，将插入点到尾部的元素向后移动
+    else {  
+        push_back(back());
+        iterator back1 = finish;
+        --back1;
+        iterator back2 = back1;
+        --back2;
+        pos = start + index;
+        copy_backward(pos, back2, back1);
+    }
+
+    *pos = x;
+    return pos;
+}
+
 ```
 
-`_M_pop_front_aux` 会释放第一个缓冲区，并将 `_M_start` 移动到下一个节点。删除时释放节点的设计，让 deque 的内存可以被逐步回收，而不像 vector 那样只在析构或 shrink_to_fit 时才释放。
+#### `erase`
 
-中间 erase 同样会移动元素，并且会析构多余元素。如果清除了整个缓冲区，它会被释放回分配器
+``` c++
+iterator erase(iterator pos)
+{
+    iterator next = pos;
+    ++next;
+    difference_type index = pos - start;
+    if (index < size() / 2)
+    {
+        // 离头部近
+        copy_backward(start, pos, next);
+        pop_front();
+    }
+    else
+    {
+        // 离尾部近
+        copy(next, finish, pos);
+        pop_back();
+    }
+    return start + index;
+}
+
+```
+
+
+
+### 迭代器
+
+它需要能够跨缓冲区跳转，同时提供随机访问能力。
+
+#### 四个指针实现
+
+![deque的iterator](./assets/deque的iterator-1779710479689-1.png)
+
+完整代码：
+
+``` c++
+// 计算每个缓冲区的元素个数（侯捷标准算法）
+inline size_t __deque_buf_size(size_t n, size_t sz) {
+    return n != 0 ? n : (sz < 512 ? static_cast<size_t>(512 / sz) : static_cast<size_t>(1));
+}
+
+// deque迭代器（与侯捷课程完全一致的实现）
+template <class T, class Ref, class Ptr, size_t BufSiz>
+struct __deque_iterator {
+    typedef __deque_iterator<T, T&, T*, BufSiz> iterator;
+    typedef __deque_iterator<T, const T&, const T*, BufSiz> const_iterator;
+    
+    static size_t buffer_size() { return __deque_buf_size(BufSiz, sizeof(T)); }
+
+    // 迭代器类型定义（符合STL规范）
+    typedef std::random_access_iterator_tag iterator_category;
+    typedef T value_type;
+    typedef Ptr pointer;
+    typedef Ref reference;
+    typedef ptrdiff_t difference_type;
+    typedef T** map_pointer;
+
+    // 迭代器核心成员（侯捷强调的四个指针）
+    T* cur;       // 当前指向的元素
+    T* first;     // 当前缓冲区的起始地址
+    T* last;      // 当前缓冲区的结束地址（不含）
+    map_pointer node; // 指向中控器map中当前缓冲区的指针
+
+    // 构造函数
+    __deque_iterator() : cur(nullptr), first(nullptr), last(nullptr), node(nullptr) {}
+    __deque_iterator(T* x, map_pointer y) : cur(x), first(*y), last(*y + buffer_size()), node(y) {}
+	
+    
+    static size_t buffer_size() { return __deque_buf_size(BufSiz, sizeof(T)); }
+    // 切换到新的缓冲区（核心辅助函数）
+    void set_node(map_pointer new_node) {
+        node = new_node;
+        first = *new_node;
+        last = first + buffer_size();
+    }
+
+    // 解引用操作符
+    reference operator*() const { return *cur; }
+    pointer operator->() const { return &(operator*()); }
+
+    // 迭代器减法（计算两个迭代器之间的距离）
+    difference_type operator-(const iterator& x) const {
+        return static_cast<difference_type>(buffer_size()) * (node - x.node - 1)
+               + (cur - first) + (x.last - x.cur);
+    }
+
+    // 前置++
+    iterator& operator++() {
+        ++cur;
+        if (cur == last) { // 到达当前缓冲区末尾
+            set_node(node + 1);
+            cur = first;
+        }
+        return *this;
+    }
+
+    // 后置++
+    iterator operator++(int) {
+        iterator tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    // 前置--
+    iterator& operator--() {
+        if (cur == first) { // 到达当前缓冲区开头
+            set_node(node - 1);
+            cur = last;
+        }
+        --cur;
+        return *this;
+    }
+
+    // 后置--
+    iterator operator--(int) {
+        iterator tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+    // 复合赋值 +=
+    iterator& operator+=(difference_type n) {
+        difference_type offset = n + (cur - first);
+        // 仍在当前缓冲区
+        if (offset >= 0 && offset < static_cast<difference_type>(buffer_size())) {
+            cur += n;
+        } 
+        // 需要跨缓冲区
+        else {
+            difference_type node_offset = offset > 0 
+                ? offset / static_cast<difference_type>(buffer_size())
+                : -static_cast<difference_type>((-offset - 1) / buffer_size()) - 1;
+            
+            set_node(node + node_offset);
+            cur = first + (offset - node_offset * static_cast<difference_type>(buffer_size()));
+        }
+        return *this;
+    }
+
+    // 复合赋值 -=
+    iterator& operator-=(difference_type n) {
+        return *this += -n;
+    }
+    
+    // 加法
+    iterator operator+(difference_type n) const {
+        iterator tmp = *this;
+        return tmp += n;
+    }
+
+    // 减法
+    iterator operator-(difference_type n) const {
+        iterator tmp = *this;
+        return tmp -= n;
+    }
+
+    // 下标访问
+    reference operator[](difference_type n) const {
+        return *(*this + n);
+    }
+
+    // 比较操作符
+    bool operator==(const iterator& x) const { return cur == x.cur; }
+    bool operator!=(const iterator& x) const { return !(*this == x); }
+    bool operator<(const iterator& x) const {
+        return (node == x.node) ? (cur < x.cur) : (node < x.node);
+    }
+};
+```
+
+
+
+#### 操作符重载
+
+> **指针相减的结果是“元素个数”而不是字节数**。
+
+<img src="./assets/deque的操作符重载-1779709434304-20.png" alt="deque的操作符重载" style="zoom:33%;" />
+
+---
+
+针对`++`操作符，如果抵达当前`buffer`的边界，就调用`set_node`回到控制中心，找到下一个缓冲区，并且把`node、first、last`指针设置为下一个缓冲区，然后把`cur`指针指向`first`指针。`--`操作符同理。
+
+<img src="./assets/deque的操作符重载2.png" alt="deque的操作符重载2" style="zoom:33%;" />
+
+**针对随机访问**实现`+=`操作符重载：分为在同一个缓冲区以及不在同一个缓冲区的情况，如果不在同一个缓冲区就要依据偏移量找到要访问的目标位置在哪一个缓冲区。
+
+<img src="./assets/deque的随机访问实现.png" alt="deque的随机访问实现" style="zoom:33%;" />
+
+<img src="./assets/deque的-=实现.png" alt="deque的-=实现" style="zoom: 33%;" />
+
+### G4.9版本
+
+![deque的G4.9实现](./assets/deque的G4.9实现.png)
+
+![dequeG4.9](./assets/dequeG4.9.png)
 
 ## 迭代器失效
 
@@ -1363,15 +1896,154 @@ void pop_front() {
 
 deque 的实现就是在这张表里做出的极致权衡：用一小段连续空间（512字节）换取地址稳定性，再通过复杂的迭代器算术屏蔽跨节点跳转的开销，最终做到了对用户几乎透明的“双端 vector”体验。理解这些源码细节后，在面对“既要随机访问又要频繁头尾操作”的场景，选择 deque 时就会更加笃定。
 
-# `<stack>`
+---
 
-# `<queue>`
+为什么不用 vector 或 list 实现 stack 和 queue？
 
-# `<set/multiset>`
+- **vector** 只有 `push_back` 和 `pop_back` 是 O(1)（平摊），但 **没有 `push_front` 和 `pop_front`**。如果强行实现 queue，要在头部插入/删除，vector 需要移动所有元素，效率是 O(N)，这违背了 queue 的初衷。所以 `queue` 不允许用 vector 作底层容器。
+- **list** 也可以作为 stack 和 queue 的底层容器，因为它在任何位置插入删除都是 O(1)。但 **deque 的空间利用率更高**：list 每元素额外开销至少两个指针，而 deque 是一段段连续缓冲区，只有 map 的指针开销，且元素访问的局部性更好。另外 deque 支持随机访问（虽然 stack/queue 不暴露这个能力，但底层依然高效）。
 
-高度平衡红黑树。需要查找很快，但是放入无所谓。
+**总结：deque 天然提供了“一端进、另一端出”和“只操作一端”所需的原语，且性能极佳，因此成为 stack 和 queue 默认的底层容器。**
 
-# `<map/multimap>`
+## `<stack>`
+
+**只使用尾部接口即可**。stack 是一种 **后进先出 (LIFO)** 的数据结构，它只需要：
+
+- 从尾部插入 → `push_back`
+- 从尾部移除 → `pop_back`
+- 查看栈顶元素 → `back`
+- 判空 → `empty`
+- 大小 → `size`
+
+因此，用 deque 作为底层容器，stack 的实现非常直接：
+
+``` c++
+template <class T, class Container = deque<T>>
+class stack {
+    Container c;
+public:
+    void push(const T& x) { c.push_back(x); }
+    void pop()            { c.pop_back(); }
+    T& top()              { return c.back(); }
+    bool empty() const    { return c.empty(); }
+    size_t size() const   { return c.size(); }
+};
+```
+
+这样，stack 对外只暴露 `push`, `pop`, `top`，**把 deque 的双端能力限制为尾端操作**。因为 deque 的尾端操作本身就是 O(1)，所以 stack 的性能得到保证。
+
+## `<queue>`
+
+queue 是一种 **先进先出 (FIFO)** 的数据结构，需要：
+
+- 从尾部插入 → `push_back`
+- 从头部移除 → `pop_front`
+- 查看队头元素 → `front`
+- 查看队尾元素 → `back`（非必须，但常用于实现 `back`）
+- 判空、大小
+
+queue 包装 deque 的方式同样简洁：
+
+``` c++
+template <class T, class Container = deque<T>>
+class queue {
+    Container c;
+public:
+    void push(const T& x) { c.push_back(x); }
+    void pop()            { c.pop_front(); }
+    T& front()            { return c.front(); }
+    T& back()             { return c.back(); }
+    bool empty() const    { return c.empty(); }
+    size_t size() const   { return c.size(); }
+};
+```
+
+# 红黑树
+
+<img src="./assets/红黑树.png" alt="红黑树" style="zoom:33%;" />
+
+## 创建红黑树
+
+### 模板参数
+
+<img src="./assets/红黑树实现.png" alt="红黑树实现" style="zoom:33%;" />
+
+模板参数无论为仿函数还是函数指针，在红黑树中内部调用都是一致的，模板参数只作为类型声明.
+
+无论模板参数 `Compare` 是一个仿函数类（如 `std::less<int>`），还是一个函数指针类型（如 `bool(*)(int, int)`），红黑树内部的用法都是：
+
+``` c++
+Compare key_compare;          // 创建一个该类型的对象
+if (key_compare(a, b)) { … }  // 通过该对象调用
+```
+
+这在 C++ 里是**统一的可调用体语法**。
+
+- 如果 `Compare` 是 `std::less<int>`，`key_comp` 是一个对象，`key_comp(a, b)` 会调用它的 `operator()`。
+
+- 如果 `Compare` 是 `bool(*)(int, int)`，`key_comp` 是一个函数指针，`key_comp(a, b)` 会通过该指针调用所指函数。
+
+  ``` c++
+  用户调用:
+      std::set<int, bool(*)(int,int)> s(my_cmp);
+                   ↓
+  set 构造函数:
+      explicit set(const Compare& comp = Compare()) : t(comp) {}  // t 是红黑树实例
+                   ↓
+  rb_tree 构造函数:
+      rb_tree(const Compare& comp = Compare()) : key_compare(comp) {}
+      将 my_cmp 的地址存入 key_compare
+                   ↓
+  插入时:
+      if (key_compare(a, b)) ...   // key_compare 就是指向 my_cmp 的函数指针
+      实际调用 my_cmp(a, b)
+  ```
+
+  **默认构造的危害：**
+
+  如果你只写 `std::set<int, bool(*)(int, int)> s;`（不传比较器），则 `Compare()` 会默认构造一个 `bool(*)(int, int)` 类型的对象，这个对象的值是 `nullptr`。之后任何比较操作都会导致空指针调用，程序崩溃。
+
+### G2.9版本
+
+<img src="./assets/红黑树node类.png" alt="红黑树node类" style="zoom:33%;" />
+
+
+
+### G4.9版本
+
+<img src="./assets/红黑树G4.9版本.png" alt="红黑树G4.9版本" style="zoom:33%;" />
+
+## `<set/multiset>`
+
+### 特性
+
+<img src="./assets/set特性.png" alt="set特性" style="zoom:33%;" />
+
+
+
+### 具体实现
+
+`set`中 key 的类型就是`key_type`和`value_type`，因此使用`set`模板类创建一个类时只需要提供`key`的类型；**底层红黑树**（`rb_tree`）的通过`value`来获取`key`的模板参数则是默认为`identity<value>`；比较`key`大小的模板参数则是`less<key>`。
+
+<img src="./assets/set实现.png" alt="set实现" style="zoom:33%;" />
+
+## `<map/multimap>`
+
+### 特性
+
+<img src="./assets/map特性.png" alt="map特性" style="zoom:33%;" />
+
+### 具体实现
+
+<img src="./assets/map实现.png" alt="map实现" style="zoom:33%;" />
+
+
+
+<img src="./assets/select1th.png" alt="select1th" style="zoom: 33%;" />
+
+### map 独特的[ ]
+
+<img src="./assets/map的[].png" alt="map的[]" style="zoom:33%;" />
 
 # `<unordered_set/multiset>`
 

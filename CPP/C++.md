@@ -391,10 +391,6 @@ target_sources()                      ← 追加源文件
 
 # 关键词
 
-## `typename`
-
-
-
 关键词的两大类别：内存布局 vs 访问权限
 
 存储期与链接属性说明符 (Storage Class Specifiers)
@@ -411,6 +407,21 @@ CV 类型限定符 (CV-Qualifiers)
 
 >  语义定语的优先级：先定“生死”，再定“权限”。
 
+## `typename`
+
+在模板**定义体内部**，当你想使用某个**依赖于模板参数的类型**时，必须用 `typename` 告诉编译器：“这是一个类型”。
+比如 `std::set` 内部可能会有这样的代码：
+
+```c++
+template <typename Key, typename Compare, typename Alloc>
+class set {
+    using value_type = Key;   // 不需要 typename，因为 Key 本身就是类型名
+    using iterator = typename Alloc::pointer; // 需要 typename！
+};
+```
+
+原因是 `Alloc::pointer` 中，`pointer` 是一个嵌套在 `Alloc` 里的名字，而 `Alloc` 是模板参数，所以编译器无法直接知道 `Alloc::pointer` 是类型还是静态成员。加上 `typename` 就是明确告诉编译器：“`Alloc::pointer` 是一个类型”。
+
 ## `typedef`
 
 **几乎是理解所有 `typedef` 声明的通用方法：**
@@ -420,8 +431,6 @@ CV 类型限定符 (CV-Qualifiers)
 3. **把这个变量的类型命名为这个变量名**
 
 这个办法之所以万能，是因为 `typedef` 的语法设计本身就是完全模仿变量声明的。不管声明多复杂，它都适用。
-
----
 
 ### 最简单的指针
 ```cpp
@@ -2655,6 +2664,23 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
 
   - **最重要的一点**：编译器看到模板的定义时，**不会生成任何机器码**！它只是把这个 "配方" 记下来。
 
+## 模板参数
+
+在 C/C++ 里，**去掉变量名就是类型名**。比如：
+
+``` c++
+int x;                 // x 是变量，类型是 int
+int* p;                // p 是变量，类型是 int*
+bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
+```
+
+因为 `std::set` 的第二个模板参数 `Compare` 要求一个**类型**，该类型必须满足“可调用，能比较两个 Key”的约束。
+
+- 你可以传入**类类型**，比如 `std::less<int>`，它有一个 `operator()`。
+- 你也可以传入**函数指针类型**，比如 `bool(*)(int, int)`，因为函数指针本身就可以被调用（`fp(a, b)`）。
+
+对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
+
 ## SFINAE机制
 
 SFINAE 是**Substitution Failure Is Not An Error**的缩写，即 **"替换失败不是错误"**。这是 C++ 模板元编程的核心机制之一。
@@ -3179,8 +3205,8 @@ bool operator<(const string& lhs, const string& rhs) {
 
 `Compare comp` 是 STL **泛型算法或容器**用来**定制排序/等价（怎么比大小）规则**的一个参数。
 
-- **它是什么类型**：一个可调用对象（函数、函数对象、lambda），它接受两个相同类型的参数，返回 `bool`，表示“第一个参数是否应在第二个参数之前”（严格弱序）。
-- **它出现在哪里**：
+- **什么类型**：一个可调用对象（函数、函数对象、lambda），它接受两个相同类型的参数，返回 `bool`，表示“第一个参数是否应在第二个参数之前”（严格弱序）。
+- **出现在哪里**：
   - **算法**：`std::sort(begin, end, comp)`、`std::lower_bound(begin, end, value, comp)` 等。
   - **容器**：`std::map<Key, Value, Compare>`、`std::set<Key, Compare>` 的第三个模板参数，默认是 `std::less<Key>`。
 
@@ -3192,7 +3218,7 @@ bool operator<(const string& lhs, const string& rhs) {
 2. **可传递**：若 `comp(a, b) && comp(b, c)`，则 `comp(a, c)`。
 3. **等价关系可传递**：若 `equiv(a,b)` 且 `equiv(b,c)`，则 `equiv(a,c)`，其中 `equiv` 定义为 `!comp(a,b) && !comp(b,a)`。
 
-你的自定义比较器必须遵守这些规则，否则程序可能崩溃或产生无限循环
+你的自定义比较器必须遵守这些规则，否则程序可能崩溃或产生无限循环。
 
 ---
 
