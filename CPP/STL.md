@@ -1,14 +1,14 @@
 # 标准库的STL总览
 
-![STL总览](./assets/STL总览.png)
+<img src="./assets/STL总览.png" alt="STL总览" style="zoom:33%;" />
 
-
+<img src="./assets/总览-2.png" alt="总览-2" style="zoom:33%;" />
 
 
 
 <img src="./assets/连续容器.png" alt="连续容器" style="zoom:50%;" />
 
-# Set和Map
+
 
 <img src="./assets/离散容器.png" alt="离散容器" style="zoom:80%;" />
 
@@ -59,6 +59,65 @@ private:
 ```
 
 这五个类型让算法无需知道具体迭代器类型，即可通过 `std::iterator_traits` 统一读取。
+
+### `difference_type`
+
+`difference_type` 用来表示**两个同类型迭代器之间的距离**的数据类型。当执行 `ite1 - ite2` 时，其返回值的类型就是 `difference_type`。
+
+#### 核心作用
+
+- **表示距离与容量**：它不仅可以表示两个迭代器之间的跨度，还可以用来表示一个容器的**最大容量**。对于连续空间的容器（如 `vector`），头尾迭代器之间的距离就是其最大容量。
+- **泛型算法的返回值**：在 STL 算法中，凡是涉及计数或距离计算的函数，其返回值类型通常都依赖于它。例如 `std::count()` 统计元素个数，或 `std::distance()` 计算距离，它们的返回类型都被限定为迭代器的 `difference_type`。
+
+#### 在“特性萃取机”中的体现
+
+为了兼容**原生指针**（原生指针本身也是一种迭代器，但没有内部嵌套类型），STL 通过 `iterator_traits` 对其进行了偏特化，将原生指针的 `difference_type` 统一映射为 C++ 标准库中的 **`std::ptrdiff_t`**（定义在 `<cstddef>` 中，通常是一个带符号的整数类型）
+
+```cpp
+// 针对原生指针的特化版本
+template <class T>
+struct iterator_traits<T*> {
+    typedef ptrdiff_t difference_type; // 原生指针的距离类型
+    // ...
+};
+```
+
+### `iterator_category`
+
+`iterator_category` 用于标识**迭代器的类别**。它反映了迭代器的**移动特性和支持的操作能力**。STL 通过定义不同的“标签（Tag）”结构体来代表这些类别。
+
+#### 核心作用（算法优化与重载决议）
+
+它的主要作用是**让算法根据迭代器的能力，在编译期选择最优的执行路径**。 以 `std::advance(it, n)`（将迭代器向前移动 n 步）为例：
+
+- 如果迭代器是**单向**的，算法只能使用 `for` 循环执行 `n` 次 `++it`（时间复杂度 *O*(*n*) ）。
+- 如果迭代器支持**随机访问**，算法可以直接执行 `it + n`（时间复杂度 *O*(1) ）。 STL 正是通过提取 `iterator_category`，利用**函数重载**和**模板类型推导**，自动激活最高效的重载函数。
+
+#### 迭代器的常见分类
+
+按照功能从弱到强，STL 将迭代器分为以下几类（每个类别继承自前一个类别的能力）：
+
+| 类别标签 (Tag)                                       | 支持的操作                 | 特点与示例容器                                            |
+| :--------------------------------------------------- | :------------------------- | :-------------------------------------------------------- |
+| **Input Iterator**<br>(输入迭代器)                   | `++`, `*` (只读)           | 只能单次、向前读取。如 `istream_iterator`。               |
+| **Output Iterator**<br>(输出迭代器)                  | `++`, `*` (只写)           | 只能单次、向前写入。如 `ostream_iterator`。               |
+| **Forward Iterator**<br>(前向迭代器)                 | `++`, `*` (多次读写)       | 可多次读写，只能向前。如 `forward_list`。                 |
+| **Bidirectional Iterator**<br>(双向迭代器)           | `++`, `--`, `*`            | 支持向前和向后移动。如 `list`, `map`, `set`。             |
+| **Random Access Iterator**<br>(随机访问迭代器)       | `++`, `--`, `+`, `-`, `[]` | 支持跳跃式访问，能力最强。如 `vector`, `deque`, `array`。 |
+| **Contiguous Iterator**<br>(连续迭代器, *C++20引入*) | 包含随机访问所有功能       | 保证元素在物理内存中**绝对连续**。如 `std::span`。        |
+
+#### 在“特性萃取机”中的体现
+
+同样地，**原生指针**支持所有的指针运算（如 `p + n`, `p - q`, `p[n]`），因此 STL 在 `iterator_traits` 中将原生指针的 `iterator_category` 特化为最强的 **`random_access_iterator_tag`**。
+
+```cpp
+// 针对原生指针的特化版本
+template <class T>
+struct iterator_traits<T*> {
+    typedef random_access_iterator_tag iterator_category; // 原生指针被视为随机访问迭代器
+    // ...
+};
+```
 
 ## 与指针的联系
 
@@ -723,7 +782,7 @@ struct vector {
 
 **设计要点：**
 
-1. **迭代器即为裸指针**：因为vector维护的是连续线性空间，原生指针`T*`天然满足随机访问迭代器的全部要求（支持`+n`、`-n`、`[]`、比较等），因此直接`typedef value_type* iterator`，不需要任何包装类[-23](https://zhuanlan.zhihu.com/p/419871316)[-9](https://cloud.tencent.cn/developer/article/2263214?policyId=1004)。
+1. **迭代器即为裸指针**：因为vector维护的是连续线性空间，原生指针`T*`天然满足随机访问迭代器的全部要求（支持`+n`、`-n`、`[]`、比较等），因此直接`typedef value_type *iterator`，不需要任何包装类[-23](https://zhuanlan.zhihu.com/p/419871316)[-9](https://cloud.tencent.cn/developer/article/2263214?policyId=1004)。
 2. **分配器通过simple_alloc间接使用**：不直接继承分配器，而是通过`typedef simple_alloc<value_type, Alloc> data_allocator`进行封装，内存的`allocate`和`deallocate`均通过`data_allocator`完成。
 3. **异常安全直接手写**：`insert_aux`扩容时采用经典的**commit or rollback**策略——先在新内存上完成所有构造，成功后才销毁旧空间、释放旧内存，通过手写的`try-catch`实现强异常安全保证。
 
@@ -884,7 +943,9 @@ GCC 2.9的`vector`对象大小精确等于 **3 × sizeof(T\*) = 12字节**（在
 └──────────────┘
 ```
 
-GCC 2.9中`push_back`内部委托给`insert_aux`，扩容逻辑如下（保持源码核心结构）：
+#### `push_back`
+
+GCC 2.9中`push_back`内部委托给`insert_aux`，扩容逻辑如下：
 
 ``` c++
 template <class T, class Alloc>
@@ -920,6 +981,8 @@ void vector<T, Alloc>::insert_aux(iterator position, const T& x) {
     }
 }
 ```
+
+##### 扩容
 
 **扩容三步走：** ①分配新空间(2×) → ②在新空间上构造所有元素 → ③销毁旧空间并更新三指针。扩容因子为2，初始容量为1（即0→1，1→2，2→4，4→8……），这种指数增长保证了`push_back`的**均摊O(1)** 时间复杂度[-23](https://zhuanlan.zhihu.com/p/419871316)。
 
@@ -2045,6 +2108,319 @@ if (key_compare(a, b)) { … }  // 通过该对象调用
 
 <img src="./assets/map的[].png" alt="map的[]" style="zoom:33%;" />
 
-# `<unordered_set/multiset>`
+# 哈希表
 
-# `<unordered_map/multimap>`
+## 基本原理
+
+哈希表（Hash Table）是一种能以**常数平均时间 O(1)** 完成插入、删除和查找操作的基础数据结构。
+
+哈希表的核心思想是使用哈希函数（Hash Function）将任意类型的键值（Key）映射到一个大小可接受的索引范围内。
+
+1. **哈希函数 (`HashFcn`)**：负责根据键值生成一个哈希码（hash code），通常是 `size_t` 类型。
+2. **映射定位 (Modulus / Mapping)**：得到哈希码后，通过取模运算（如 `hash_code % bucket_count`），将其映射到`bucket`数组的一个具体索引上。
+
+<img src="./assets/为什么要有哈希表.png" alt="为什么要有哈希表" style="zoom:25%;" />
+
+当不同的键值被映射到同一个篮子（Bucket）时，就会发生冲突。STL采用的是**开链法（Separate Chaining）**，其结构如下：
+
+- **篮子数组 (Buckets)**：这是一个元素类型为“链表头节点指针”的 `std::vector`。
+- **链表节点 (Node)**：`bucket`向量中的每个槽位维护一个单链表，由 `__hashtable_node` 构成，包含指向下一个节点的指针和值。
+- **冲突处理**：所有映射到同一索引的元素会挂接在该桶的单链表上。
+
+这种结构最巧妙的设计在于，它引入了一个名为 `_M_before_begin` 的特殊节点，这个虚拟头节点的设计使得在链表头部进行插入和删除操作变得像处理中间节点一样统一，极大地简化了代码逻辑。
+
+<img src="./assets/什么是哈希表.png" alt="什么是哈希表" style="zoom:25%;" />
+
+## 核心数据结构
+
+### 模板类
+
+- **`HashFcn`**: 哈希函数，负责从 `Key` 生成 `size_t` 类型的哈希码。
+- **`ExtractKey`**: 从 `Value` 对象中提取出 `Key`，遵循了单一职责原则。
+- **`EqualKey`**: 判断两个 `Key` 是否相等，用于在链表中查找元素。
+
+<img src="./assets/哈希表数据结构-1.png" alt="哈希表数据结构-1" style="zoom:33%;" />
+
+#### `hashtable`
+
+普通的开链法，桶数组存的是链表头指针。插入新节点时用**头插法**（在头部插入），需要修改桶数组里存储的链表头指针。但因为桶数组过大或、节点与节点之间在内存中不连续，访问时无法缓存命中（Cache Miss）。**GCC 的解决方案：引入 `_M_before_begin` ，所有 buckets[i] 永远只指向该桶的第一个节点（不改变）。新节点永远插在 `buckets[i]` 指向的节点之后（即第二个位置）**。
+
+``` c++
+class _Hashtable {
+    _Hash_node_base*  buckets;        // 桶数组（指针数组）并不是直接 new 出来的，而是通过 _Alloc (分配器) 来管理的连续内存块。
+    size_t            bucket_count;   // 桶的数量
+    _Hash_node_base   before_begin;   // 全局哨兵节点（Dummy Node）
+    size_t            element_count;  // 元素总数
+};
+
+```
+
+> 为什么不用`vector`了？
+
+1.Rehash（扩容）逻辑的语义冲突
+
+- **`vector` 的扩容 (`resize`/`reserve`)**：会分配新内存，**拷贝/移动旧元素**，然后**析构并释放旧内存**。
+- **`hashtable` 的 Rehash**：分配新桶数组后，**不能直接拷贝旧桶的指针**！因为桶数量变了，每个节点必须**重新计算 Hash 值**，然后重新挂载到新的桶上。
+
+如果用 `vector`，在 Rehash 时，`vector` 内部的拷贝逻辑完全是**无用功**（拷贝过去的旧指针马上就会被新指针覆盖）。使用裸指针数组，GCC 可以直接 `allocate` 一块新内存，自己控制节点的重新散列，最后再 `deallocate` 旧内存，**避免了 `vector` 强加的无意义拷贝和析构开销**。
+
+2.状态冗余与内存开销
+
+`vector` 内部维护了三个指针（`start`, `finish`, `end_of_storage`），用来管理 `size` 和 `capacity`。 但在哈希表中：
+
+- 桶的数量（`size`）由 `bucket_count` 严格维护。
+- 哈希表**根本不需要** `capacity` 的概念（桶数组的 capacity 永远等于 size）。
+
+使用 `vector` 会导致**状态冗余**，每次修改桶数量，都要同时更新 `bucket_count` 和 `vector` 内部的指针，增加了不必要的指令。裸指针数组配合 `bucket_count` 是最精简的状态机。
+
+---
+
+**图解 GCC 的插入逻辑（为什么添加哨兵节点后快？）：**
+
+> **为什么修改 `buckets[i]` 是致命的？**
+>
+> 1. `_M_buckets` 是一个很大的数组（可能几万个元素），它通常**不在 CPU 的高速缓存（Cache）中**，而是在慢速的主存（RAM）中。
+> 2. 每次执行 `buckets[i] = new_node`，CPU 都必须把 `buckets[i]` 所在的**缓存行（Cache Line）** 从主存加载到 Cache 中，修改它，然后再写回主存。
+> 3. 如果你连续往同一个桶插入 100 个元素，传统头插法会**修改 100 次 `buckets[i]`**，导致严重的 **Cache Miss（缓存未命中）** 和缓存行失效，极大地拖慢插入速度。
+
+**GCC 的目标**：能不能做到**除了第一次插入空桶外，后续往同一个桶插入元素时，绝对不碰 `buckets` 数组？**
+
+``` c++
+【场景 1：向空桶 Bucket[i] 插入节点 N1  // 唯一一次修改 _M_buckets[i]。
+初始状态: buckets[i] 指向 before_begin 指向 nullptr
+  buckets[i] --> [before_begin] -> null
+
+插入 N1: 
+  1.  before_begin 指向 N1。
+  2. 因为前驱是 before_begin，更新 buckets[i] 指向 N1。
+结果:
+  buckets[i] --> [N1] -> null
+  (此时 before_begin 恢复独立)
+
+      
+      
+【场景 2：向非空桶 Bucket[i] 插入节点 N2】
+当前状态: buckets[i] 指向 N1
+  buckets[i] --> [N1] -> null
+
+插入 N2:
+  1. N2 插入到 buckets[i] 指向的节点 (即 N1) 之后！
+  2. 因为前驱不是 before_begin，【不更新】buckets[i]！
+结果:
+  buckets[i] --> [N1] -> [N2] -> null
+
+```
+
+ **核心结论：** GCC 并没有采用纯粹的头插法或尾插法。它保证 `buckets[i]` **始终指向该桶的第一个节点**。新节点总是插在第一个节点之后。 
+
+**好处：** 除了空桶插入第一个元素外，后续的所有插入操作，**永远不需要修改 `buckets` 数组中的指针**！这极大地减少了内存写操作，完美避免了 Cache Miss，是 GCC 哈希表性能碾压许多手写哈希表的核心原因。
+
+#### 节点结构
+
+GCC 的节点不仅存储数据，还**缓存了哈希值**。
+
+``` c++
+// 节点基类：只包含指针
+struct _Hash_node_base {
+    _Hash_node_base* _M_nxt; // 指向下一个节点
+};
+
+// 节点值类：包含数据和缓存的 hash code
+template<typename _Value>
+struct _Hash_node_value_base : _Hash_node_base {
+    _Value _M_v;             // 实际存储的键值对 (std::pair<const Key, Value>)
+    
+    // 注意：在 C++11 后的某些版本中，hash_code 被单独提取或存放在特定位置，
+    // 核心思想是：节点内缓存 hash_code，避免重复计算和昂贵的 Key 比较。
+};
+
+```
+
+**优化点：Hash Code 缓存** 在长链表中查找时，如果先比较 `hash_code`，不相等则直接跳过，可以避免调用极其耗时的 `KeyEqual`（比如长字符串的 `strcmp`）。
+
+
+### 创建一个哈希表
+
+<img src="./assets/哈希表数据解构-2.png" alt="哈希表数据解构-2" style="zoom:33%;" />
+
+### 哈希函数
+
+<img src="./assets/哈希函数.png" alt="哈希函数" style="zoom:33%;" />
+
+### 取模运算
+
+<img src="./assets/取模运算.png" alt="取模运算" style="zoom:33%;" />
+
+## 查找与插入
+
+### 查找
+
+查找时，GCC 会充分利用缓存的 `hash_code`。
+
+``` c++
+// 简化版 _M_find_node_tr 源码逻辑
+template<typename _Key, typename _Value>
+_Hash_node_base* _M_find_node_tr(size_t __bkt, const _Key& __k, 
+                                 size_t __c /* 传入计算好的 hash_code */) {
+    // 1. 获取该桶的第一个节点
+    __node_type* __p = static_cast<__node_type*>(_M_buckets[__bkt]);
+    
+    // 2. 遍历链表
+    for (; __p; __p = static_cast<__node_type*>(__p->_M_nxt)) {
+        // 【优化】先比较 hash_code，如果不等直接跳过，避免调用 _M_equals
+        if (__p->_M_hash_code == __c && _M_equals(__k, __p)) {
+            return __p; 
+        }
+    }
+    return nullptr;
+}
+
+```
+
+### 插入
+以 `unordered_map`（唯一键）为例，插入前需要先查重。
+
+``` c++
+// 简化版 _M_insert_unique_node 源码
+template<typename _Node>
+std::pair<iterator, bool> _M_insert_unique_node(size_t __bkt, size_t __code, _Node* __n) {
+    // 1. 检查是否需要 Rehash (扩容)
+    _RehashPolicy __saved_state = _M_rehash_policy;
+    auto __do_rehash = _M_rehash_policy._M_need_rehash(_M_bucket_count, _M_element_count, 1);
+    
+    if (__do_rehash.first) { // 如果需要扩容
+        _M_rehash(__do_rehash.second, __saved_state);
+        __bkt = _M_bucket_index(__n, _M_bucket_count); // 扩容后重新计算桶索引
+    }
+
+    // 2. 执行插入（利用 _M_before_begin 机制）
+    __node_base* __prev = _M_buckets[__bkt]; // 获取前驱
+    if (!__prev) { // 如果桶为空，前驱就是 dummy 节点
+        __prev = &_M_before_begin;
+    }
+    
+    // 将新节点插在前驱之后
+    __n->_M_nxt = __prev->_M_nxt;
+    __prev->_M_nxt = __n;
+    
+    // 3. 如果前驱是 dummy 节点，说明这是该桶的第一个节点，更新桶指针
+    if (__prev == &_M_before_begin) {
+        _M_buckets[__bkt] = __n;
+    }
+    
+    ++_M_element_count;
+    return { iterator(__n, __bkt), true };
+}
+
+```
+
+
+
+## 扩容机制与质数表
+
+### 质数表
+
+GCC 没有像 Java 的 HashMap 那样使用 2 的幂次方作为桶数量，而是使用了**质数表（Prime Rehash Policy）**。
+
+``` c++
+// GCC 内置的质数表（部分）
+static const std::size_t __prime_list[] = {
+    2ul, 3ul, 5ul, 7ul, 11ul, 13ul, 17ul, 19ul, 23ul, 29ul, 31ul,
+    37ul, 41ul, 43ul, 47ul, 53ul, 59ul, 61ul, 67ul, 71ul, 73ul, 79ul,
+    // ... 一直到巨大的质数
+};
+
+```
+
+**为什么用质数？** 当用户的 Hash 函数写得不好（例如存在周期性，或者只利用了低位），如果桶数量是 2 的幂（如 16, 32），取模运算 `hash % 2^n` 相当于只取 hash 的低 `n` 位，会导致**灾难性的哈希冲突**。而质数可以打破这种周期性，强制让高位也参与运算，使分布更均匀。
+
+在计算机中，如果模数 是 2 的幂（二进制肯定为100...），那么取模运算在底层会被编译器优化为**位与运算（Bitwise AND）**：
+
+> 任何一个整数，在二进制下可以写成：a = (高位部分) × 2^n + (低 n 位)；因此对其进行 2^n 取模就相当于对其低 n 位进行位与运算。
+
+*ha**s**h*(mod16)  ⟺  *ha**s**h* & (16−1)  ⟺  *ha**s**h* & 15
+**这会导致什么后果？** 15 的二进制是 `01111`。当你用 `hash & 01111` 时，**hash 值的第 4 位及以上的所有位（高位），都被强行抹零了！** 这意味着，无论你的哈希函数算出来的值有多大、高位分布得多均匀，**最终决定桶索引的，只有最低的 4 位**。高位信息被完全丢弃，这就是“高位无法参与运算”的本质。
+
+### 扩容流程
+
+1. 从质数表中找到一个大于 `当前元素数 / 最大负载因子(默认1.0)` 的最小质数作为新桶数量。
+2. 分配新的 `_M_buckets` 数组。
+3. 遍历旧节点，重新计算桶索引，**复用旧节点**（不重新 new，只改指针），用上述的 `_M_before_begin` 逻辑插入新桶。
+4. 释放旧桶数组。
+
+``` c++
+// 简化版 现代 GCC _M_rehash
+void _M_rehash(size_type __bkt_count) {
+    // 1. 直接用分配器分配裸指针数组，没有 vector 的封装
+    __node_base** __new_buckets = _M_allocate_buckets(__bkt_count);
+    
+    // 2. 遍历旧节点，重新计算索引，直接操作指针
+    // 这里利用了前文提到的 _M_before_begin 优化
+    for (auto __p = _M_begin(); __p; ...) {
+        size_type __new_bkt = _M_bucket_index(__p, __bkt_count);
+        // ... 直接将节点挂到 __new_buckets[__new_bkt] 上 ...
+    }
+    
+    // 3. 释放旧数组，替换指针 (极其轻量)
+    _M_deallocate_buckets(_M_buckets, _M_bucket_count);
+    buckets = __new_buckets;
+    bucket_count = __bkt_count;
+}
+
+```
+
+
+
+## 迭代器
+
+哈希表的迭代器需要能够**跨越不同的桶**。GCC 的迭代器设计非常轻量。
+
+``` c++
+template<typename _Value, bool _IsConstant, bool _Cache>
+struct _Node_iterator_base {
+    __node_type*  cur;   // 当前指向的节点
+    __node_base** bucket; // 当前所在的桶指针（用于跨越桶）
+    size_t        bucket_count; // 总桶数
+};
+
+// 迭代器 ++ 操作符源码逻辑
+_Node_iterator& operator++() {
+    // 1. 如果当前节点有 next，直接往后走
+    _M_cur = static_cast<__node_type*>(_M_cur->_M_nxt);
+    
+    // 2. 如果 next 为空，说明当前链表到底了，需要找下一个非空桶
+    if (!_M_cur) {
+        // 桶指针后移，直到找到非空桶或到达末尾
+        do {
+            ++_M_bucket; 
+        } while (_M_bucket < _M_buckets_end && !(*_M_bucket));
+        
+        // 如果找到了非空桶，_M_cur 指向该桶的第一个节点
+        if (_M_bucket < _M_buckets_end) {
+            _M_cur = static_cast<__node_type*>(*_M_bucket);
+        }
+    }
+    return *this;
+}
+
+```
+
+## 面试相关
+
+如果你在面试中被问到 GCC `unordered_map` 的底层实现，抛出以下三个点，足以证明你“看过源码”：
+
+1. “GCC 的哈希表在插入时，如何避免 Cache Miss？”
+   - **回答**：GCC 引入了 `_M_before_begin` 哨兵节点机制。桶数组指针始终指向链表的第一个节点，新节点总是插入在第一个节点之后。这样除了空桶首次插入，后续插入**永远不需要修改桶数组的指针**，避免了写操作带来的缓存失效。
+2. “为什么 GCC 的桶数量是质数，而不是 2 的幂？”
+   - **回答**：2 的幂次方在取模时相当于位运算截断，如果哈希函数质量差（低位聚集），会导致严重冲突。GCC 采用 `_Prime_rehash_policy` 质数表，利用质数取模打破周期性，对劣质哈希函数有更好的容错性。（可补充：虽然取模比位运算慢，但 GCC 通过缓存 hash_code 和减少冲突弥补了性能）。
+3. “在长链表中查找时，GCC 做了什么优化？”
+   - **回答**：GCC 的节点中缓存了 `_M_hash_code`。在遍历链表时，先进行整数级别的 `hash_code` 比较，如果不相等直接跳过，避免了调用可能非常昂贵的 `KeyEqual`（如 `std::string` 的字典序比较）。
+
+**实战建议：**
+
+- 如果你需要极致的插入性能且不在乎内存，可以自定义 Allocator 或使用 `reserve()` 提前分配好质数桶，避免运行时的 `_M_rehash`。
+- 如果 Key 是自定义类型，务必写好 `std::hash`，并确保哈希值的离散度，因为 GCC 的质数表虽好，但也救不了全返回 `0` 的哈希函数。
+
+## `<unordered_set/multiset>`
+
+## `<unordered_map/multimap>`
