@@ -2489,6 +2489,75 @@ public:
 
 既有父类又有组合，先执行父类的构造函数，再执行组合的构造函数，再执行子类的构造函数，而析构则反过来。
 
+## 组合和继承
+
+### 继承："是一个"(is-a) 
+
+继承描述的是类之间的**从属关系**，表示一个类 "是" 另一个类的一种特殊类型。
+
+- 子类**继承**父类的所有属性和函数（除了构造 / 析构函数）
+- 子类可以重写 (override) 父类的虚函数
+- 子类对象可以**隐式转换**为父类对象（多态的基础）
+
+``` c++
+// 继承示例：Dog "是一个" Animal
+class Animal {
+public:
+    virtual void makeSound() const { std::cout << "Animal sound" << std::endl; }
+    void eat() const { std::cout << "Eating" << std::endl; }
+};
+
+class Dog : public Animal {
+public:
+    void makeSound() const override { std::cout << "Woof!" << std::endl; }
+    void wagTail() const { std::cout << "Wagging tail" << std::endl; }
+};
+```
+
+
+
+### 组合："有一个"(has-a) 
+
+组合描述的是类之间的**包含关系**，表示一个类 "拥有" 另一个类的实例作为其成员。
+
+- 外部类**包含**内部类的对象作为成员变量
+- 外部类只能访问内部类的**public**接口
+- 外部类可以控制内部类对象的生命周期
+
+``` c++
+// 组合示例：Car "有一个" Engine
+class Engine {
+public:
+    void start() { std::cout << "Engine started" << std::endl; }
+    void stop() { std::cout << "Engine stopped" << std::endl; }
+};
+
+class Car {
+private:
+    Engine engine; // 组合：Car包含Engine对象
+public:
+    void start() { engine.start(); } // 转发调用
+    void stop() { engine.stop(); }
+};
+```
+
+
+
+### 表格对比
+
+| 对比维度         | 继承 (Inheritance)                        | 组合 (Composition)               |
+| ---------------- | ----------------------------------------- | -------------------------------- |
+| **关系本质**     | is-a (是一个)                             | has-a (有一个)                   |
+| **耦合度**       | 强耦合（子类依赖父类实现）                | 松耦合（仅依赖接口）             |
+| **代码复用方式** | 白盒复用（**子类可见父类实现细节**）      | 黑盒复用（仅可见接口）           |
+| **封装性**       | 破坏封装（父类 protected 成员暴露给子类） | 保护封装（**内部实现完全隐藏**） |
+| **灵活性**       | 静态（编译时确定，无法动态改变）          | 动态（运行时可替换成员对象）     |
+| **多态支持**     | 天然支持（通过虚函数）                    | 需要手动实现（通过接口转发）     |
+| **访问权限**     | **可访问 public 和 protected 成员**       | 只能访问 public 成员             |
+| **构造顺序**     | 先构造父类，再构造子类                    | 先构造成员对象，再构造外部类     |
+| **析构顺序**     | 先析构子类，再析构父类                    | 先析构外部类，再析构成员对象     |
+| **扩展性**       | 差（继承层次过深导致 "脆弱的基类问题"）   | 好（通过添加新类轻松扩展）       |
+| **代码量**       | 少（自动继承接口）                        | 稍多（需要手动转发接口）         |
 
 # 设计模式
 
@@ -3377,10 +3446,12 @@ bool operator<(const string& lhs, const string& rhs) {
 
 `Compare comp` 是 STL **泛型算法或容器**用来**定制排序/等价（怎么比大小）规则**的一个参数。
 
-- **什么类型**：一个可调用对象（函数、函数对象、lambda），它接受两个相同类型的参数，返回 `bool`，表示“第一个参数是否应在第二个参数之前”（严格弱序）。
+- **类型**：**一个可调用对象**（函数、函数对象、lambda），它接受两个相同类型的参数，返回 `bool`，表示“第一个参数是否应在第二个参数之前”（严格弱序）。
 - **出现在哪里**：
   - **算法**：`std::sort(begin, end, comp)`、`std::lower_bound(begin, end, value, comp)` 等。
   - **容器**：`std::map<Key, Value, Compare>`、`std::set<Key, Compare>` 的第三个模板参数，默认是 `std::less<Key>`。
+
+---
 
 **严格弱序要求：`Compare` 必须遵守的契约**
 
@@ -3394,7 +3465,7 @@ bool operator<(const string& lhs, const string& rhs) {
 
 ---
 
-#### 自定义比较规则
+#### 应用示例
 
 当你需要以非默认方式（例如不区分大小写）对 `string` 排序或存放时，就轮到 `Compare comp` 上场了。你自定义一个 `Compare` 对象，传给 `std::sort` 或者 `std::set`。
 
@@ -3658,6 +3729,277 @@ void MYACTUA::enqueue_discrete_command(const ControlCommand& cmd)
     }
 }
 ```
+# Move
+
+我们平时说的 `move`，通常指的是标准库函数模板：
+
+``` c++
+std::move(x)
+```
+
+但最关键的一点是：
+
+`std::move` **本身不移动任何东西**。它**只是把一个表达式强制转换成右值引用**，让**后续代码“有机会”调用移动构造函数或移动赋值函数**。
+
+这句话是理解 C++ move 机制的核心。
+
+## 右值引用
+
+C++ 里表达式不只是有类型，还有**值类别**，也就是 value category。
+
+- 左值，lvalue。它有名字，可以被反复使用，有稳定身份。
+
+- 右值，rvalue。它们往往是临时结果，生命周期较短，马上就要消失。
+
+  ``` c++
+  10
+  a + 1
+  int{5}
+  ```
+
+C++11 引入了右值引用：
+
+``` c++
+int&& r4 = 10; // 正确
+```
+
+## 移动语义
+
+看一个例子：
+
+``` c++
+std::string a = "hello";
+std::string b = a;
+```
+
+这里 `b = a` 是复制。`a` 还要继续存在，所以不能破坏 `a`。
+
+但如果是：
+
+``` c++
+std::string b = std::string("hello");
+```
+
+右边的 `std::string("hello")` 是临时对象，用完就没了。按理说没有必要再复制一份字符缓冲区，可以直接把临时对象内部的资源“接管”过来。这就是移动语义，move semantics。
+
+对于管理资源的对象，例如：
+
+```c++
+std::string
+std::vector
+std::unique_ptr
+std::fstream
+```
+
+移动的意义很大，因为这些对象内部通常持有堆内存、文件句柄、锁、网络连接等资源。**复制意味着重新分配资源；移动意味着转移资源所有权**。
+
+## 移动构造
+
+假设有一个类：
+
+``` c++
+class MyString{
+public:
+    MyString(const MyString& other);  // 拷贝构造
+    MyString(MyString&& other);		  // 移动构造
+};
+```
+
+如果写：
+
+``` c++
+MyString b = MyString{};
+```
+
+右边是临时对象，是右值，所以**优先调用移动构造**。
+
+``` c++
+MyString(MyString&& other);
+```
+
+## `std::move`
+
+`std::move` 的实现本质上类似于：
+
+``` c++
+template <class T>
+typename std::remove_reference<T>::type&& move(T&& t) noexcept {
+    return static_cast< typename std::remove_reference<T>::type&& >(t);
+}
+```
+
+本质就是：
+
+``` c++
+static_cast<T&&>(x)
+```
+
+它只是一个类型转换。它告诉编译器：**我不再把 `x` 当作普通左值使用了，你可以把它当作将亡值，xvalue，来匹配移动构造或移动赋值**。但是它不会自动移动资源。**真正移动资源的是类里面的移动构造或者移动赋值函数**。
+
+## 移动赋值
+
+移动构造是用一个已有对象初始化新对象：
+
+``` c++
+std::vector<int> a = {1, 2, 3};
+std::vector<int> b = std::move(a);
+```
+
+移动赋值是**两个对象都已经存在**：
+
+``` c++
+std::vector<int> a = {1, 2, 3};
+std::vector<int> b = {4, 5, 6};
+
+b = std::move(a);
+```
+
+**移动赋值通常要先释放 `b` 原本拥有的资源，再接管 `a` 的资源**。
+
+## 示例
+
+看一个管理堆内存的类：**调用拷贝构造，重新分配一块大内存**；**调用移动构造，接管资源：**`b` 直接接管 `a` 的 `data_` 指针，`a.data_` 被置为 `nullptr`。移动之后：`a`仍然是一个有效对象，但它的内容已经不应该被假设。这叫 **valid but unspecified state**，即“有效但状态未指定”。
+
+``` c++
+#include <algorithm>
+#include <cstddef>
+
+class Buffer {
+private:
+    std::size_t size_;
+    int* data_;
+
+public:
+    Buffer(std::size_t size)
+        : size_(size), data_(new int[size]) {}
+
+    ~Buffer() {
+        delete[] data_;
+    }
+
+    // 拷贝构造：深拷贝
+    Buffer(const Buffer& other)
+        : size_(other.size_), data_(new int[other.size_]) {
+        std::copy(other.data_, other.data_ + size_, data_);
+    }
+
+    // 拷贝赋值：深拷贝
+    Buffer& operator=(const Buffer& other) {
+        if (this == &other) {
+            return *this;
+        }
+
+        int* new_data = new int[other.size_];
+        std::copy(other.data_, other.data_ + other.size_, new_data);
+
+        delete[] data_;
+
+        data_ = new_data;
+        size_ = other.size_;
+
+        return *this;
+    }
+
+    // 移动构造：接管资源
+    Buffer(Buffer&& other) noexcept
+        : size_(other.size_), data_(other.data_) {
+        other.size_ = 0;
+        other.data_ = nullptr;
+    }
+
+    // 移动赋值：释放自己原来的资源，再接管对方资源
+    Buffer& operator=(Buffer&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        delete[] data_;
+
+        size_ = other.size_;
+        data_ = other.data_;
+
+        other.size_ = 0;
+        other.data_ = nullptr;
+
+        return *this;
+    }
+};
+```
+
+## 注意事项
+
+### 右值引用变量本身是左值
+
+看代码：
+
+```c++
+void f(Buffer&& x) {
+    Buffer y = x;
+}
+```
+
+虽然 `x` 的类型是 `Buffer&&`，但是表达式 `x` 本身有名字，所以 `x` 是左值。因此：
+
+```c++
+Buffer y = x;
+```
+
+调用的是拷贝构造，而不是移动构造。要移动，必须写：
+
+```c++
+void f(Buffer&& x) {
+    Buffer y = std::move(x);
+}
+```
+
+也就是说：
+
+> 右值引用变量本身是左值。
+> 只有 `std::move(x)` 之后，它才作为右值参与重载决议。
+
+### `const` 对象无法真正移动
+
+这是一个非常隐蔽的坑。
+
+```c++
+const std::string s = "hello";
+std::string t = std::move(s);
+```
+
+很多人以为这会移动，实际上通常不会。因为：
+
+```c++
+std::move(s)
+```
+
+的类型是：
+
+```c++
+const std::string&&
+```
+
+而标准容器和字符串的移动构造函数通常是：
+
+```c++
+string(string&& other);
+```
+
+不是：
+
+```c++
+string(const string&& other);
+```
+
+为什么？因为**移动需要修改源对象**，例如把源对象的指针置空。`const` 对象不能被修改，所以不能真正移动。于是**它往往会退化成拷贝**。
+
+所以：
+
+```c++
+std::move(const_object)
+```
+
+一般没有意义。
+
 # 资源管理
 
 > 条款13：以对象管理资源 (Use objects to manage resources)
@@ -3666,6 +4008,77 @@ void MYACTUA::enqueue_discrete_command(const ControlCommand& cmd)
 在C++中，“资源”不仅仅指堆内存（Heap Memory），还包括文件描述符（File Descriptors）、互斥锁（Mutexes）、网络套接字（Sockets）、数据库连接以及硬件设备的内存映射（MMIO）。
 
 传统的手动 `new` 和 `delete`（或 `malloc`/`free`，`open`/`close`）在遇到提早 `return`、`continue` 或是抛出异常时，极易被跳过，从而导致资源泄漏。**现代C++的解决方案：** 标准库提供的**智能指针本质上就是实现了RAII理念的模板类**。它们在构造函数中获取资源，在析构函数中释放资源，由于局部对象在离开作用域时必然会自动调用析构函数，这就保证了即使发生异常，资源也能被确定性地回收。
+
+## 内存对齐
+
+**CPU 访问效率**：真正的核心原因是 CPU 的缓存行机制。现代 CPU 按 "字长块"（32 位 CPU4 字节、64 位 CPU8 字节）访问缓存/内存。如果数据未对齐，CPU 需要拆分多次访问才能获取完整数据，性能下降数倍。
+
+**平台兼容性**：部分硬件平台（如 ARM、DSP）**不支持非对齐内存访问**，直接访问会触发硬件异常导致程序崩溃。
+
+> 本质：用**少量空间换时间**，是计算机体系结构中典型的权衡设计。
+
+---
+
+### CPU如何读取内存
+
+现代 CPU 不直接和主存（RAM）打交道，而是通过三级缓存（L1/L2/L3）中转：
+
+1. CPU 发起内存读取请求
+2. 缓存检查数据是否存在：
+   - 命中：直接从缓存返回数据（1~10 纳秒）
+   - 未命中：从主存一次性加载**整个 64 字节的缓存行**到缓存（100~200 纳秒）
+3. CPU 从缓存中提取需要的字节
+
+> 关键结论：**CPU 一次最少读 64 字节，哪怕你只需要 1 个字节**。
+
+### 对齐的本质
+
+#### 针对小对象
+
+存对齐的核心目的，就是**让一个数据对象完整地落在同一个 64 字节缓存行内**。如果数据跨了两个缓存行，CPU 就必须执行两次缓存行加载，还要拼接数据，这就是性能损失的根源。
+
+> 基本类型的大小是缓存行大小的公约数。
+
+<img src="./assets/内存对齐.png" alt="内存对齐" style="zoom: 67%;" />
+
+#### 针对结构体
+
+结构体对齐的主要目的，是**保证结构体内部每个成员都落在自己要求的对齐地址上**，并保证结构体数组中的每个元素也满足这种成员对齐要求。
+
+> 结构体的大小不一定是缓存行大小的公约数。
+
+---
+
+**为什么还要对结构体整体大小进行对齐？**
+
+看这个结构体：
+
+``` c++
+struct S {
+    char c;
+    /* ... */
+    double d;
+};
+```
+
+它内部**最大对齐要求**来自 `double`，通常是 8 字节 ,所以整个结构体 `S` 的对齐要求通常也是 8 字节。**因为只有当结构体对象本身从 8 的倍数地址开始时，里面的 `d` 才能保持 8 字节对齐**。
+
+假设结构体起始地址是 AAA，`d` 在结构体内的偏移量是 8 * n，那么 `d` 的真实地址是：A+8 * n，如果 A 是 8 的倍数，那么：A+8 * n 仍然是 8 的倍数，所以 `d` 对齐。
+
+---
+
+结构体对齐的重点是：**结构体起始地址对齐 + 成员偏移量对齐+尾部 padding**。
+
+共同保证：
+
+1. 结构体内部成员访问不会错位；
+2. 结构体数组中每个元素的成员仍然对齐；
+3. 满足 CPU、编译器和 ABI 对内存布局的要求；
+4. 必要时再通过 `alignas(64)` 做专门的缓存行对齐，减少跨缓存行或伪共享问题。
+
+所以最准确的说法是：
+
+> 结构体对齐不是为了保证整个结构体永远不跨缓存行，而是为了保证结构体内部成员以及结构体数组中的成员都能以正确、高效的方式访问。缓存行对齐只是更高层次的性能优化，通常需要额外指定。
 
 ## 堆栈
 

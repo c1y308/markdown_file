@@ -376,6 +376,77 @@ for (auto it = lst.begin(); it != lst.end(); ) {
 
 # 算法
 
+## 传入可调用对象
+
+**所有 STL 标准算法（包括`std::sort`）都接受可调用对象的**实例**作为参数**。 "传入仿函数类型或函数指针类型" 的情况，实际上是**STL 容器**（如`std::set`、`std::map`、`std::priority_queue`）的模板参数设计，而非算法的设计。
+
+### 为什么这么设计？
+
+#### 算法
+
+**(1) 支持有状态的可调用对象**
+
+算法需要能够处理带有内部状态的仿函数或 lambda 表达式。例如：
+
+``` c++
+// 统计比较次数的有状态仿函数
+struct CountingCompare {
+    int count = 0;
+    bool operator()(int a, int b) {
+        count++;
+        return a < b;
+    }
+};
+
+CountingCompare cmp;
+std::sort(v.begin(), v.end(), cmp);
+std::cout << "比较次数: " << cmp.count << std::endl;
+```
+
+如果算法只接受类型参数，就无法传递这种带有状态的对象。
+
+**(2) 最大的灵活性**
+
+- 可以传入函数指针、仿函数、lambda 表达式、`std::function`等任何可调用对象
+- 可以在运行时动态选择不同的比较器
+- 支持捕获外部变量的 lambda 表达式（这是 C++11 后最常用的方式）
+
+**(3) 性能优势**
+
+对于仿函数和无捕获的 lambda 表达式，编译器可以完全内联函数调用，性能与直接使用运算符相当。即使是函数指针，现代编译器也能进行很好的优化。
+
+**(4) 算法是一次性操作**
+
+算法只在调用时执行一次，不需要长期保存比较器的状态。传入一个临时对象完全满足需求。
+
+#### STL容器
+
+**(1) 比较器是容器类型的一部分**
+
+容器的比较器决定了容器的内部结构和行为，必须在编译时确定。例如：
+
+```c++
+std::set<int, std::less<int>> s1;
+std::set<int, std::greater<int>> s2;
+// s1和s2是完全不同的类型，不能相互赋值
+```
+
+这是 STL 类型系统的要求，确保了类型安全和编译时检查。
+
+**(2) 容器需要长期持有比较器**
+
+容器在整个生命周期内都需要使用比较器来维护元素的顺序。将比较器类型作为模板参数，容器可以在内部存储一个比较器对象（通常是一个空对象，占用 0 字节）。
+
+**(3) 空基类优化（EBCO）**
+
+大多数标准仿函数（如`std::less`、`std::greater`）都是空类。通过将它们作为模板参数，容器可以利用空基类优化，不占用任何额外的内存空间。
+
+**(4) 与 STL 适配器兼容**
+
+这种设计与 STL 的适配器模式（如`std::priority_queue`）完美兼容，允许用户灵活地替换底层容器和比较策略。
+
+
+
 <img src="./assets/算法对迭代器的暗示.png" alt="算法对迭代器的暗示" style="zoom:33%;" />
 
 ## 排序算法
@@ -2561,3 +2632,87 @@ _Node_iterator& operator++() {
 ## `<unordered_set/multiset>`
 
 ## `<unordered_map/multimap>`
+
+
+
+# 仿函数
+
+只为算法服务，STL中最简单的部件。排序，累加等用仿函数告诉算法要做特定的东西。
+
+<img src="./assets/仿函数作用.png" alt="仿函数作用" style="zoom: 33%;" />
+
+## 继承关系（可选配件）
+
+<img src="./assets/仿函数继承的父类.png" alt="仿函数继承的父类" style="zoom:33%;" />
+
+
+
+<img src="./assets/adaptor继承的作用.png" alt="adaptor继承的作用" style="zoom:33%;" />
+
+## 以 sort 为例
+
+<img src="./assets/sort的仿函数.png" alt="sort的仿函数" style="zoom:33%;" />
+
+## GNU 独有
+
+<img src="./assets/GNU独有仿函数.png" alt="GNU独有仿函数" style="zoom:33%;" />
+
+# 适配器
+
+<img src="./assets/adaptorc出现在哪里.png" alt="adaptorc出现在哪里" style="zoom: 33%;" />
+
+## 容器适配器
+
+### 组合
+
+STL 容器适配器（`std::stack`、`std::queue`、`std::priority_queue`）本质上就是**组合模式**在标准库中的经典应用，而且是 "对象适配器" 模式的完美范例。
+
+**关键特征：**
+
+- 适配器类**不包含任何数据存储逻辑**，所有数据都存储在底层容器中
+- 适配器类**不继承**底层容器，而是将其作为私有成员变量
+- 适配器类的所有公共方法都**简单地转发**给底层容器的对应方法
+- 适配器类**隐藏**了底层容器的大部分接口，只暴露符合特定数据结构语义的接口
+
+<img src="./assets/容器改造示例.png" alt="容器改造示例" style="zoom:33%;" />
+
+### 为什么不用继承？
+
+#### 继承带来的强耦合
+
+如果用继承实现：
+
+```c++
+// 不好的设计：通过继承实现stack
+template <class T>
+class bad_stack : public std::deque<T> {
+public:
+    void push(const T& x) { this->push_back(x); }
+    void pop() { this->pop_back(); }
+    T& top() { return this->back(); }
+};
+```
+
+这种设计的问题：
+
+- `bad_stack`对象可以被当作`std::deque`使用，破坏了栈的语义（例如可以调用`push_front()`）。
+- 父类`std::deque`的任何修改都可能影响子类。
+- 无法轻松替换底层容器（必须为每个容器类型创建一个子类）。
+
+#### 无法接口隔离
+
+组合允许适配器**完全隐藏**底层容器的接口，只暴露符合特定数据结构语义的方法。用户无法直接操作底层容器，保证了数据结构的完整性和正确性。
+
+#### 无法支持底层容器替换
+
+通过模板参数，用户可以轻松指定不同的底层容器：
+
+```c++
+// 使用vector作为底层容器的栈
+std::stack<int, std::vector<int>> stack_with_vector;
+
+// 使用list作为底层容器的队列
+std::queue<int, std::list<int>> queue_with_list;
+```
+
+这是继承无法做到的，因为继承关系在编译时就固定了。
