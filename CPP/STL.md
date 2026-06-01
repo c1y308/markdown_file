@@ -2637,23 +2637,84 @@ _Node_iterator& operator++() {
 
 # 仿函数
 
-只为算法服务，STL中最简单的部件。排序，累加等用仿函数告诉算法要做特定的东西。
+仿函数就是**像函数一样可以被调用**的**对象**。仿函数本质**就是一个类或结构体，它重载了 `operator()`**。
+
+## 为什么要有仿函数？
+
+### 传递算法逻辑（泛型编程）
+
+核心原因是：**STL 算法需要把“操作逻辑”作为参数传进去。**
+
+``` c++
+std::vector<int> v = {3, 1, 5, 2};
+
+// STL 算法本身不关心你到底怎么比较，它只要求你提供一个“可调用对象”。
+std::sort(v.begin(), v.end(), std::less<int>());
+std::sort(v.begin(), v.end(), std::greater<int>());
+```
+
+仿函数**只为算法服务，STL中最简单的部件**。排序，累加等用仿函数告诉算法要做特定的东西。
 
 <img src="./assets/仿函数作用.png" alt="仿函数作用" style="zoom: 33%;" />
 
-## 继承关系（可选配件）
+### 可以保存状态
+
+普通函数通常不能自然保存状态，而仿函数对象可以有成员变量。
+
+例如：
+
+``` c++
+struct GreaterThan {
+    int threshold;
+
+    GreaterThan(int t) : threshold(t) {}
+
+    bool operator()(int x) const {
+        return x > threshold;
+    }
+};
+
+
+std::vector<int> v = {1, 3, 5, 7};
+
+auto it = std::find_if(v.begin(), v.end(), GreaterThan(4));
+```
+
+### 易内联优化
+
+比如：
+
+```c++
+std::less<int>()
+```
+
+这种仿函数类型在编译期就是确定的，编译器很容易内联 `operator()`。
+
+而函数指针通常会带来间接调用，优化空间相对小一些。
+
+## 可适配的(adaptable)条件
+
+但是要注意：**现代 C++ 中 `std::binary_function` 已经过时。**
+
+它在 C++11 中被弃用，在 C++17 中被移除。因此如果现在写代码，不能再依赖它。现在只需要写一个能被调用的对象即可。
+
+在早期 STL 中，继承 `binary_function` 可以让仿函数更好地配合一些适配器使用。但从现代 C++ 角度看，**一个对象能否融入 STL，关键不在于是否继承 `binary_function`，而在于它是否满足算法所要求的调用形式。**因此，现代 C++ 中真正重要的是 **Callable 可调用对象** 这个概念，而不是必须继承某个基类。
 
 <img src="./assets/仿函数继承的父类.png" alt="仿函数继承的父类" style="zoom:33%;" />
 
 
 
-<img src="./assets/adaptor继承的作用.png" alt="adaptor继承的作用" style="zoom:33%;" />
-
 ## 以 sort 为例
 
 <img src="./assets/sort的仿函数.png" alt="sort的仿函数" style="zoom:33%;" />
 
-## GNU 独有
+
+
+## 以`binder2nd`为例
+
+<img src="./assets/adaptor继承的作用.png" alt="adaptor继承的作用" style="zoom:33%;" />
+
+## GNU 独有的仿函数
 
 <img src="./assets/GNU独有仿函数.png" alt="GNU独有仿函数" style="zoom:33%;" />
 
@@ -2716,3 +2777,9 @@ std::queue<int, std::list<int>> queue_with_list;
 ```
 
 这是继承无法做到的，因为继承关系在编译时就固定了。
+
+## 绑定参数
+
+本质是把参数记录下来。
+
+<img src="./assets/adaptor继承的作用.png" alt="adaptor继承的作用" style="zoom:33%;" />
