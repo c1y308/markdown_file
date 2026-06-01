@@ -2664,7 +2664,7 @@ public:
 
 C++ 单例有一个非常关键的步骤：**必须明确禁用拷贝构造函数和赋值运算符**。因为 C++ 编译器会默认偷偷生成它们，如果不禁用，别人写出 `Singleton a = Singleton::getInstance();` 就会产生单例的副本，打破唯一性。
 
-在 C++11 中，我们使用 `= delete` 语法来实现：
+在 C++11 中使用 `= delete` 语法来实现：
 
 ``` c++
 class Singleton {
@@ -2761,7 +2761,368 @@ std::mutex TraditionalSingleton::mtx;
 1. **内存泄漏危机**：用了 `new`，但上面的代码里没有 `delete`！虽然操作系统在进程结束时会回收内存，但该类的**析构函数永远不会被调用**。如果单例在析构时需要向数据库写入最后的状态或释放底层驱动，就会引发严重 bug。
 2. **解决泄漏很麻烦**：为了释放它，通常需要引入 `std::unique_ptr`，或者在单例类内部再嵌套一个 `GarbageCollector`（垃圾回收）类，利用嵌套类的静态实例析构来 `delete` 单例对象，代码会变得极其臃肿。
 
-## Template Method
+## 工厂模式
+
+### 简单工厂
+
+#### 核心思想
+
+严格来说，简单工厂不属于 GoF 23 种设计模式之一，但它是最常见、最容易理解的工厂形式。核心思想是**用一个专门的工厂类，根据参数创建不同具体类的对象；这样可以：**
+
+- **避免创建非法对象**；
+
+- **让参数语义更清楚**，不使用工厂模式的话读代码的人需要自己猜第几个参数是什么，需不需要填写；
+- **后续扩展更安全**，假设需要新增一种命令只需新增一个工厂函数。
+
+工厂模式的核心不是“写一个 Factory 类”这么简单，而是：
+
+> **把对象的创建逻辑从业务代码中抽离出来，集中放到专门的创建函数或创建类中。**
+
+---
+
+**把构造函数放到了 `private`**，不再允许外部代码随便构造 `ControlCommand`，只能通过工厂创建合法命令。
+
+#### 以电机控制命令类为例
+
+如果不采用工厂模式，则：
+
+``` c++
+/* 控制命令 */
+struct ControlCommand {
+    CommandType type;            // 控制命令类型
+    int slave_index;             // 电机索引
+    std::vector<double> values;  // 目标值 (仅在 SET_SETPOINTS 命令中有效)
+    std::vector<MitSetpoint> mit_setpoints;  // MIT/PVT目标值
+    ControlMode mode;            // 电机模式（仅在 SET_MODE 命令中有效）
+
+    ControlCommand() : type(CommandType::STOP), slave_index(-1), mode(ControlMode::NONE) {}
+
+    ControlCommand( CommandType t,
+                    int idx = -1,
+                    const std::vector<double>& vals = {},
+                    ControlMode m = ControlMode::NONE)
+                    : type(t), slave_index(idx), values(vals), mode(m) {}
+	
+    
+    /* 针对 MIT 控制模式 */
+    ControlCommand(CommandType t,
+                   int idx,
+                   const std::vector<MitSetpoint>& mit_vals,
+        		   ControlMode m = ControlMode::NONE)
+        			: type(t), slave_index(idx), mit_setpoints(mit_vals), mode(m) {}
+};
+```
+
+**不同命令类型需要不同字段有效，但普通构造函数无法阻止你创建一个语义错误的命令**。类想表达几类命令：
+
+``` c++
+STOP              // 停止电机
+SET_MODE          // 设置控制模式
+SET_SETPOINTS     // 设置普通目标值
+SET_MIT_SETPOINTS // 设置 MIT / PVT 目标值
+```
+
+但是现在这个构造函数允许你写出很多“语法上正确，但语义上错误”的代码。例如：
+
+``` c++
+ControlCommand cmd(
+    CommandType::SET_MODE,
+    0,
+    std::vector<double>{1.0, 2.0, 3.0},
+    ControlMode::NONE
+);
+```
+
+所以当前的问题是：
+
+> 构造函数把对象创建权完全交给调用者，调用者很容易创建出非法命令。
+
+这正是工厂模式适合解决的问题。
+
+---
+
+**简单工厂要解决什么？**
+
+业务代码不应该直接关心：
+
+``` c++
+ControlCommand 的 type 怎么填
+slave_index 是否应该是 -1
+values 什么情况下有效
+mit_setpoints 什么情况下有效
+mode 什么情况下有效
+```
+
+业务代码应该只表达意图：
+
+``` c++
+我要停止
+我要设置模式
+我要设置普通目标值
+我要设置 MIT 目标值
+```
+
+而具体怎么构造 `ControlCommand`，交给工厂。也就是说从：
+
+``` c++
+ControlCommand(CommandType::SET_MODE, 0, {}, ControlMode::MIT)
+```
+
+变成：
+
+``` c++
+ControlCommandFactory::makeSetMode(0, ControlMode::MIT)
+```
+
+如果不想单独写一个 `ControlCommandFactory` 类，也可以直接在 `ControlCommand` 里面**写静态工厂函数**。
+
+---
+
+#### 优点
+
+工厂模式的核心不是“写一个 Factory 类”这么简单，而是：
+
+> **把对象的创建逻辑从业务代码中抽离出来，集中放到专门的创建函数或创建类中。**
+
+在你的例子中，原本业务代码需要知道：
+
+```c++
+STOP 命令 slave_index 应该是 -1
+STOP 命令 values 应该为空
+SET_MODE 命令 values 应该为空
+SET_MODE 命令 mode 不能是 NONE
+MIT 命令 mode 应该是 MIT
+MIT 命令应该填 mit_setpoints，而不是 values
+```
+
+这些规则如果散落在各处，代码会非常危险。使用工厂后，这些规则集中到了：
+
+```c++
+ControlCommandFactory
+```
+
+业务代码只需要调用：
+
+```c++
+ControlCommandFactory::makeMitSetpoints(...)
+```
+
+这就是解耦。
+
+### 工厂方法
+
+#### 核心思想
+
+工厂方法模式是 GoF 23 种设计模式之一，它比简单工厂更“面向对象”。**把“创建哪个对象”的决定权交给子类工厂**。
+
+简单工厂的问题是：
+
+```c++
+if (type == "A") return A;
+else if (type == "B") return B;
+else if (type == "C") return C;
+```
+
+新增一个类型，就要修改工厂内部代码。这违反了**对扩展开放，对修改关闭（Open-Closed Principle）**。
+
+---
+
+工厂方法模式的思路是：
+
+> 不让一个工厂类负责所有对象创建，而是让每个具体工厂负责创建一种具体对象；**通过子类创建具体类。**
+> 
+
+**让父类流程固定**，但把“具体创建什么对象”这个变化点交给子类决定。工厂方法的重点不是：`class AFactory : public Factory`，
+
+而是：
+
+- 父类中有一套通用业务流程，流程中需要创建某个对象；
+- 但父类不知道该创建哪个具体类；于是让子类通过 createXXX() 决定。
+
+---
+
+工厂方法模式的结构是：
+
+```
+抽象产品 MotorDriver
+    ↑
+具体产品 MitsubishiMotorDriver / YaskawaMotorDriver
+
+抽象工厂 MotorDriverFactory
+    ↑
+具体工厂 MitsubishiMotorDriverFactory / YaskawaMotorDriverFactory
+```
+
+也就是：一个具体工厂 → 创建一种具体产品。
+
+#### 与继承相比
+
+普通继承是：子类改行为；**工厂方法是：子类改对象创建**。
+
+更具体地说：
+
+| 对比               | 普通继承        | 工厂方法         |
+| ------------------ | --------------- | ---------------- |
+| 变化点             | 某个函数的行为  | 创建哪个具体对象 |
+| 父类是否有固定流程 | 不一定          | 通常有           |
+| 子类重写什么       | 业务行为函数    | 创建函数         |
+| 典型函数           | `sendCommand()` | `createDriver()` |
+| 核心目的           | 多态执行        | 多态创建         |
+
+#### 以电机控制命令类为例
+
+假设系统支持不同厂家的电机驱动：
+
+```c++
+MitsubishiMotorDriver
+YaskawaMotorDriver
+UnitreeMotorDriver
+```
+
+它们都有统一接口：
+
+```c++
+class MotorDriver {
+public:
+    virtual void enable() = 0;
+    virtual void disable() = 0;
+    virtual void sendCommand(const ControlCommand& cmd) = 0;
+    virtual ~MotorDriver() = default;
+};
+```
+
+具体产品类：
+
+```c++
+class MitsubishiMotorDriver : public MotorDriver {
+public:
+    void enable() override {
+        std::cout << "Enable Mitsubishi motor\n";
+    }
+
+    void disable() override {
+        std::cout << "Disable Mitsubishi motor\n";
+    }
+
+    void sendCommand(const ControlCommand& cmd) override {
+        std::cout << "Send command to Mitsubishi motor\n";
+    }
+};
+
+
+class YaskawaMotorDriver : public MotorDriver {
+public:
+    void enable() override {
+        std::cout << "Enable Yaskawa motor\n";
+    }
+
+    void disable() override {
+        std::cout << "Disable Yaskawa motor\n";
+    }
+
+    void sendCommand(const ControlCommand& cmd) override {
+        std::cout << "Send command to Yaskawa motor\n";
+    }
+};
+```
+
+抽象工厂：
+
+```c++
+class MotorDriverFactory {
+public:
+    virtual std::unique_ptr<MotorDriver> createDriver() = 0;
+    virtual ~MotorDriverFactory() = default;
+};
+```
+
+具体工厂：
+
+```c++
+class MitsubishiMotorDriverFactory : public MotorDriverFactory {
+public:
+    std::unique_ptr<MotorDriver> createDriver() override {
+        return std::make_unique<MitsubishiMotorDriver>();
+    }
+};
+
+class YaskawaMotorDriverFactory : public MotorDriverFactory {
+public:
+    std::unique_ptr<MotorDriver> createDriver() override {
+        return std::make_unique<YaskawaMotorDriver>();
+    }
+};
+```
+
+使用：
+
+```c++
+void runMotor(MotorDriverFactory& factory) {
+    auto driver = factory.createDriver();
+
+    driver->enable();
+
+    ControlCommand cmd = ControlCommand::Stop();
+    driver->sendCommand(cmd);
+
+    driver->disable();
+}
+
+int main() {
+    MitsubishiMotorDriverFactory factory;
+    runMotor(factory);
+
+    return 0;
+}
+```
+
+---
+
+#### 优缺点
+
+新增一种电机驱动时，比如`UnitreeMotorDriver`,只需要新增：
+
+```c++
+class UnitreeMotorDriver : public MotorDriver { ... };
+
+class UnitreeMotorDriverFactory : public MotorDriverFactory {
+public:
+    std::unique_ptr<MotorDriver> createDriver() override {
+        return std::make_unique<UnitreeMotorDriver>();
+    }
+};
+```
+
+不需要修改原来的：`MitsubishiMotorDriverFactory、YaskawaMotorDriverFactory`，所以工厂方法比简单工厂更符合开闭原则。
+
+---
+
+**产品类增加，工厂类也增加**。比如有 10 种电机，就可能有：
+
+```
+10 个 MotorDriver
+10 个 MotorDriverFactory
+```
+
+类数量会膨胀。所以工厂方法适合：
+
+```c++
+产品类型确实经常扩展
+创建逻辑比较复杂
+不同产品创建过程差异较大
+```
+
+如果只是简单地 `make_unique<T>()`，强行写一堆工厂类反而是过度设计。
+
+### 抽象工厂
+
+**一个工厂创建一整套相互匹配的对象。**
+
+### 注册式工厂
+
+**用 map + function 替代大量 if-else，适合插件化扩展。**
+
+## 模板方法模式
 
 一个父类做很多相同的动作函数，把一个关键的步奏函数延缓实现，写为虚函数，这种做法叫做`Template Method`。在框架设计中十分常见！
 
@@ -2778,10 +3139,6 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
 - 核心思想：Composite模式的核心是创建一个**统一接口**，让客户端不必区分单个对象（叶子节点）和组合对象（容器节点），从而简化客户端代码。
 
 <img src="pic/composite.png" alt="composite" style="zoom:50%;" />
-
-## Prototype
-
-
 
 # 模板
 
@@ -3751,12 +4108,104 @@ for (string::iterator it = s.begin(); it != s.end(); it++) {
 
 # lambda
 
-## 定义
+Lambda 表达式是 **C++11 引入的最具革命性的特性之一**，它彻底改变了 C++ 的编程风格，让代码更简洁、更易读、更灵活。理解 lambda 是掌握现代 C++ 的必经之路。
 
-在C++中，Lambda 表达式是一种匿名函数对象，它可以在需要时定义并使用（**就地定义、使用，拉满封装性**）。
+------
+
+## 为什么要有 Lambda？
+
+在 C++11 之前，如果你想**给算法传递一个 "操作" 或者定义一个回调函数**，你只有两种选择：**函数指针**和**仿函数（函数对象）**。这两种方式都有明显的缺点。
+
+### 传统方式
+
+#### 代码分散，可读性差
+
+比如我们想对一个数组排序，按绝对值从小到大排列：
+
+```c++
+// 必须在函数外部单独定义一个比较函数
+bool compareAbs(int a, int b) {
+    return abs(a) < abs(b);
+}
+
+int main() {
+    vector<int> nums = {3, -1, 4, -2, 5};
+    sort(nums.begin(), nums.end(), compareAbs);  // 调用外部函数
+}
+```
+
+问题：**逻辑被拆分到两个地方**，看代码的时候需要跳来跳去才能理解排序规则。
+
+#### 仿函数过于繁琐
+
+如果我们需要捕获上下文变量（比如排序时使用一个外部的基准值），函数指针就无能为力了，必须用仿函数：
+
+```c++
+// 必须定义一个完整的类
+class CompareWithBase {
+private:
+    int base;  // 要捕获的外部变量
+public:
+    CompareWithBase(int b) : base(b) {}
+    
+    bool operator()(int a, int b) {
+        return abs(a - base) < abs(b - base);
+    }
+};
+
+int main() {
+    vector<int> nums = {3, -1, 4, -2, 5};
+    int base = 2;  // 基准值
+    sort(nums.begin(), nums.end(), CompareWithBase(base));  // 创建仿函数对象
+}
+```
+
+问题：**为了一个简单的比较逻辑，需要写十几行代码**，仪式感太重，代码臃肿。
+
+### Lambda 的解决方案
+
+Lambda 让你可以**在需要的地方直接定义匿名函数**，并且可以**捕获上下文变量**，代码紧凑且逻辑集中：
+
+```c++
+int main() {
+    vector<int> nums = {3, -1, 4, -2, 5};
+    int base = 2;
+    
+    // 直接在sort参数里定义比较逻辑，同时捕获base变量
+    sort(nums.begin(), nums.end(), [base](int a, int b) {
+        return abs(a - base) < abs(b - base);
+    });
+}
+```
+
+这就是 lambda 的核心价值：**就地定义、就地使用，代码即逻辑**。
+
+## 语法
+
+### 语法形式
+
+Lambda 表达式的完整语法格式：
 
 ``` c++
-/* 最基本的lambda定义 */
+[捕获列表] (参数列表) mutable noexcept -> 返回值类型 {
+    函数体
+}
+```
+
+| 部分            | 说明                                                      | 是否可选                     |
+| --------------- | --------------------------------------------------------- | ---------------------------- |
+| `[捕获列表]`    | 定义 lambda 可以访问的外部变量，以及访问方式（值 / 引用） | **必须**                     |
+| `(参数列表)`    | 和普通函数的参数列表一样                                  | 可选（无参数时可省略）       |
+| `mutable`       | 允许修改值捕获的变量                                      | 可选                         |
+| `noexcept`      | 指定 lambda 不抛出异常                                    | 可选                         |
+| `-> 返回值类型` | 显式指定返回值类型                                        | 可选（大多数情况可自动推导） |
+| `{函数体}`      | 函数的具体实现                                            | **必须**                     |
+
+其中很多部分是可选的，最简单的 lambda 可以写成：`[](){}`。
+
+---
+
+``` c++
 int main() {
     auto lambda = []() { std::cout << "Hello, Lambda!" << std::endl; };
     lambda(); // 输出：Hello, Lambda!
@@ -3769,18 +4218,35 @@ auto dfs = [&] (this auto&& dfs, int i, int j) ->void{};  // c++23
 function<void<int, int>> dfs = [&](int i, int j){};  // c++17
 ```
 
-​	在C++的Lambda表达式中，“捕获”（Capture）是指将Lambda表达式定义时所在作用域中的变量“捕获”到Lambda表达式内部，以便在Lambda表达式中使用这些变量。捕获的作用主要是解决Lambda表达式如何访问外部变量的问题。
+### 捕获	
+
+在C++的Lambda表达式中，“捕获”（Capture）是指**将Lambda表达式定义时所在作用域中的变量“捕获”到Lambda表达式内部**，以便在Lambda表达式中使用这些变量。捕获的作用主要是解决Lambda表达式如何访问外部变量的问题。
+
+#### 值捕获
+
+- 复制外部变量的值到 lambda 内部。
+- lambda 内部修改的是副本，不会影响外部变量。
+- 默认情况下，值捕获的变量在 lambda 内部是**const**的，不能修改。
 
 ``` c++
  // 按值捕获当前作用域中所有变量
     auto lambda = [=]() {
         std::cout << "a = " << a << ", b = " << b << std::endl;
     };
+```
 
+#### 引用捕获
+
+- 捕获外部变量的引用。
+- lambda 内部修改会直接影响外部变量。
+- **注意生命周期问题**：如果 lambda 的生命周期超过了被捕获变量的生命周期，会导致悬垂引用。
+
+``` c++
 // 按引用捕获当前作用域中所有变量
     auto lambda = [&]() {
         std::cout << "a = " << a << ", b = " << b << std::endl;
     };
+
 
 // 按引用捕获所有变量，但变量a按值捕获
     auto lambda = [&, a]() {

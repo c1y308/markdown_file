@@ -1181,7 +1181,7 @@ void MYACTUA::handle_mode_switching(MotorState& motor)
 
 > 负责 EtherCAT 多电机实时控制链路设计，针对总线抖动与瞬时失联，将离散指令设计为**事务化状态机**、连续指令设计为 **freshest-wins** 实时流，落地重试确认、**超时降级**与平滑恢复机制。
 
-实时线程是 1kHz 周期，先处理上层命令，再执行一次 EtherCAT 周期，再更新状态快照，motor_control.cpp (line 74)。我会把它解释成：
+实时线程是 1kHz 周期，先处理上层命令，再执行一次 EtherCAT 周期，再更新状态快照，motor_control.cpp 。我会把它解释成：
 
 - 控制面和数据面分离。
 - 上层线程只投递命令，不直接碰实时 PDO。
@@ -1432,193 +1432,15 @@ dmesg -T | grep -Ei "EtherCAT|SAFEOP|watchdog|AL"
 
 4. 做 A/B 交换测试（不改代码）：交换两台从站物理位置/网线，看错误是“跟设备走”还是“跟位置走”。
 
-现在这组现象里，PDO 已匹配 + 0x001A，最可能就是 **DC 同步时序/实时性/物理链路质量** 这条线。
-
----
-
-toolName: todo_write
-            
-status: success
-          
-Todos updated: 4 items
-          
-
-
-​            
-toolName: view_folder
-​            
-status: success
-​          
-/home/cat/Myactua_Ethercat
-​          
-
-
-​            
-toolName: file_search
-​            
-status: success
-​          
-file_pattern: **/*.xml
-​          
-
-
-​            
-toolName: file_search
-​            
-status: success
-​          
-file_pattern: **/ID_test*
-​          
-
-
-​            
-toolName: view_folder
-​            
-status: success
-​          
-/home/cat/Myactua_Ethercat/src
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/examples/ID_test.cpp
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
-​          
-让我继续查看ESI文件中的DC相关配置和SyncManager部分，以及EtherCAT适配器的实现代码。
-​        
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
-​          
-
-
-​            
-toolName: file_search
-​            
-status: success
-​          
-file_pattern: **/*EthercatAdapter*
-​          
-
-
-​            
-toolName: file_search
-​            
-status: success
-​          
-file_pattern: **/*motor_control*
-​          
-
-
-​            
-toolName: search_by_regex
-​            
-status: success
-​          
-query: Dc|dc|Sync|sync|OpSync|Sync0|Sync1|AssignActivate
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.hpp
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
-​          
-
-
-​            
-toolName: search_by_regex
-​            
-status: success
-​          
-query: SyncMan|Sm|Mailbox|CycleTime|SafeopOp
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
-​          
-
-
-​            
-toolName: view_files
-​            
-status: success
-​          
-​            
-filePath: /home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml
-​          
-
-
-toolName: todo_write
-​            
-status: success
-​          
-Todos updated: 4 items
-​          
-现在我已经完整地查看了项目代码和ESI文件，下面进行详细分析。
-​        
-​            
-toolName: todo_write
-​            
-status: success
-​          
-Todos updated: 4 items
-​          
+现在这组现象里，PDO 已匹配 + 0x001A，最可能就是 **DC 同步时序/实时性/物理链路质量** 这条线。 
 
 #### DC同步导致OP慢 & 关闭DC后通信异常的可能原因
 
 ---
 
-#### 一、关键代码和ESI配置回顾
+#### 关键代码和ESI配置回顾
 
-##### 1. 代码中的DC配置（[EthercatAdapterIGH.cpp:175](file:///home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp#L175)）
+##### 代码中的DC配置
 
 ```cpp
 ecrt_slave_config_dc(sc[i], 0x0300, 1000000, 4400000, 0, 0);
@@ -1633,7 +1455,7 @@ ecrt_slave_config_dc(sc[i], 0x0300, 1000000, 4400000, 0, 0);
 | `sync1_cycle`     | `0`               | 无Sync1                      |
 | `sync1_shift`     | `0`               | 无Sync1偏移                  |
 
-##### 2. ESI文件中的DC定义（[MT-Device 250702.xml:1977-1989](file:///home/cat/Myactua_Ethercat/src/motors/datasheet/myact/EtherCAT ESI/MT-Device 250702.xml#L1977-L1989)）
+##### ESI文件中的DC定义
 
 ```xml
 <Dc>
@@ -1659,9 +1481,9 @@ ESI还定义了关键超时：
 
 ---
 
-#### 二、为什么开启DC后从站进入OP很慢？
+#### 为什么开启DC后从站进入OP很慢？
 
-##### 原因1：**Sync0 Shift Time (4.4ms) 严重偏大** — 最可能的核心原因
+##### **Sync0 Shift Time (4.4ms) 严重偏大** — 最可能的核心原因
 
 这是最可疑的参数。`sync0_shift = 4,400,000ns = 4.4ms`，而周期只有 `1ms`。
 
@@ -1681,21 +1503,21 @@ ESI还定义了关键超时：
 - 它的目的是给从站留出处理时间（从收到帧到Sync0触发之间的时间）
 - 对于1ms周期，Shift Time通常设为 `0` 或一个较小的值（如100~500μs），而不是4.4ms
 
-##### 原因2：**ESI中CycleTimeSync0默认为0**
+##### **ESI中CycleTimeSync0默认为0**
 
 ESI文件中 `<CycleTimeSync0 Factor="1">0</CycleTimeSync0>` 默认值为0，表示从站没有预设的DC周期期望。虽然代码中设置了1ms，但从站固件可能需要一定时间来"适应"主站配置的DC周期，特别是在首次同步时。
 
-##### 原因3：**SafeopOpTimeout = 9秒**
+##### **SafeopOpTimeout = 9秒**
 
 ESI定义了9秒的Safe-OP到OP超时。当DC同步困难时，从站可能在这个超时内反复尝试同步，导致整体等待时间很长。
 
-##### 原因4：**多从站DC同步收敛**
+##### **多从站DC同步收敛**
 
 系统配置了10个从站（含转发站），所有从站都需要同时完成DC同步才能进入OP。Shift Time不合理时，每个从站的同步都可能很慢，整体等待时间叠加。
 
 ---
 
-#### 三、为什么关闭DC后秒进OP，但无法正常通信？
+#### 为什么关闭DC后秒进OP，但无法正常通信？
 
 ##### 原因1：**伺服电机控制环路依赖DC同步**
 
@@ -1726,7 +1548,7 @@ DC模式下，从站通过Sync0信号来重置看门狗；无DC模式下，从�
 
 ---
 
-#### 四、总结与建议方向
+#### 总结与建议方向
 
 | 现象             | 根因                                                | 优先级   |
 | ---------------- | --------------------------------------------------- | -------- |
@@ -1739,7 +1561,7 @@ DC模式下，从站通过Sync0信号来重置看门狗；无DC模式下，从�
 
 如果需要我进一步协助调整DC参数或排查其他细节，请告诉我。
 
-#### 数据并发错误
+### 数据并发错误
 
 **问题闭环总结（嵌入式实时控制视角）**
 
@@ -1768,49 +1590,313 @@ DC模式下，从站通过Sync0信号来重置看门狗；无DC模式下，从�
 
 **根因建模**
 
-7. 原结构中，`send()` 在应用线程直接写 `domain1_pd`。
+原结构中，`send()` 在应用线程直接写 `domain1_pd`。
 
-8. 同时 EtherCAT 线程在 `receive/process/queue/send` 周期内也读写同一域内存。
+同时 EtherCAT 线程在 `receive/process/queue/send` 周期内也读写同一域内存。
 
-9. 在特定相位下，应用写入会错过“有效发送窗口”或被后续周期内容覆盖，导致“写了但本周期没发出去”。
+在特定相位下，应用写入会错过“有效发送窗口”或被后续周期内容覆盖，导致“写了但本周期没发出去”。
 
-10. **修复策略（架构级）**
+**修复策略（架构级）**
 
-11. 采用“单写者原则”：应用线程不再直接写域内存。
+采用“单写者原则”：应用线程不再直接写域内存。
 
-12. 引入 `tx_shadow` 作为线程间缓冲，应用线程仅写缓冲。
+引入 `tx_shadow` 作为线程间缓冲，应用线程仅写缓冲。
 
-13. 仅 EtherCAT 线程在 `ecrt_domain_process()` 后、`ecrt_domain_queue()` 前，将 `tx_shadow` 统一落盘到 `domain1_pd`。
+仅 EtherCAT 线程在 `ecrt_domain_process()` 后、`ecrt_domain_queue()` 前，将 `tx_shadow` 统一落盘到 `domain1_pd`。
 
-14. 该策略把“控制决策时机”和“总线发送时机”解耦，消除跨线程竞态。
+该策略把“控制决策时机”和“总线发送时机”解耦，消除跨线程竞态。
 
-15. **实现要点**
+**实现要点**
 
-16. 缓冲与同步新增于 [EthercatAdapterIGH.hpp](/home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.hpp)。
+缓冲与同步新增于 [EthercatAdapterIGH.hpp](/home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.hpp)。
 
-17. 周期内统一落盘与发送路径在 [EthercatAdapterIGH.cpp](/home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp)。
+周期内统一落盘与发送路径在 [EthercatAdapterIGH.cpp](/home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp)。
 
-18. `send()` 改为仅写 `tx_shadow`，不再直接写 `domain1_pd`。
+`send()` 改为仅写 `tx_shadow`，不再直接写 `domain1_pd`。
 
-19. **验证与验收标准**
+**验证与验收标准**
 
-20. 编译通过并可运行：`stop_read_status`。
+编译通过并可运行：`stop_read_status`。
 
-21. 验收核心指标从“随机”转为“确定性”：
-       `send_cw == pd_pre_queue` 应稳定成立。
+验收核心指标从“随机”转为“确定性”：
+   `send_cw == pd_pre_queue` 应稳定成立。
 
-22. 状态机推进应稳定复现：
-       `0x07 -> SW_ON`，`0x0F -> OP_EN`。
+状态机推进应稳定复现：
+   `0x07 -> SW_ON`，`0x0F -> OP_EN`。
 
-23. 相位扫描下成功率不再对微小延时高度敏感，说明竞态被消除。
+相位扫描下成功率不再对微小延时高度敏感，说明竞态被消除。
 
-24. **工程化结论**
+**工程化结论**
 
-25. 此次缺陷本质是“实时系统中共享过程映像的多线程写冲突”。
+此次缺陷本质是“实时系统中共享过程映像的多线程写冲突”。
 
-26. 解决关键不在微调控制字，而在重构写入责任边界（Single Writer + Shadow Buffer）。
+解决关键不在微调控制字，而在重构写入责任边界（Single Writer + Shadow Buffer）。
 
-27. 该修复具备可迁移性，可作为后续 EtherCAT/现场总线驱动并发访问的标准范式。
+该修复具备可迁移性，可作为后续 EtherCAT/现场总线驱动并发访问的标准范式。
+
+## ControlCommand 重构复盘
+
+记录日期：2026-06-01
+
+### 修改背景与现象
+
+原来的 `ControlCommand` 使用一个 `CommandType` 枚举配合多个可选字段表达所有控制命令：
+
+```cpp
+/* 控制命令 */
+struct ControlCommand {
+    CommandType type;            // 控制命令类型
+    int slave_index;             // 电机索引
+    std::vector<double> values;  // 目标值 (仅在 SET_SETPOINTS 命令中有效)
+    std::vector<MitSetpoint> mit_setpoints;  // MIT/PVT目标值
+    ControlMode mode;            // 电机模式（仅在 SET_MODE 命令中有效）
+
+    ControlCommand() : type(CommandType::STOP), slave_index(-1), mode(ControlMode::NONE) {}
+
+    ControlCommand( CommandType t,
+                    int idx = -1,
+                    const std::vector<double>& vals = {},
+                    ControlMode m = ControlMode::NONE)
+                    : type(t), slave_index(idx), values(vals), mode(m) {}
+	
+    
+    /* 针对 MIT 控制模式 */
+    ControlCommand(CommandType t,
+                   int idx,
+                   const std::vector<MitSetpoint>& mit_vals,
+        		   ControlMode m = ControlMode::NONE)
+        			: type(t), slave_index(idx), mit_setpoints(mit_vals), mode(m) {}
+};
+```
+
+这种设计简单直接，但在项目继续扩展到 CSP 标量目标、MIT/PVT 目标、STOP、RESTART、SET_MODE 等多类命令后，逐渐暴露出几个问题：
+
+- 同一个结构体同时承载“连续目标值命令”和“离散状态命令”，语义混在一起。
+
+- 哪些字段有效完全依赖 `type` 的约定，编译器无法阻止非法组合。如：
+
+  ``` c++
+  ControlCommand(CommandType::STOP, -1, values, ControlMode::PVT);
+  ControlCommand(CommandType::SET_MODE, -1, mit_setpoints);
+  ```
+
+  这类代码不会在编译期报错，只能依赖运行时分支忽略无效字段，长期维护风险较高。
+
+- `STOP/RESTART/SET_MODE` 使用 `slave_index < 0` 表示全部电机，而 setpoint 命令的 `slave_index` 语义不统一。
+
+- `process_commands()` 中需要对所有 `CommandType` 分支做人工分发，离散命令状态机里还会出现 setpoint 相关的无意义 case。
+
+- 调用点可读性不够好，例如 `ControlCommand(CommandType::SET_MODE, i, {}, mode)` 需要读构造函数参数顺序才能理解含义。
+
+---
+
+这次修改的目标是把“命令的合法状态”前移到接口层：
+
+- 用类型区分命令大类，降低误用概率；让离散命令队列只处理真正需要闭环确认的命令。
+- 用工厂函数表达意图，让调用点更接近业务语言。
+- 保持 `send_command(const ControlCommand&)` 不变，减少对控制器外层 API 的冲击。
+- 不引入 `std::variant`，控制改动规模，属于“中改”而不是大规模架构替换。
+
+从控制系统角度看，这个改动也更符合真实语义：
+
+- `STOP`、`RESTART`、`SET_MODE` 是离散状态命令，需要进入离散命令队列，等待状态字或模式回读确认。
+- `SetScalarSetpoints` 和 `SetMitSetpoints` 是连续目标值更新，主要写入 `DesiredState`，不应该混入离散状态机。
+
+### 核心设计变化
+
+新增三个枚举：
+
+```cpp
+enum class ControlCommandKind {
+    DISCRETE,
+    SETPOINT
+};
+
+enum class DiscreteCommandType {
+    STOP,
+    RESTART,
+    SET_MODE
+};
+
+enum class SetpointCommandType {
+    SCALAR_SETPOINTS,
+    MIT_SETPOINTS
+};
+```
+
+`ControlCommand` 不再暴露旧构造方式，只允许通过静态工厂函数创建：
+
+```cpp
+ControlCommand::Stop();
+ControlCommand::Restart();
+ControlCommand::SetMode(ControlMode::CSP, i);
+ControlCommand::SetScalarSetpoints(target_deg);
+ControlCommand::SetScalarSetpoint(i, target);
+ControlCommand::SetMitSetpoints(mit_setpoints);
+ControlCommand::SetMitSetpoint(i, mit_setpoint);
+```
+
+同时保留 `ControlCommand::kAllSlaves = -1`，统一表达“全部电机”的含义。
+
+### 主要实现点
+
+#### ControlTypes.hpp
+
+- 删除旧的 `CommandType`。
+- 删除 `ControlCommand(CommandType, ...)` 系列构造函数。
+- 新增 `ControlCommandKind`、`DiscreteCommandType`、`SetpointCommandType`。
+- 新增工厂函数，强制调用者使用语义明确的新接口。
+- 将 `DiscreteCommand::type` 从旧 `CommandType` 改为 `DiscreteCommandType`。
+
+#### motor_control.cpp
+
+`process_commands()` 从原来的单层 `switch (cmd.type)` 改为两段式处理：
+
+```cpp
+if (cmd.kind == ControlCommandKind::DISCRETE) {
+    enqueue_discrete_command(cmd);
+    continue;
+}
+
+switch (cmd.setpoint_type) {
+    case SetpointCommandType::SCALAR_SETPOINTS:
+        ...
+    case SetpointCommandType::MIT_SETPOINTS:
+        ...
+}
+```
+
+这样以后读代码时可以直接看到：
+
+- 离散命令进入 `enqueue_discrete_command()`。
+- 连续目标值命令只更新对应的 desired setpoint。
+
+离散状态机中的 `apply_discrete_command_to_motor()` 和 `is_discrete_command_satisfied()` 也只处理：
+
+- `DiscreteCommandType::STOP`
+- `DiscreteCommandType::RESTART`
+- `DiscreteCommandType::SET_MODE`
+
+不再出现 setpoint 相关的空分支。
+
+#### 调用点迁移
+
+旧写法：
+
+```cpp
+controller.send_command(
+    ControlCommand(CommandType::SET_MODE, i, {}, ControlMode::CSP));
+```
+
+新写法：
+
+```c++
+controller.send_command(
+    ControlCommand::SetMode(ControlMode::CSP, i));
+```
+
+---
+
+旧写法：
+
+```cpp
+controller.send_command(
+    ControlCommand(CommandType::SET_SETPOINTS, -1, target_deg));
+```
+
+新写法：
+
+```cpp
+controller.send_command(
+    ControlCommand::SetScalarSetpoints(target_deg));
+```
+
+---
+
+旧写法：
+
+```cpp
+controller.send_command(
+    ControlCommand(CommandType::SET_MIT_SETPOINTS, -1, sp));
+```
+
+新写法：
+
+```cpp
+controller.send_command(
+    ControlCommand::SetMitSetpoints(sp));
+```
+
+### 修改后的收益
+
+#### 类型安全更好
+
+旧接口允许把任意字段组合到一起，新接口通过工厂函数收敛创建路径，调用者不能再直接写 `ControlCommand(CommandType, ...)`。
+
+#### 可读性更强
+
+调用点从“看参数猜语义”变成“函数名表达语义”：
+
+- `Stop()`
+- `Restart()`
+- `SetMode(...)`
+- `SetScalarSetpoints(...)`
+- `SetMitSetpoints(...)`
+
+这对控制代码很重要，因为读代码的人需要快速判断当前命令是否会改变电机状态、是否会下发连续目标值。
+
+#### 状态机职责更清晰
+
+离散命令队列只处理需要确认完成的命令，不再承载 setpoint 分支。这样后续要扩展重试、超时、状态监控时，边界更明确。
+
+#### 兼容控制器外层调用形式
+
+`MYACTUA::send_command(const ControlCommand&)` 没有改变，因此线程安全队列和实时控制线程的整体结构没有大改。
+
+### 风险与取舍
+
+这次选择的是“强制新接口”，没有保留旧构造函数兼容层。收益是旧错误写法会直接编译失败，风险是所有调用点必须同步迁移。
+
+没有使用 `std::variant`，原因是：
+
+- 当前目标是中等规模重构，不希望一次性引入更大的模板/访问器改造。
+- 现有 `ThreadSafeQueue<ControlCommand>` 和 `send_command()` 路径可以复用。
+- 工厂函数已经能解决主要的误用问题。
+
+setpoint 的单位语义保持不变：
+
+- `SetScalarSetpoints` 的单位仍由当前 `ControlMode` 决定。
+- `SetMitSetpoints` 使用 `MitSetpoint` 字段中的单位定义。
+
+这是为了避免在同一次重构中混入“单位系统重构”，控制改动风险。
+
+
+### 面试复盘表达
+
+可以按下面这段组织语言：
+
+> 我在电机控制接口里发现 `ControlCommand` 是一个典型的手写 tagged union：一个 `CommandType` 配多个可选字段。短期看很方便，但随着命令类型变多，它会允许很多非法组合，比如 STOP 命令携带 setpoint、SET_MODE 命令携带 MIT 参数。编译器无法约束这些状态，后续维护时容易把错误藏到运行时分支里。
+>
+> 所以我把命令拆成两类：离散命令和连续 setpoint 命令。离散命令包括 STOP、RESTART、SET_MODE，需要进入状态机并等待状态确认；setpoint 命令只负责更新 desired target。然后我移除了旧构造函数，改成 `ControlCommand::Stop()`、`SetMode()`、`SetScalarSetpoints()`、`SetMitSetpoints()` 这类静态工厂函数，让调用点直接表达意图。
+>
+> 这个方案没有大改 `send_command()` 和线程安全队列，因此对实时控制框架影响较小，但显著提升了类型安全和可读性。最后我同步迁移了所有示例和 inference 层调用，并通过 motors、inference 两套 CMake build 和旧接口残留检查验证。
+
+如果被追问“为什么不用 `std::variant`”，可以回答：
+
+> `std::variant` 确实可以进一步增强类型表达力，但这次定位是中等规模重构。项目里已经有稳定的 `ThreadSafeQueue<ControlCommand>` 和 `send_command()` 路径，我优先选择工厂函数加命令分类，既解决主要误用问题，又避免引入过大的改造面。后续如果命令数量继续扩展，再考虑把 payload 改成 variant。
+
+如果被追问“这次改动有没有风险”，可以回答：
+
+> 最大风险是强制新接口会破坏旧调用，所以我没有保留兼容构造函数，而是一次性迁移仓库内所有调用点，并用编译和 grep 做闭环检查。这样能保证旧接口不会继续被使用。
+
+###  后续可继续优化
+
+- 给 `SetScalarSetpoints` 进一步拆出 `SetPositionDeg`、`SetVelocityRpm`、`SetTorqueRaw`，把单位也放进类型或函数名。
+- 给命令增加轻量校验函数，例如指定单轴时要求 payload 至少有一个元素。
+- 如果命令 payload 继续复杂化，可以考虑 `std::variant` 版本，彻底避免无效字段常驻结构体。
+- 为 `process_commands()` 增加单元测试或仿真测试，覆盖批量 setpoint、单轴 setpoint、STOP/RESTART/SET_MODE 入队逻辑。
+
+
 
 # IMU
 
