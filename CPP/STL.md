@@ -2720,6 +2720,8 @@ std::less<int>()
 
 # 适配器
 
+**把要改造的东西记下来，然后进行改造。**
+
 <img src="./assets/adaptorc出现在哪里.png" alt="adaptorc出现在哪里" style="zoom: 33%;" />
 
 ## 容器适配器
@@ -2778,8 +2780,172 @@ std::queue<int, std::list<int>> queue_with_list;
 
 这是继承无法做到的，因为继承关系在编译时就固定了。
 
-## 绑定参数
+## 仿函数适配器
 
-本质是把参数记录下来。
+### `binder2nd`
+
+使用这个仿函数来绑定参数本质是把参数记录下来。
 
 <img src="./assets/adaptor继承的作用.png" alt="adaptor继承的作用" style="zoom:33%;" />
+
+### `bind`
+
+`std::bind` 是 C++11 引入的**函数对象适配器**，定义在 `<functional>` 头文件中。它的核心作用是**将一个可调用对象与其部分 / 全部参数绑定，生成一个新的可调用对象**，实现参数顺序调整、部分参数固定、延迟调用、成员函数适配等功能，是 C++ 函数式编程的基础工具之一。
+
+#### 核心原理
+
+`std::bind` 不是函数，而是一个**函数模板**。它接收一个可调用对象和一组参数，返回一个**匿名函数对象**（闭包）。当调用这个返回的对象时，它会将预先保存的参数与调用时传入的参数组合，转发给原始可调用对象执行。
+
+``` c++
+template<class F, class ...Args>
+/* unspecified */ bind(F&& f, Args&&... args);
+
+// F&& f：原始可调用对象（普通函数、函数指针、成员函数、lambda、函数对象）
+// Args&&... args：要绑定的参数列表
+// 返回值：一个未指定类型的函数对象，其 operator() 会转发调用到 f
+```
+
+#### 占位符
+
+占位符用于标记**新可调用对象的参数位置**，定义在 `std::placeholders` 命名空间中，形式为 `_1, _2, ..., _N`，分别代表新对象的第 1、2...N 个参数。
+
+#### 绑定普通函数 / 函数指针
+
+最基础的用法，用于固定部分参数或调整参数顺序。
+
+最常用场景：将底层硬件驱动的多参数函数，固化部分硬件参数（如串口号、GPIO 端口、波特率），生成只包含业务参数的简洁接口。
+
+``` c++
+#include <functional>
+using namespace std;
+using namespace placeholders;
+
+// 模拟STM32 HAL库串口发送函数（真实项目中替换为HAL_UART_Transmit）
+void uart_send(UART_HandleTypeDef* huart, uint32_t baudrate, const char* data, uint16_t len) {
+    // 底层硬件发送逻辑
+    HAL_UART_Transmit(huart, (uint8_t*)data, len, HAL_MAX_DELAY);
+}
+
+int main() {
+    // 固化UART1和115200波特率，生成只需要数据和长度的发送函数
+    auto uart1_send = bind(uart_send, &huart1, 115200, _1, _2);
+    
+    // 业务代码中直接调用，无需关心硬件细节
+    uart1_send("Hello STM32!", 12);
+    uart1_send("Sensor data ready", 16);
+
+    // 同理固化UART2和9600波特率（用于GPS模块）
+    auto gps_send = bind(uart_send, &huart2, 9600, _1, _2);
+    gps_send("$GPGGA,0", 7);
+
+    return 0;
+}
+```
+
+上层业务代码完全与硬件解耦，更换串口或波特率时只需修改一行绑定代码，无需改动所有调用处。
+
+#### 绑定成员函数（最常用）
+
+**成员函数有一个隐式的 `this` 指针作为第一个参数**，因此绑定成员函数时，必须显式提供一个对象实例（指针、引用或值）作为第一个绑定参数；或使用占位符，但是第一占位符必须传入一个对象实例。
+
+> C++ 的**非静态成员函数**确实可以理解为：一个普通的函数，只是编译器会隐式地把它所在的类实例的指针 `this` 作为第一个参数传入，从而让函数体内可以访问该实例的成员。
+
+---
+
+嵌入式开发中 90% 的`std::bind`使用场景都是**绑定类的成员函数**，用于将驱动类的成员方法注册为 RTOS 任务、定时器回调或中断处理函数。
+
+``` c++
+// GPIO驱动类（真实项目中封装STM32 HAL_GPIO）
+class GPIO {
+public:
+    GPIO(GPIO_TypeDef* port, uint16_t pin) : port(port), pin(pin) {
+        // GPIO初始化逻辑
+        GPIO_InitTypeDef gpio_init = {0};
+        gpio_init.Pin   = pin;
+        gpio_init.Mode  = GPIO_MODE_OUTPUT_PP;
+        gpio_init.Pull  = GPIO_NOPULL;
+        gpio_init.Speed = GPIO_SPEED_FREQ_LOW;
+        HAL_GPIO_Init(port, &gpio_init);
+    }
+
+    void toggle() {
+        HAL_GPIO_TogglePin(port, pin);
+    }
+
+    void set_level(bool high) {
+        HAL_GPIO_WritePin(port, pin, high ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+
+private:
+    GPIO_TypeDef* port;
+    uint16_t pin;
+};
+
+
+
+int main() {
+    GPIO led_green(GPIOA, GPIO_PIN_5);  // 板载绿灯
+    GPIO led_red(GPIOB, GPIO_PIN_14);   // 板载红灯
+
+    // 1. 绑定成员函数+对象指针（推荐，无拷贝开销）
+    auto toggle_green = bind(&GPIO::toggle, &led_green);
+    toggle_green(); // 翻转绿灯
+
+    // 2. 绑定部分参数，生成固定电平的函数
+    auto red_on  = bind(&GPIO::set_level, &led_red, true);
+    auto red_off = bind(&GPIO::set_level, &led_red, false);
+    
+    red_on();  // 红灯亮
+    red_off(); // 红灯灭
+
+    return 0;
+}
+```
+
+#### 绑定成员变量
+
+`std::bind` 不仅可以绑定成员函数，还可以绑定成员变量，返回一个可调用对象，调用时返回该成员变量的值（非常量版本可赋值）；**用于快速读取或修改硬件状态**。
+
+``` c++
+// 温度传感器驱动类
+class SHT30 {
+public:
+    float temperature; // 最新温度值
+    float humidity;    // 最新湿度值
+
+    void read() {
+        // 通过I2C读取传感器数据
+        temperature = 25.5f;
+        humidity = 60.2f;
+    }
+};
+
+int main() {
+    SHT30 sht30;
+    sht30.read();
+
+    // 绑定温度成员变量，调用时返回当前温度
+    auto get_temp = bind(&SHT30::temperature, &sht30);
+    cout << "Current temp: " << get_temp() << "°C" << endl;
+
+    // 非常量版本可以直接修改（慎用，通常用于测试）
+    get_temp() = 26.0f;
+    cout << "Modified temp: " << sht30.temperature << "°C" << endl;
+
+    return 0;
+}
+```
+
+## 迭代器适配器
+
+### `reverse_iterator`
+
+用默认的准则，但是把迭代器逆向。**正向的尾反向（退一格取值）就是逆向的头取值，正向的头反向就是逆向的尾**。
+
+是修饰一个`iterator`因此模板类内部一定有成员变量保存`iterator`。
+
+![逆向迭代器实现](./assets/逆向迭代器实现.png)
+
+### `inserter`
+
+是一个辅助函数，借用辅助函数推导类型。
