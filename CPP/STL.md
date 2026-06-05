@@ -378,7 +378,9 @@ for (auto it = lst.begin(); it != lst.end(); ) {
 
 ## 传入可调用对象
 
-**所有 STL 标准算法（包括`std::sort`）都接受可调用对象的**实例**作为参数**。 "传入仿函数类型或函数指针类型" 的情况，实际上是**STL 容器**（如`std::set`、`std::map`、`std::priority_queue`）的模板参数设计，而非算法的设计。
+**所有 STL 标准算法（包括`std::sort`）都接受可调用对象的**实例**作为参数**。
+
+ "传入仿函数类型或函数指针类型" 的情况，是**STL 容器**（如`std::set`、`std::map`、`std::priority_queue`）的模板参数设计。
 
 ### 为什么这么设计？
 
@@ -386,7 +388,7 @@ for (auto it = lst.begin(); it != lst.end(); ) {
 
 **(1) 支持有状态的可调用对象**
 
-算法需要能够处理带有内部状态的仿函数或 lambda 表达式。例如：
+算法需要能够处理**带有内部状态**的仿函数或 lambda 表达式。例如：
 
 ``` c++
 // 统计比较次数的有状态仿函数
@@ -423,15 +425,13 @@ std::cout << "比较次数: " << cmp.count << std::endl;
 
 **(1) 比较器是容器类型的一部分**
 
-容器的比较器决定了容器的内部结构和行为，必须在编译时确定。例如：
+容器的比较器决定了容器的内部结构和行为，必须在**编译时确定，确保类型安全和编译时检查**。例如：
 
 ```c++
 std::set<int, std::less<int>> s1;
 std::set<int, std::greater<int>> s2;
 // s1和s2是完全不同的类型，不能相互赋值
 ```
-
-这是 STL 类型系统的要求，确保了类型安全和编译时检查。
 
 **(2) 容器需要长期持有比较器**
 
@@ -444,8 +444,6 @@ std::set<int, std::greater<int>> s2;
 **(4) 与 STL 适配器兼容**
 
 这种设计与 STL 的适配器模式（如`std::priority_queue`）完美兼容，允许用户灵活地替换底层容器和比较策略。
-
-
 
 <img src="./assets/算法对迭代器的暗示.png" alt="算法对迭代器的暗示" style="zoom:33%;" />
 
@@ -557,8 +555,6 @@ std::set<int, std::greater<int>> s2;
 # `<list>`
 
 为什么`list`不能使用`::sort(c.begin(), c.end())`排序？
-
-
 
 > **关键洞察**：`std::list` 的核心是一个**双向循环链表**，通过精心设计的**节点基类分离**和**哨兵节点**模式，实现了高效的插入删除与迭代器稳定性。
 
@@ -942,12 +938,12 @@ protected:
 
 ## 本质特性
 
-- **是模板类**：可存储任意类型（int、char、结构体、类对象、指针等），**不能直接存引用**
+- **模板类**：可存储任意类型（int、char、结构体、类对象、指针等），**不能直接存引用**
 
 - **连续内存存储**：和普通数组一样，元素在内存中紧挨着，支持**随机访问**（下标 O (1) 访问）
-- **动态扩容**：元素超出当前容量时，自动申请更大内存，迁移元素，释放旧内存
+- **可以动态扩容**：元素超出当前容量时，自动申请更大内存，迁移元素，释放旧内存
 
-​	当 `size == capacity` 时插入元素，vector 会自动扩容：扩容会重新分配内存→拷贝 / 移动元素→释放旧内存，**迭代器会全部失效**
+​	当 `size == capacity` 时插入元素，vector 会自动扩容：**重新分配内存→拷贝 / 移动元素→释放旧内存，迭代器会全部失效。**
 
 ​	GCC：**1.5 倍扩容**；MSVC：**2 倍扩容** 
 
@@ -969,7 +965,7 @@ vector 内部通过**三个指针**管理内存：
 
 ### 三指针实现
 
-所有主流STL实现（GCC libstdc++、MSVC、LLVM libc++以及早期的SGI STL）均采用完全相同的结构——只用三根指针描述整个容器，微软工程师Raymond Chen曾直言：“`std::vector`是那种被标准约束到基本上只有唯一一种可行实现的类型”。
+所有主流STL实现均采用完全相同的结构——只用三根指针描述整个容器，微软工程师Raymond Chen曾直言：“`std::vector`是那种被标准约束到基本上只有唯一一种可行实现的类型”。
 
 ``` c++
 template<typename T>
@@ -987,8 +983,6 @@ struct vector {
 - **`empty()`**：即 `_M_start == _M_finish`。
 
 ### G2.9版本
-
-**设计要点：**
 
 1. **迭代器即为裸指针**：因为vector维护的是连续线性空间，原生指针`T*`天然满足随机访问迭代器的全部要求（支持`+n`、`-n`、`[]`、比较等），因此直接`typedef value_type *iterator`，不需要任何包装类[-23](https://zhuanlan.zhihu.com/p/419871316)[-9](https://cloud.tencent.cn/developer/article/2263214?policyId=1004)。
 2. **分配器通过simple_alloc间接使用**：不直接继承分配器，而是通过`typedef simple_alloc<value_type, Alloc> data_allocator`进行封装，内存的`allocate`和`deallocate`均通过`data_allocator`完成。
@@ -1018,7 +1012,7 @@ protected:
     iterator finish;          // 指向已构造元素的尾后地址
     iterator end_of_storage;  // 指向已分配内存的尾后地址
 
-    // 内部辅助：插入操作的通用实现（前文已详细分析）
+    // 内部辅助：插入操作的通用实现
     void insert_aux(iterator position, const T& x);
 
     // 内部辅助：释放整块内存
@@ -1189,10 +1183,6 @@ void vector<T, Alloc>::insert_aux(iterator position, const T& x) {
     }
 }
 ```
-
-##### 扩容
-
-**扩容三步走：** ①分配新空间(2×) → ②在新空间上构造所有元素 → ③销毁旧空间并更新三指针。扩容因子为2，初始容量为1（即0→1，1→2，2→4，4→8……），这种指数增长保证了`push_back`的**均摊O(1)** 时间复杂度[-23](https://zhuanlan.zhihu.com/p/419871316)。
 
 ### G4.9版本
 
@@ -2524,7 +2514,7 @@ std::pair<iterator, bool> _M_insert_unique_node(size_t __bkt, size_t __code, _No
 
 
 
-## 扩容机制与质数表
+## 扩容机制
 
 ### 质数表
 
@@ -2613,21 +2603,21 @@ _Node_iterator& operator++() {
 
 ```
 
-## 面试相关
+## 一个万用的哈希函数
 
-如果你在面试中被问到 GCC `unordered_map` 的底层实现，抛出以下三个点，足以证明你“看过源码”：
+### 哈希函数的传入形式
 
-1. “GCC 的哈希表在插入时，如何避免 Cache Miss？”
-   - **回答**：GCC 引入了 `_M_before_begin` 哨兵节点机制。桶数组指针始终指向链表的第一个节点，新节点总是插入在第一个节点之后。这样除了空桶首次插入，后续插入**永远不需要修改桶数组的指针**，避免了写操作带来的缓存失效。
-2. “为什么 GCC 的桶数量是质数，而不是 2 的幂？”
-   - **回答**：2 的幂次方在取模时相当于位运算截断，如果哈希函数质量差（低位聚集），会导致严重冲突。GCC 采用 `_Prime_rehash_policy` 质数表，利用质数取模打破周期性，对劣质哈希函数有更好的容错性。（可补充：虽然取模比位运算慢，但 GCC 通过缓存 hash_code 和减少冲突弥补了性能）。
-3. “在长链表中查找时，GCC 做了什么优化？”
-   - **回答**：GCC 的节点中缓存了 `_M_hash_code`。在遍历链表时，先进行整数级别的 `hash_code` 比较，如果不相等直接跳过，避免了调用可能非常昂贵的 `KeyEqual`（如 `std::string` 的字典序比较）。
+分为**仿函数**和**函数指针**形式传入。
 
-**实战建议：**
+![哈希函数如何传入](./assets/哈希函数如何传入.png)
 
-- 如果你需要极致的插入性能且不在乎内存，可以自定义 Allocator 或使用 `reserve()` 提前分配好质数桶，避免运行时的 `_M_rehash`。
-- 如果 Key 是自定义类型，务必写好 `std::hash`，并确保哈希值的离散度，因为 GCC 的质数表虽好，但也救不了全返回 `0` 的哈希函数。
+也可以以偏特化实现哈希函数：
+
+![偏特化实现哈希函数](./assets/偏特化实现哈希函数.png)
+
+### 通过`variadic templates`实现
+
+![万用哈希函数实现](./assets/万用哈希函数实现.png)
 
 ## `<unordered_set/multiset>`
 
@@ -2948,4 +2938,49 @@ int main() {
 
 ### `inserter`
 
-是一个辅助函数，借用辅助函数推导类型。
+`inserter`是一个辅助函数，借用辅助函数推导类型。
+
+把目的端的迭代器进行更改，通过`inserter(xxx, xx)`来创建一个新的迭代器对象：`inserter`迭代器对象对`=`操作符进行重载：首先通过调用容器的`insert()`函数来**制造一个空间**，然后把数据赋值到这个空间里，而**不是直接赋值动作**。
+
+`list`是不连续空间，需要使用`advance`让迭代器 + 3。
+
+![inserter](./assets/inserter.png)
+
+### `ostream_iterator`
+
+本质在**构造函数里把输出流和分割符记录下来。**
+
+然后对`=`操作符进行重载，每调用一次`=`就调用`*out_stream << value`。
+
+> `return`返回时也会调用一次移动（拷贝）构造函数。
+
+![ostream_iterator](./assets/ostream_iterator.png)
+
+---
+
+**把容器内容直接输出到流：**
+
+``` c++
+std::vector<int> v{1, 2, 3};
+std::copy(v.begin(), v.end(), std::ostream_iterator<int>(std::cout, " "));
+```
+
+
+
+###  `istream_iterator`
+
+创建一个对象，里面记录std::cin，构造函数马上调用`++*this`。
+
+**对`++`做操作符重载**：首先检查当前对象是否记录了`in_stream`，如果有则调用`*in_stream>>value`等待输入。
+
+<img src="./assets/istream迭代器的使用.png" alt="istream迭代器的使用" style="zoom:50%;" />
+
+---
+
+**将标准输入的东西拷贝进内存**：
+
+![istream迭代器和copy的配合](./assets/istream迭代器和copy的配合.png)
+
+# tuple
+
+不是 STL 中的东西，但是属于标准库。`std::tuple` 是一个**固定大小的异构容器**，可以同时存储多个不同类型的值。它类似于一个“升级版”的 `std::pair`，但 `pair` 只能存两个元素，而 `tuple` 可以**存任意数量、任意类型**的元素。

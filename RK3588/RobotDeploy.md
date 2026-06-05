@@ -2117,17 +2117,17 @@ uint8_t mod2_divide_16_by_crc8_poly(uint16_t temp) {
 
 现在已经掌握了“维护原始余数”的版本，接下来**只需要做一个状态替换：把中间变量从“消息本身的余数”换成“当前消息后面补 8 个 0 后的余数”。这样 `crc ^= data[i]` 就自然出现了（递推法，得到$crc_{k+1}$与$crc_k$之间的关系）**。
 
- 把当前数据移位后取模得到的 CRC 余数记为： ${crc}_k = (M_k \cdot x^8) mod{G(x)} $
+ 把当前数据移位后取模得到的 CRC 余数记为： ${crc}_k = (M_k \cdot x^{n}) mod{G(x)} $
 
 现在来了一个新字节： $B $， 则新的消息是：$ M_{k+1}=M_k \cdot x^8 + B $
 
-那么新的 CRC 状态应该是：${crc}_{k+1}=M_{k+1} \cdot x^8 mod{G(x)}=\bigl(M_k \cdot x^8+B\bigr)\cdot x^8  mod{G(x)}$
+那么新的 CRC 状态应该是：${crc}_{k+1}=M_{k+1} \cdot x^n mod{G(x)}=\bigl(M_k \cdot x^{8}+B\bigr)\cdot x^n  mod{G(x)}$
 
-展开： ${crc}_{k+1}=M_k \cdot x^{16} mod{G(x)}+ B\cdot x^8 mod{G(x)} = crc_k \cdot x^{8} + B\cdot x^8 mod{G(x)}$
+展开： ${crc}_{k+1}=M_k \cdot x^{n+8} mod{G(x)}+ B\cdot x^n mod{G(x)} = crc_k \cdot x^{8} + B\cdot x^n mod{G(x)}$
 
-于是： ${crc}_{k+1}=\bigl({crc}_k \cdot x^8+B\cdot x^8\bigr)mod{G(x)} =({crc}_k+B)\cdot x^8mod{G(x)}$
+于是： ${crc}_{k+1}=\bigl({crc}_k \cdot x^8+B\cdot x^n\bigr)mod{G(x)} =({crc}_k+B \cdot x^{n-8})\cdot x^{8}mod{G(x)}$
 
-在 CRC 的模 2 运算里，加法就是异或，因此：$ {crc}_{k+1}=({crc}_k \oplus B)\cdot x^8mod{G(x)}$
+在 CRC 的模 2 运算里，加法就是异或，因此：$ {crc}_{k+1}=({crc}_k \oplus B \cdot x^{n-8})\cdot x^8mod{G(x)}$
 
 这句话翻译成 C++ 就是：
 
