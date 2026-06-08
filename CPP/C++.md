@@ -1354,6 +1354,8 @@ decltype(x)   a = x; // a 是 int
 decltype((x)) b = x; // b 是 int& (引用了 x)
 ```
 
+# 原子操作
+
 ## `std::atomic<>`
 
 `std::atomic` 是 C++11 引入的一套底层原子操作接口，它解决的核心问题是多线程环境下对共享变量进行无锁、线程安全操作时的**数据竞争**与**内存可见性**问题。
@@ -1378,20 +1380,22 @@ struct atomic;
 
 #### `store` / `load`
 
+单纯写入或读取值。可指定内存序，默认是最严格的顺序一致性。
+
 ``` c++
 void store(T desired, std::memory_order order = std::memory_order_seq_cst);
 T    load(std::memory_order order = std::memory_order_seq_cst) const;
 ```
 
-单纯写入或读取值。可指定内存序，默认是最严格的顺序一致性。
-
 #### `exchange`
+
+**原子地写入新值，并返回旧值**。
 
 ``` c++
 T exchange(T desired, std::memory_order order = std::memory_order_seq_cst);
 ```
 
-原子地写入新值，并返回旧值。
+- 适用于**先检查**这个标志位是否已经置位，如果没有置位则**再置位**的场景。
 
 #### CAS操作
 
@@ -1406,8 +1410,10 @@ bool compare_exchange_strong(T& expected, T desired,
                              std::memory_order failure);
 ```
 
-- 若当前值等于 `expected`，则将其替换为 `desired` 并返回 `true`。
+- 若当前值等于 `expected`，则将当前值更新为 `desired` 并返回 `true`。
 - 否则，将当前值写入 `expected`（更新期望值）并返回 `false`。
+
+---
 
 **weak vs strong**：
 
@@ -1422,7 +1428,22 @@ bool compare_exchange_strong(T& expected, T desired,
 
 ---
 
-CAS 配合 `do-while` 的核心判断是：**循环体里的操作能不能在 CAS 失败后安全重来或丢弃**。
+CAS 配合 `do-while` 的核心判断是：**循环体里的操作能不能在 CAS 失败后安全重来或丢弃**。如果**需要满足某种条件才进行CAS判断**，可以采用：
+
+``` c++
+while(true){
+    /*可以失败安全重来、丢弃的操作...*/
+    
+    if(/*满足进行判断条件*/){
+        if(atomic.compare_exchange_weak(old_value, new_value))
+        	break;
+    }
+}
+```
+
+
+
+---
 
 适合放进 `do-while` 的内容：
 
@@ -1450,6 +1471,8 @@ do {
 ```
 
 这里循环里只是计算和判断，CAS 失败后重新算即可。
+
+---
 
 不适合放进 `do-while` 的内容：
 
@@ -1487,42 +1510,67 @@ CAS成功后的提交动作;
 
 也就是：**do-while 里放“准备”，CAS 成功后放“提交”。**
 
-对于 `compare_exchange_weak` 还要特别注意：它允许“伪失败”，也就是说即使值没变也可能返回失败。所以循环体必须能安全重复执行。`compare_exchange_strong` 虽然没有这种常规伪失败语义，但并发失败仍然很常见，原则上也一样。
-
-放到你的两个队列里：
-
-- `BoundedQueue::Enqueue`：适合，循环里只是计算 `new_tail` 和判断满。
-- `BoundedQueue::Dequeue`：基本可行，因为提前读 `pool_` 是可覆盖的，但更稳妥的风格是 CAS 成功后再写 `*element`。
-- `UnboundedQueue::Enqueue`：CAS 循环里不应放 `old_tail->next = node`、`release()`、`size_++`。
-- `UnboundedQueue::Dequeue`：CAS 循环里不应提前 `release old_head` 或 `size_--`，只能在 CAS 成功后做。
-
 ### 内存序
 
-这是 `std::atomic` 最核心也最容易出错的部分。不提供内存序时默认为 `seq_cst`（最强一致性），但为优化性能常选用更宽松的顺序。C++ 提供六种内存序，分为三组：
+#### 为什么要有内存序？
 
-#### 顺序一致性：`seq_cst`
+假设两个线程，一个写数据，一个读数据：
 
-- 所有线程观察到的所有 `seq_cst` 操作的全序一致，且总序与各线程的程序顺序不矛盾。
-- 最符合直觉，但代价高昂（尤其在非 x86 平台上需要插入完整内存屏障）。
-- 适用场景：不确定时使用，或需要全局顺序保证。
+``` c++
+int data = 0;           // 普通变量
+atomic<bool> ready{false}; // 原子布尔
 
-#### 获取-释放 Acquire-Release
+// 线程A (写)
+data = 42;
+ready.store(true);   // 告诉B：数据准备好了
 
-- `memory_order_acquire`：用于**读**操作，保证该操作之后的所有读写不会被重排到它之前，且该读会看到所有在对应 `release` 写之前的写入。
-- `memory_order_release`：用于**写**操作，保证该操作之前的所有读写不会被重排到它之后。
-- `memory_order_acq_rel`：兼具两者，用于 **读-改-写** 操作（如 `exchange`、`fetch_add` 或成功的 `compare_exchange`）。
-- 通常成对使用：一个线程 `store` 数据后用 `release` 写入标志；另一个线程用 `acquire` 读取标志后，可安全看到所有数据。
+// 线程B (读)
+while (!ready.load()); // 等ready变成true
+assert(data == 42);    // 希望这里一定成功
+```
 
-#### `memory_order_relaxed`
+`assert`不一定成功：因为编译器和CPU会做两件让你抓狂的事：
 
-- 只保证操作的原子性，不提供任何顺序或可见性保证。可能发生重排。
-- 适用场景：简单的计数器统计（如引用计数增加，在没有与外部内存建立同步需求时）。典型用法是 `fetch_add(1, relaxed)` 只关注最终数值，不关心与其他操作的顺序。
+- **编译器可能交换顺序**：如果没有任何约束，编译器可能会觉得：“`data = 42` 和 `ready = true` 之间没有依赖关系，我先让 `ready = true` 更快呢？”于是实际执行变成：
+
+  ``` c++
+  线程A: ready = true;  data = 42;
+  线程B: 看到 ready = true -> 读 data -> 还是0！(崩溃)
+  ```
+
+- **CPU 也可能乱序执行**：就算编译器没重排，CPU在硬件层面也可能因为缓存、store buffer等原因，让其他核心**先看到 `ready=true`，但 `data=42` 的修改还没到达**。线程B一样会失败。
+
+**核心矛盾：** 原子操作本身只保证 `ready` 的读写不会撕裂，但它**不禁止周围其他内存操作的乱序**。于是跨线程的数据依赖完全没保证。
+
+> 这个例子本质就是替代自旋锁的作用，为什么自旋锁不需要显示指定？
+>
+> 因为自旋锁实现**已经把 `acquire`/`release` 嵌入了 lock/unlock 内部**，你为使用者根本不需要看见它。等价于：
+>
+> - `unlock` 具有 **release** 语义。
+> - `lock` 具有 **acquire** 语义。
+>
+> 因为 pthread 是 C 接口，没有 C++ 的模板和 `memory_order` 参数。它的同步契约直接写在了**函数语义**里，而不以参数形式出现。实现这些函数时，在底层（汇编或内建函数）**必定插入了必要的内存屏障**。例如在 ARM 上，`unlock` 会使用 `dmb ishst` 之类的屏障。
+
+---
+
+**内存序就是在告诉编译器和CPU：**“以这个原子操作为界，它周围的普通内存访问**不允许随意跨越这条界线**。”
+
+#### 内存序的分类
+
+你可以把它想象成一种**单向栅栏**：
+
+- **release（释放）：** “栅栏把我之前的所有内存写操作都关在前面，它们谁也不能越过我跑到我后面去。”
+  这样，当别人看到我这个原子写入的值时，一定能看到那些“关在后面的”写结果。
+- **acquire（获取）：** “栅栏把我之后的所有内存读操作都挡住，它们谁也不能越过我跑到我前面去。”
+  这样，当我读到别人 release 写入的那个值时，之后读到的其他数据，就都是对方 release 之前已经写好的。
+- **relaxed（无栅栏）：** 随便乱跑，只保证这个原子变量本身不撕裂。
+- **seq_cst（加双向全局栅栏）：** 不仅本地有 acquire+release 的约束，还在全局要求所有线程看到的顺序都一样，性能最重，但最符合直觉。
 
 #### 内存序的选择原则
 
-- 若操作只是递增一个不控制其他内存的计数器，可用 `relaxed`。
-- 若一个线程发布数据，另一个线程访问数据，使用 `release` + `acquire`。
-- 读-改-写操作通常在循环中采用 `acquire`/`release` 或 `acq_rel`。
+- 若操作**只是修改**一个不控制其他内存的计数器，可用 `relaxed`。
+- **若一个线程发布数据，另一个线程访问数据**，使用 `release` + `acquire`。
+- **读-改-写操作**通常在循环中采用 `acquire`/`release` 或 `acq_rel`。
 - 默认 `seq_cst` 绝对安全但速度慢，逐渐替换为更精确的顺序。
 
 ## `std::atomic_flag`
@@ -4425,7 +4473,7 @@ b = std::move(a);
 
 **移动赋值通常要先释放 `b` 原本拥有的资源，再接管 `a` 的资源**。
 
-## 示例
+## 使用示例
 
 看一个管理堆内存的类：**调用拷贝构造，重新分配一块大内存**；**调用移动构造，接管资源：**`b` 直接接管 `a` 的 `data_` 指针，`a.data_` 被置为 `nullptr`。移动之后：`a`仍然是一个有效对象，但它的内容已经不应该被假设。这叫 **valid but unspecified state**，即“有效但状态未指定”。
 
@@ -4569,6 +4617,235 @@ std::move(const_object)
 
 一般没有意义。
 
+# 异常
+
+## 异常类
+
+### 标准异常类
+
+标准库提供了一套异常体系，定义在 `<stdexcept>` 等头文件中，根类为 `std::exception`（在 `<exception>` 中）：
+
+``` c++
+std::exception
+├── std::logic_error
+│   ├── std::invalid_argument  // 非法参数
+│   ├── std::domain_error
+│   ├── std::length_error  // 长度错误
+│   └── std::out_of_range  // 范围错误
+    
+├── std::runtime_error  // 运行时错误
+│   ├── std::range_error
+│   ├── std::overflow_error
+│   └── std::underflow_error
+    
+└── ... (bad_alloc, bad_cast 等)
+```
+
+捕获异常时，推荐用 `catch (const std::exception& e)` 按引用捕获，并通过 `e.what()` 获取错误信息（返回 `const char*`）。
+
+### 自定义异常类
+
+自定义异常类通常继承自 `std::exception` 或它的子类，并重写 `what()` 虚函数：
+
+``` c++
+class MyException : public std::runtime_error {
+public:
+    explicit MyException(const std::string& msg)
+        : std::runtime_error(msg) {}
+};
+```
+
+这样可以无缝融入标准异常处理体系。**注意**：抛出和捕获都应当使用**引用**，避免对象切片。
+
+``` c++
+try {
+    throw MyException("自定义错误");
+}
+catch (const std::exception& e) {   // 通过基类引用捕获
+    std::cerr << e.what() << std::endl;
+}
+```
+
+
+
+## 异常处理机制
+
+C++ 的异常处理机制主要由三个关键字构成：`try`、`throw` 和 `catch`。它们共同提供了一种结构化的错误处理方式，能够将错误检测与错误处理分离，并利用**栈展开**自动清理资源。
+
+### 基本语法
+
+``` c++
+try {
+    // 可能抛出异常的代码
+    throw expression;   // 通过 throw 触发异常
+}
+catch (异常类型1 变量名) {
+    // 处理类型1的异常
+}
+catch (异常类型2 变量名) {
+    // 处理类型2的异常
+}
+// ... 可以有多个 catch
+```
+
+- `try` 块：把可能出现异常的代码括起来。
+- `throw`：抛出一个异常对象。表达式可以是**任意可拷贝的类型**（通常建议抛出自定义异常类或标准异常类）。
+- `catch`：捕获匹配类型的异常并处理。变量名若不用可以省略，但通常保留以便查看异常信息。
+
+---
+
+示例：
+
+``` c++
+#include <iostream>
+#include <stdexcept>
+
+int divide(int a, int b) {
+    if (b == 0)
+        throw std::runtime_error("除数不能为零");
+    return a / b;
+}
+
+int main() {
+    try {
+        std::cout << divide(10, 0) << std::endl;
+    }
+    catch (const std::runtime_error& e) {
+        std::cerr << "运行时错误：" << e.what() << std::endl;
+    }
+}
+```
+
+### catch 块的匹配规则
+
+`catch` 块按**书写顺序**从上到下匹配，一旦匹配成功就进入该块，后面的 `catch` 不再尝试。
+
+类型匹配遵循**派生类 → 基类**的顺序（与函数重载不同），因此**必须将派生类异常的捕获放在前面**，否则基类 `catch` 会“吞掉”所有派生类异常。
+
+```c++
+try {
+    // ...
+}
+catch (const std::invalid_argument& e) {  // 派生类
+    // 处理 invalid_argument
+}
+catch (const std::logic_error& e) {       // 基类
+    // 处理其他 logic_error
+}
+catch (const std::exception& e) {         // 更基类
+    // 兜底
+}
+```
+
+如果写反了，派生类的 `catch` 永远不会被执行，编译器通常会给出警告。
+
+### 捕获所有异常
+
+`catch(...)` 可以捕获**任意类型**的异常，包括非 `std::exception` 派生的对象（如 `int`、`const char*` 等）。
+
+``` c++
+try {
+    throw 42;               // 抛出 int
+}
+catch (const std::exception& e) {
+    // 不会进入这里
+}
+catch (...) {
+    std::cerr << "捕获到未知异常" << std::endl;
+    // 这里无法直接获得异常对象，通常需要重新抛出后处理
+}
+```
+
+因为无法获得异常对象的引用，`catch(...)` 常用来做清理工作，之后通常会用 `throw;` 重新抛出。
+
+``` c++
+void inner() {
+    throw std::runtime_error("内层错误");
+}
+
+void outer() {
+    try {
+        inner();
+    }
+    catch (const std::runtime_error& e) {
+        std::cerr << "记录日志：" << e.what() << std::endl;
+        throw;   // 重新抛出，异常类型不变
+    }
+}
+```
+
+注意：`throw;` 只能出现在 `catch` 内部（或它的直接调用链中），而 `throw e;` 会复制一个新的异常对象，可能造成对象切片。
+
+### 栈展开与 RAII
+
+当异常被 `throw` 后，程序会沿着调用链向上回退，寻找匹配的 `catch`。在这个过程中，所有离开作用域的局部对象都会自动调用析构函数（包括标准库容器、智能指针等），这就是**栈展开**。这正是 RAII（资源获取即初始化）发挥威力的地方——你几乎不需要手动释放资源。
+
+```c++
+void f() {
+    std::unique_ptr<int> p(new int(10));
+    throw std::runtime_error("异常");
+    // p 的析构函数会被自动调用，内存不会泄漏
+}
+```
+
+**因此，在 C++ 中推荐用 RAII 管理资源，而不是在 `catch` 中手动释放。**
+
+---
+
+`noexcept` 说明函数不会抛出异常。如果声明为 `noexcept` 的函数内部抛出了异常，程序会直接调用 `std::terminate` 结束，而不会进行栈展开。
+
+``` c++
+void safe_func() noexcept {
+    // 保证不抛出异常
+}
+
+void may_throw() noexcept(false) {  // 明确可能抛出
+    throw std::runtime_error("error");
+}
+```
+
+- 移动构造函数、析构函数、`swap` 等通常应标记为 `noexcept`，以便标准库做出优化。
+- 可以在模板中使用 `noexcept(表达式)` 进行条件说明。
+
+### 函数 try 块
+
+函数 try 块可以捕获**构造函数初始化列表**或**析构函数体**中抛出的异常。写法是将 `try` 放在初始化列表之前：
+
+``` c++
+class MyClass {
+    std::string s;
+public:
+    MyClass(const std::string& str) try : s(str) {
+        // 构造函数体
+    }
+    catch (const std::exception& e) {
+        std::cerr << "构造失败：" << e.what() << std::endl;
+        // 在构造函数的函数try块中，异常会被自动重新抛出！
+    }
+};
+```
+
+**要点：**
+
+- 构造函数的函数 try 块 `catch` 结束后，异常**会自动重新抛出**，无法被抑制。所以它多用于日志记录或异常转换，而不是修复错误。
+- 析构函数也可以使用函数 try 块，但析构函数本身**不应该抛出异常**（通常会导致 `std::terminate`）。使用函数 try 块可以避免未捕获异常直接离开析构函数。
+
+## 异常安全保证与最佳实践
+
+- **基本保证**：发生异常时，程序状态保持不变，资源不泄漏。
+- **强保证**：操作要么完全成功，要么好像什么都没发生（回滚状态）。
+- **不抛出保证**：操作绝不出错（`noexcept`）。
+
+**使用建议：**
+
+- 用异常处理**真正的错误**，不要用它替代普通的条件控制（如循环终止）。
+- 尽可能使用 RAII 管理资源，依赖栈展开自动清理。
+- 在 `catch` 中切勿忽略异常而不做任何处理（至少记录日志）。
+- **析构函数永远不要抛出异常**。
+- 按引用捕获异常（`catch (const SomeException& e)`）。
+- 构造函数抛出异常是允许的，对象构造不完整时会自动调用已构造成员的析构函数。
+- 性能：现代编译器对不抛异常的执行路径几乎没有额外开销（零成本异常），但一旦抛出异常，代价很高。因此让异常的抛出真正“异常化”。
+
 # 资源管理
 
 > 条款13：以对象管理资源 (Use objects to manage resources)
@@ -4576,7 +4853,7 @@ std::move(const_object)
 
 在C++中，“资源”不仅仅指堆内存（Heap Memory），还包括文件描述符（File Descriptors）、互斥锁（Mutexes）、网络套接字（Sockets）、数据库连接以及硬件设备的内存映射（MMIO）。
 
-传统的手动 `new` 和 `delete`（或 `malloc`/`free`，`open`/`close`）在遇到提早 `return`、`continue` 或是抛出异常时，极易被跳过，从而导致资源泄漏。**现代C++的解决方案：** 标准库提供的**智能指针本质上就是实现了RAII理念的模板类**。它们在构造函数中获取资源，在析构函数中释放资源，由于局部对象在离开作用域时必然会自动调用析构函数，这就保证了即使发生异常，资源也能被确定性地回收。
+传统的手动 `new` 和 `delete`（或 `malloc`/`free`，`open`/`close`）在遇到提早 `return`、`continue` 或是抛出异常时，极易被跳过，从而导致资源泄漏。**现代C++的解决方案：** 标准库提供的**智能指针本质上就是实现了RAII理念的模板类**。它们**在构造函数中获取资源，在析构函数中释放资源**，由于**局部对象在离开作用域时必然会自动调用析构函数**，这就保证了即使发生异常，资源也能被确定性地回收。
 
 ## 内存对齐
 
@@ -4663,7 +4940,7 @@ struct S {
 
 `new` 是专门用来**在堆上创建对象、并返回对象指针**的关键字，如果不用`new`则是编译器**自动分配内存**（全局区 / 栈，由变量位置决定）。
 
-`new`一个类是**先调用`malloc()`**分配内存再调用构造函数；`delete`一个类是**先调用析构函数**再调用`operator delete(ps)`（本质是调用`free()`）释放内存。
+`new`一个类是**先调用`malloc()`**分配内存**再调用构造函数**；`delete`一个类是**先调用析构函数**再调用`operator delete(ps)`（本质是调用`free()`）释放内存。
 
 ---
 
