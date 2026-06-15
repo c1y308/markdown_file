@@ -57,7 +57,7 @@
 | **Random Access Iterator**<br>(随机访问迭代器)       | `++`, `--`, `+`, `-`, `[]` | 支持跳跃式访问，能力最强。如 `vector`, `deque`, `array`。 |
 | **Contiguous Iterator**<br>(连续迭代器, *C++20引入*) | 包含随机访问所有功能       | 保证元素在物理内存中**绝对连续**。如 `std::span`。        |
 
-## 五个 type
+## 必须提供的五个 type
 
 每个标准迭代器都必须在类内部定义五个**成员类型**，算法和 `iterator_traits` 通过这些类型获取迭代器的属性。C++17 之前常通过继承 `std::iterator` 自动定义，但该基类已在 C++17 中被弃用，现代做法是直接手动声明。
 
@@ -373,6 +373,70 @@ for (auto it = lst.begin(); it != lst.end(); ) {
 ## `reverse iterator`
 
 <img src="./assets/reverse_iterator.png" alt="reverse_iterator" style="zoom:33%;" />
+
+**一个反向迭代器在内部持有一个底层迭代器 `current`，当对它解引用时，实际返回的是 `\*(current - 1)`（或等效操作）。**
+
+``` c++
+template<typename Iterator>
+class reverse_iterator {
+public:
+    using iterator_type   = Iterator;
+    
+    using value_type      = typename std::iterator_traits<Iterator>::value_type;
+    using pointer         = typename std::iterator_traits<Iterator>::pointer;
+    using reference       = typename std::iterator_traits<Iterator>::reference;
+    using difference_type = typename std::iterator_traits<Iterator>::difference_type;
+    using iterator_category = typename std::iterator_traits<Iterator>::iterator_category;
+
+    // 构造
+    reverse_iterator() : current() {}
+    explicit reverse_iterator(Iterator it) : current(it) {}
+    template<typename U>
+    reverse_iterator(const reverse_iterator<U>& other) : current(other.base()) {}
+
+    Iterator base() const { return current; }
+
+    // 解引用
+    reference operator*() const {
+        Iterator tmp = current;
+        return *--tmp;
+    }
+    pointer operator->() const {
+        return &(operator*());
+    }
+
+    // 前置/后置 ++/--
+    reverse_iterator& operator++() { --current; return *this; }
+    reverse_iterator  operator++(int) { reverse_iterator tmp = *this; --current; return tmp; }
+    reverse_iterator& operator--() { ++current; return *this; }
+    reverse_iterator  operator--(int) { reverse_iterator tmp = *this; ++current; return tmp; }
+
+    // 随机访问操作（需要 SFINAE 或仅当 Iterator 为随机访问时启用，此处简化）
+    reverse_iterator operator+(difference_type n) const { return reverse_iterator(current - n); }
+    reverse_iterator& operator+=(difference_type n) { current -= n; return *this; }
+    reverse_iterator operator-(difference_type n) const { return reverse_iterator(current + n); }
+    reverse_iterator& operator-=(difference_type n) { current += n; return *this; }
+    reference operator[](difference_type n) const { return *(*this + n); }
+
+    friend reverse_iterator operator+(difference_type n, const reverse_iterator& it) {
+        return it + n;
+    }
+
+    // 比较
+    friend bool operator==(const reverse_iterator& lhs, const reverse_iterator& rhs) {
+        return lhs.base() == rhs.base();
+    }
+    friend bool operator!=(const reverse_iterator& lhs, const reverse_iterator& rhs) {
+        return lhs.base() != rhs.base();
+    }
+    // ... 其他比较运算符类似
+
+private:
+    Iterator current;   // 底层迭代器
+};
+```
+
+
 
 # 算法
 

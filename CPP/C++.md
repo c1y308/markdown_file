@@ -6,9 +6,9 @@ GTest 的安装非常便捷：
 sudo apt-get install libgtest-dev
 ```
 
-## 核心用法
+## 测试用例
 
-下面是一个简单的例子，展示了如何使用 `TEST` 宏定义测试用例：
+通过`TEST(测试套件名, 测试用例名)`来定义测试用例：
 
 ``` c++
 // 包含 GTest 头文件
@@ -31,67 +31,111 @@ int main(int argc, char **argv) {
 
 其中，`TEST` 宏的 `HelloTest` 是**测试套件名**，用于归类相关测试；`BasicAssertions` 是**测试用例名**。
 
-### 断言
+## 断言
 
-断言是验证代码行为的基石。GTest 提供两大类宏-[-31](https://developer.aliyun.com/article/1419710)：
+断言是验证代码行为的基石。GTest 提供两大类宏：
 
-- **`EXPECT_\*` 系列**：非致命断言。失败时，测试会继续执行，一个用例可报告多个错误，是首选方式。
-- **`ASSERT_\*` 系列**：致命断言。失败时，**立即终止**当前测试函数。常用于**后续逻辑依赖当前断言**的情况，如指针非空检查[-8](https://cloud.tencent.cn/developer/information/当expect在子例程失败时，如何让googletest打印整个跟踪-article)[-31](https://developer.aliyun.com/article/1419710)。
+- **`EXPECT_` 系列**：非致命断言。失败时，测试会继续执行，一个用例可报告多个错误，是首选方式。
+- **`ASSERT_` 系列**：致命断言。失败时，**立即终止**当前测试函数。常用于**后续逻辑依赖当前断言**的情况，如指针非空检查。
 
-常用宏如下表：
+### 常用宏
 
-| 断言宏                                                       | 参数示例 | 验证逻辑            |
-| :----------------------------------------------------------- | :------- | :------------------ |
-| `EXPECT_TRUE(val)` / `ASSERT_TRUE(val)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)[-31](https://developer.aliyun.com/article/1419710) | `val`    | `val` 为 `true`     |
-| `EXPECT_FALSE(val)` / `ASSERT_FALSE(val)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `val`    | `val` 为 `false`    |
-| **`EXPECT_EQ(a, b)`** / `ASSERT_EQ(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a == b`            |
-| **`EXPECT_NE(a, b)`** / `ASSERT_NE(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a != b`            |
-| **`EXPECT_LT(a, b)`** / `ASSERT_LT(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a < b`             |
-| **`EXPECT_GT(a, b)`** / `ASSERT_GT(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage) | `a, b`   | `a > b`             |
-| `EXPECT_STREQ(a, b)` / `ASSERT_STREQ(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)[-31](https://developer.aliyun.com/article/1419710) | `a, b`   | C风格字符串内容相同 |
-| `EXPECT_STRNE(a, b)` / `ASSERT_STRNE(a, b)`[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)[-31](https://developer.aliyun.com/article/1419710) | `a, b`   | C风格字符串内容不同 |
+| 断言宏                                      | 参数示例 | 验证逻辑            |
+| :------------------------------------------ | :------- | :------------------ |
+| `EXPECT_TRUE(val)` / `ASSERT_TRUE(val)`     | `val`    | `val` 为 `true`     |
+| `EXPECT_FALSE(val)` / `ASSERT_FALSE(val)`   | `val`    | `val` 为 `false`    |
+| **`EXPECT_EQ(a, b)`** / `ASSERT_EQ(a, b)`   | `a, b`   | `a == b`            |
+| **`EXPECT_NE(a, b)`** / `ASSERT_NE(a, b)`   | `a, b`   | `a != b`            |
+| **`EXPECT_LT(a, b)`** / `ASSERT_LT(a, b)`   | `a, b`   | `a < b`             |
+| **`EXPECT_GT(a, b)`** / `ASSERT_GT(a, b)`   | `a, b`   | `a > b`             |
+| `EXPECT_STREQ(a, b)` / `ASSERT_STREQ(a, b)` | `a, b`   | C风格字符串内容相同 |
+| `EXPECT_STRNE(a, b)` / `ASSERT_STRNE(a, b)` | `a, b`   | C风格字符串内容不同 |
 
-> **💡 小技巧**：在断言宏后添加 `<< "自定义错误信息"` 可输出诊断信息，方便定位失败原因-[-12](https://cloud.tencent.cn/developer/article/2159465?from=15425&frompage=seopage)。
+> **💡 小技巧**：在断言宏后添加 `<< "自定义错误信息"` 可输出诊断信息，方便定位失败原因。
 
-### 测试夹具(Test Fixtures)
+### 测试夹具
 
-当多个测试需要**相同的初始化或清理代码**时，可使用 `TEST_F` 宏。它利用类来管理共享资源（**不是共享同一个对象实例**，而是多个测试用例**共享同一套初始化和清理逻辑**，以及**共享相同的成员变量定义**），每个测试独立运行，互不干扰-[-18](https://blog.csdn.net/u012294613/article/details/124683483)。
+#### 用途
 
-步骤如下[-18](https://blog.csdn.net/u012294613/article/details/124683483)[-19](https://blog.csdn.net/sinat_14854721/article/details/122806611)：
+当多个测试用例需要**相同的初始化或清理代码**时，如：
 
-1. 定义一个公有继承自 `::testing::Test` 的类。
-2. 在 `protected:` 区域声明测试需共享的成员变量。
-3. 可重写 `SetUp()` 和 `TearDown()` 以准备和释放资源（更推荐）[-18](https://blog.csdn.net/u012294613/article/details/124683483)。
-
-```c++
-// 1. 定义夹具类
-class MyTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        // 3. 在每个测试前分配资源
-        value_ = new int(100);
-    }
-    void TearDown() override {
-        // 3. 在每个测试后释放资源
-        delete value_;
-        value_ = nullptr;
-    }
-    // 2. 共享的成员变量
-    int* value_;
-};
-
-// 使用 TEST_F 宏，并传入夹具类名 MyTest
-TEST_F(MyTest, TestInitialValue) {
-    EXPECT_EQ(*value_, 100);
+``` c++
+TEST(QueueTest, Empty) {
+    Queue<int> q;           // 重复的初始化
+    EXPECT_TRUE(q.IsEmpty());
 }
 
-TEST_F(MyTest, TestModifyValue) {
-    *value_ = 200;
-    EXPECT_EQ(*value_, 200);
+TEST(QueueTest, PushPop) {
+    Queue<int> q;           // 又写一遍
+    q.Push(1);
+    EXPECT_EQ(q.Pop(), 1);
 }
 ```
 
-> **🔑 关键区别**：`TEST` 宏用于独立测试，不共享环境，简单直接[-21](https://blog.csdn.net/YZJincsdn/article/details/147477183)。`TEST_F` 宏用于基于夹具的测试，共享配置资源，能大幅减少重复代码[-21](https://blog.csdn.net/YZJincsdn/article/details/147477183)。
+可使用 `TEST_F` 宏创建测试夹具，把这些公共部分提取出来。
+
+它利用类来管理共享资源（**不是共享同一个对象实例**，而是多个测试用例**共享同一套初始化和清理逻辑**，以及**共享相同的成员变量定义**），每个测试独立运行，互不干扰。
+
+---
+
+#### 定义夹具类
+
+1. 定义一个公有继承自 `::testing::Test` 的类。
+2. 将测试共用的**成员变量**和**初始化/清理方法**放在 `protected` 区。
+3. 可重写 `SetUp()` 和 `TearDown()` 以准备和释放资源（更推荐）。
+
+```c++
+#include <gtest/gtest.h>
+
+class QueueTest : public ::testing::Test {
+protected:
+    // 在每个 TEST_F 执行前调用
+    void SetUp() override {
+        q1_.Push(1);
+        q2_.Push(2);
+        q2_.Push(3);
+    }
+
+    // 在每个 TEST_F 执行后调用（清理资源）
+    void TearDown() override {
+        // 这里通常不需要做特别的事，
+        // 除非有需要手动释放的资源
+    }
+
+    // 测试用例可以直接使用的成员变量
+    Queue<int> q0_;   // 空队列
+    Queue<int> q1_;
+    Queue<int> q2_;
+};
+```
+
+> **🔑 关键区别**：`TEST` 宏用于独立测试，不共享环境，简单直接。`TEST_F` 宏用于基于夹具的测试，共享配置资源，能大幅减少重复代码。
+
+---
+
+#### `TEST_F`
+
+第一个参数必须是**夹具类的名字**，GTest 会自动为你创建夹具实例。
+
+``` c++
+TEST_F(QueueTest, IsEmptyInitially) {
+    EXPECT_TRUE(q0_.IsEmpty());   // 直接使用夹具里的 q0_
+}
+
+TEST_F(QueueTest, PopWorks) {
+    int n = q1_.Pop();
+    EXPECT_EQ(n, 1);
+    EXPECT_TRUE(q1_.IsEmpty());
+}
+
+TEST_F(QueueTest, MultipleElements) {
+    EXPECT_EQ(q2_.Pop(), 2);
+    EXPECT_EQ(q2_.Pop(), 3);
+    EXPECT_TRUE(q2_.IsEmpty());
+}
+```
+
+
 
 # Cmake
 
@@ -1440,10 +1484,6 @@ while(true){
     }
 }
 ```
-
-
-
----
 
 适合放进 `do-while` 的内容：
 
@@ -3315,7 +3355,6 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
     
     ```
   
-    
 
 ## 模板参数
 
@@ -3460,63 +3499,6 @@ void printPair(T1 first, T2 second) {
 printPair(10, "Hello");  // T1=int, T2=const char*
 printPair(3.14, true);   // T1=double, T2=bool
 ```
-
-#### SFINAE机制
-
-SFINAE 是**Substitution Failure Is Not An Error**的缩写，即 **"替换失败不是错误"**。这是 C++ 模板元编程的核心机制之一。
-
-**核心原理**
-
-**模板成员函数的签名在类实例化时不会被强行展开检查**（编译器看到函数是一个模板成员函数，但不会实例化它的声明或定义，因为**还没有用到它**）。而 SFINAE 是专门给“函数模板”发的一张免死金牌，允许它在被调用进行重载匹配时，如果签名里的类型推导失败，可以安静地退场而不引发编译崩溃。
-
-当编译器在进行**函数模板的参数替换（早于函数模板的实例化）**时，如果替换过程中出现了语法错误（比如访问不存在的成员），编译器不会直接抛出编译错误，而是会**将这个模板从重载候选集中移除**，继续尝试匹配其他重载。在编译态完成。
-
----
-
-SFINAE 只作用于函数模板的参数替换阶段（**而类模板实例化时会处理类模板的所有成员声明**），不作用于类模板的实例化阶段。因此下列写法是错误的：
-
-``` c++
-// 错误写法！
-template<typename T>
-struct name
-{
-    // 直接用T，不用CLASS模板参数
-    static constexpr bool test(decltype(&T::func)* ){
-        return true;
-    }
-
-    template<typename>
-    static constexpr bool test(...){
-        return false;
-    }
-
-    static constexpr bool value = test(nullptr);
-};
-
- template <typename T>
- constexpr bool name<T>::value;
-
-DEFINE_TYPE_TRAIT(HasFoo, foo)
-```
-
-- 当实例化`name<B>`（B 没有 func）时，编译器需要处理第一个`test`函数的声明。
-- 此时`T`已经被替换为`B`，`decltype(&B::func)`是非法表达式。
-- 这个错误发生在**类模板的实例化阶段**，而不是函数模板的参数替换阶段。
-- SFINAE 不覆盖这个阶段，编译器会直接报错：`'func' is not a member of 'B'`。
-
-**正确写法的时机控制**
-
-当我们使用`template<typename CLASS>`时：
-
-- 类模板`name<T>`实例化时，编译器只需要知道`test`是一个**函数模板**，不需要实例化`test`本身。
-- `&CLASS::func`的解析被**推迟到了 test 函数模板被调用时**。
-- 只有当我们调用`test<T>(nullptr)`时，编译器才会尝试将`CLASS`替换为`T`。
-- 此时如果替换失败，属于**函数模板的参数替换失败**，触发 SFINAE，编译器只会移除这个重载，不会报错。
-
-|       写法        |     错误发生阶段     | SFINAE 是否生效 |         结果         |
-| :---------------: | :------------------: | :-------------: | :------------------: |
-|     直接用 T      |   类模板实例化阶段   |    ❌ 不生效     |       编译错误       |
-| 用 CLASS 模板参数 | 函数模板参数替换阶段 |     ✅ 生效      | 重载决议选择兜底函数 |
 
 ### 模板类
 
@@ -3758,11 +3740,11 @@ public:
 
 
 
-## 可变参数模板
+## Variadic Templates
 
-> 详细使用可见STL部分的万用哈希函数。
+> 详细使用可见STL部分的万用哈希函数、tuple的实现。（模板递归）
 
-variadic templates（since C++11）。把调用者传入的参数分为一个（和`argc`和`argv`不一样：可变模板第一个参数不用是参数的数量，可以随便做任何事情）和一包。
+`variadic templates`（since C++11）。把调用者传入的参数分为一个（和`argc`和`argv`不一样：可变模板第一个参数不用是参数的数量，可以随便做任何事情）和一包。
 
 如果想要知道一包有几个参数，使用`sizeof...(args);`。
 
@@ -3800,6 +3782,118 @@ void print(const T &FirstArg, const Types&... args){
 - **示例：**
   - `print(args...);` 展开为 `print(arg1, arg2, arg3);`
   - `print(&args...);` 展开为 `print(&arg1, &arg2, &arg3);` （对每个参数取地址后再传递）
+
+## SFINAE机制
+
+SFINAE 是**Substitution Failure Is Not An Error**的缩写，即 **"替换失败不是错误"**。这是 C++ 模板元编程的核心机制之一。
+
+编译器尝试**实例化一个模板时，如果某些模板参数的替换导致了无效的表达式或类型，这个候选模板会被直接丢弃**，而不是报编译错误。编译器会继续寻找其他匹配的重载或特化。
+
+#### 检查类中有无对应函数（函数模板）
+
+函数模板通过重载解析使用 SFINAE（函数没有偏特化，只能重载或全特化）。
+
+**模板成员函数的签名在类实例化时不会被强行展开检查**（编译器看到函数是一个模板成员函数，但不会实例化它的声明或定义，因为**还没有用到它**）。而 SFINAE 是专门给“函数模板”发的一张免死金牌，允许它在被调用进行重载匹配时，如果签名里的类型推导失败，可以安静地退场而不引发编译崩溃。
+
+当编译器在进行**函数模板的参数替换（早于函数模板的实例化）**时，如果替换过程中出现了语法错误（比如访问不存在的成员），编译器不会直接抛出编译错误，而是会**将这个模板从重载候选集中移除**，继续尝试匹配其他重载。在编译态完成。
+
+``` c++
+// 错误写法！
+template<typename T>
+struct name
+{
+    // 直接用T，不用CLASS模板参数
+    static constexpr bool test(decltype(&T::func)* ){
+        return true;
+    }
+
+    template<typename>
+    static constexpr bool test(...){
+        return false;
+    }
+
+    static constexpr bool value = test(nullptr);
+};
+
+ template <typename T>
+ constexpr bool name<T>::value;
+
+DEFINE_TYPE_TRAIT(HasFoo, foo)
+```
+
+- 当实例化`name<B>`（B 没有 func）时，编译器需要处理第一个`test`函数的声明。
+- 此时`T`已经被替换为`B`，`decltype(&B::func)`是非法表达式。
+- 这个错误发生在**类模板的实例化阶段**，而不是函数模板的参数替换阶段。
+- SFINAE 不覆盖这个阶段，编译器会直接报错：`'func' is not a member of 'B'`。
+
+**正确写法的时机控制**
+
+当我们使用`template<typename CLASS>`时：
+
+- 类模板`name<T>`实例化时，编译器只需要知道`test`是一个**函数模板**，不需要实例化`test`本身。
+- `&CLASS::func`的解析被**推迟到了 test 函数模板被调用时**。
+- 只有当我们调用`test<T>(nullptr)`时，编译器才会尝试将`CLASS`替换为`T`。
+- 此时如果替换失败，属于**函数模板的参数替换失败**，触发 SFINAE，编译器只会移除这个重载，不会报错。
+
+|       写法        |     错误发生阶段     | SFINAE 是否生效 |         结果         |
+| :---------------: | :------------------: | :-------------: | :------------------: |
+|     直接用 T      |   类模板实例化阶段   |    ❌ 不生效     |       编译错误       |
+| 用 CLASS 模板参数 | 函数模板参数替换阶段 |     ✅ 生效      | 重载决议选择兜底函数 |
+
+#### `std::enable_if`（类模板）
+
+类模板通过偏特化匹配使用 SFINAE（类模板不能重载，但可以偏特化）。
+
+`std::enable_if` 是 C++11 引入的类型萃取工具，定义在头文件 `<type_traits>` 中，作用是**根据编译期布尔条件，决定是否启用某个模板**。
+
+``` c++
+// 主模板：条件为 false 时(反正不是 true，是 true 就走偏特化了)，没有 type 成员
+template <bool Cond, typename T = void>
+struct enable_if {};
+
+// 偏特化：条件为 true 时，暴露 type 成员，类型为 T
+template <typename T>
+struct enable_if<true, T> {
+    using type = T;
+};
+```
+
+- 当条件 `Cond` 为 `true` 时：`std::enable_if<Cond, T>::type` 是合法类型，等于 `T`。
+
+  当条件 `Cond` 为 `false` 时：不存在 `type` 成员，访问 `::type` 会触发替换失败，对应模板被禁用
+
+C++14 引入了别名模板 `std::enable_if_t`，省去了繁琐的 `typename` 和 `::type`：
+
+``` c++
+// 等价于 typename std::enable_if<Cond, T>::type
+template <bool Cond, typename T = void>
+using enable_if_t = typename enable_if<Cond, T>::type;  // typename 表明是把 type 作为类型
+```
+
+---
+
+#### 多重重载分发
+
+修饰函数返回值（最常用，适合多重重载分发）。
+
+``` c++
+#include <type_traits>
+#include <cstdint>
+
+// 仅对整数类型启用：校验12位ADC量程
+template <typename T>
+typename std::enable_if<std::is_integral<T>::value, bool>::type
+checkSensorValid(T value) {
+    return value >= 0 && value <= 4095;
+}
+
+// 仅对浮点类型启用：校验温度量程与有效值
+template <typename T>
+std::enable_if_t<std::is_floating_point<T>::value, bool> // C++14 简化写法
+checkSensorValid(T value) {
+    return value == value && value > -40.0f && value < 125.0f;
+}
+```
 
 # 字符串类
 
@@ -4174,9 +4268,8 @@ for (string::iterator it = s.begin(); it != s.end(); it++) {
 
 # lambda
 
-Lambda 表达式是 **C++11 引入的最具革命性的特性之一**，它彻底改变了 C++ 的编程风格，让代码更简洁、更易读、更灵活。理解 lambda 是掌握现代 C++ 的必经之路。
-
-------
+> Lambda 表达式是 **C++11 引入的最具革命性的特性之一**，它彻底改变了 C++ 的编程风格，让代码更简洁、更易读、更灵活。理解 lambda 是掌握现代 C++ 的必经之路。
+>
 
 ## 为什么要有 Lambda？
 
@@ -4184,7 +4277,7 @@ Lambda 表达式是 **C++11 引入的最具革命性的特性之一**，它彻�
 
 ### 传统方式
 
-#### 代码分散，可读性差
+#### 函数指针
 
 比如我们想对一个数组排序，按绝对值从小到大排列：
 
@@ -4202,9 +4295,9 @@ int main() {
 
 问题：**逻辑被拆分到两个地方**，看代码的时候需要跳来跳去才能理解排序规则。
 
-#### 仿函数过于繁琐
+#### 仿函数
 
-如果我们需要捕获上下文变量（比如排序时使用一个外部的基准值），函数指针就无能为力了，必须用仿函数：
+如果我们需要**捕获上下文变量**（比如排序时使用一个外部的基准值），函数指针就无能为力了，必须用仿函数：
 
 ```c++
 // 必须定义一个完整的类
@@ -4346,27 +4439,63 @@ void MYACTUA::enqueue_discrete_command(const ControlCommand& cmd)
     }
 }
 ```
-# Move
-
-我们平时说的 `move`，通常指的是标准库函数模板：
-
-``` c++
-std::move(x)
-```
-
-但最关键的一点是：
+# 移动与完美转发
 
 `std::move` **本身不移动任何东西**。它**只是把一个表达式强制转换成右值引用**，让**后续代码“有机会”调用移动构造函数或移动赋值函数**。
 
 这句话是理解 C++ move 机制的核心。
 
-## 右值引用
+## 解决什么问题？
+
+### 移动
+
+传统 C++ 里，函数返回大对象、给容器塞数据都会触发**深拷贝**。比如一个管理 DMA 缓冲区的类，内部持有 `mmap` 映射的地址，拷贝时需要重新分配、复制数据，开销极大。如：
+
+```c++
+NetBuffer build_response() {
+    NetBuffer buf(1500);
+    // 填充数据...
+    return buf;  // C++11 之前可能触发拷贝构造函数，C++11 起可能 NRVO，但先看一般情况
+}
+```
+
+如果编译器不做优化，会执行深拷贝，1500 字节在嵌入式系统里可能就浪费了 CPU 周期和栈/堆空间。
+
+---
+
+很多资源（动态内存、文件描述符、socket）本身就是不可拷贝的，只能转移所有权。右值语义提供了 **移动构造/移动赋值** 的能力，能够将资源所有权从源对象“窃取”到目标对象，源对象被置为安全状态（如指针置空）。
+
+---
+
+**嵌入式收益：**
+
+- **避免大块内存拷贝**，减轻 CPU 负载，满足实时性。
+- **防止内存碎片**：移动不会额外分配/释放，只是指针交换。
+- **明确资源所有权**：像文件描述符可以封装成 `std::unique_ptr` 风格，移动让所有权传递安全、简单。
+
+### 完美转发
+
+在泛型代码或包装函数中，我们希望把参数原封不动地交给下游函数，**不丢失参数的左值/右值、const、volatile 等属性**。如果写成 `const T&`，右值会被当成左值引用，失去移动机会；如果写多个重载，组合爆炸。
+
+完美转发用 `T&&`（转发引用） + `std::forward<T>`，让模板函数把实参的“左右值身份”原样传递。
+
+---
+
+**嵌入式收益：**
+
+- 写一次模板，就能处理所有值类型，消除冗余的重载。
+- 避免中间临时对象的拷贝：例如上例中临时 `std::string("hello")` 的 `c_str()` 被直接转发，没有额外字符串构造。
+- 可用于构建高效的生产者-消费者模式：向命令队列推送任务时，参数完美转发进队列，移动重资源（如 buffer），零开销。
+
+## 语义
+
+### 右值语义
 
 C++ 里表达式不只是有类型，还有**值类别**，也就是 value category。
 
-- 左值，lvalue。它有名字，可以被反复使用，有稳定身份。
+- 左值，`lvalue`。它有名字，可以被反复使用，有稳定身份。
 
-- 右值，rvalue。它们往往是临时结果，生命周期较短，马上就要消失。
+- 右值，`rvalue`。它们往往是临时结果，生命周期较短，马上就要消失，如：
 
   ``` c++
   10
@@ -4377,10 +4506,10 @@ C++ 里表达式不只是有类型，还有**值类别**，也就是 value categ
 C++11 引入了右值引用：
 
 ``` c++
-int&& r4 = 10; // 正确
+int&& r4 = 10;
 ```
 
-## 移动语义
+### 移动语义
 
 看一个例子：
 
@@ -4410,6 +4539,25 @@ std::fstream
 
 移动的意义很大，因为这些对象内部通常持有堆内存、文件句柄、锁、网络连接等资源。**复制意味着重新分配资源；移动意味着转移资源所有权**。
 
+## `std::move`本质
+
+`std::move` 的实现本质上类似于：
+
+``` c++
+template <class T>
+typename std::remove_reference<T>::type&& move(T&& t) noexcept {
+    return static_cast< typename std::remove_reference<T>::type&& >(t);
+}
+```
+
+本质就是：
+
+``` c++
+static_cast<T&&>(x)
+```
+
+它只是一个类型转换。它告诉编译器：**我不再把 `x` 当作普通左值使用了，你可以把它当作将亡值，xvalue，来匹配移动构造或移动赋值**。但是它不会自动移动资源。**真正移动资源的是类里面的移动构造或者移动赋值函数**。
+
 ## 移动构造
 
 假设有一个类：
@@ -4433,25 +4581,6 @@ MyString b = MyString{};
 ``` c++
 MyString(MyString&& other);
 ```
-
-## `std::move`
-
-`std::move` 的实现本质上类似于：
-
-``` c++
-template <class T>
-typename std::remove_reference<T>::type&& move(T&& t) noexcept {
-    return static_cast< typename std::remove_reference<T>::type&& >(t);
-}
-```
-
-本质就是：
-
-``` c++
-static_cast<T&&>(x)
-```
-
-它只是一个类型转换。它告诉编译器：**我不再把 `x` 当作普通左值使用了，你可以把它当作将亡值，xvalue，来匹配移动构造或移动赋值**。但是它不会自动移动资源。**真正移动资源的是类里面的移动构造或者移动赋值函数**。
 
 ## 移动赋值
 
@@ -4607,15 +4736,7 @@ string(string&& other);
 string(const string&& other);
 ```
 
-为什么？因为**移动需要修改源对象**，例如把源对象的指针置空。`const` 对象不能被修改，所以不能真正移动。于是**它往往会退化成拷贝**。
-
-所以：
-
-```c++
-std::move(const_object)
-```
-
-一般没有意义。
+为什么？因为**移动需要修改源对象**，例如把源对象的指针置空。`const` 对象不能被修改，所以不能真正移动。于是**它往往会退化成拷贝**。所以：`std::move(const_object)` 一般没有意义。
 
 # 异常
 

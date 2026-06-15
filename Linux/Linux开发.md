@@ -869,6 +869,8 @@ struct inode {
 
 # 线程/进程
 
+**线程模型**：现代 Linux 使用 **NPTL**（Native POSIX Thread Library），**线程是轻量级进程**，内核中每个线程用一个 `task_struct` 表示，共享同一进程的地址空间、文件描述符表等。
+
 ## 进程状态
 
 总共有七种进程状态：
@@ -1069,11 +1071,6 @@ int ioctl(int fd, unsigned long request, ...);
 ​	阻塞查询会在线程/进程执行设备操作时如果**不能获取到资源则挂起线程/进程**，直到满足可操作的条件后再进行操作。被挂起的线程/进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足，在驱动程序中使用**等待队列**来实现阻塞线程/进程的唤醒。
 
 ``` c
-```
-
-
-
-``` c
 // 定义等待队列头部
 wait_queue_head_t r_queue;
 wait_queue_head_t w_queue;
@@ -1215,137 +1212,355 @@ void FD_CLR(int fd, fd_set *set);
 int FD_ISSET(int fd, fd_set *set);
 ```
 
-
-
-# 信号
-
-**Signal-Driven I/O 的核心思想：**
-
-> 进程告诉内核："当这个文件描述符有数据时，发 `SIGIO` 信号通知我"，然后进程去做别的事（或休眠），不用轮询检查。
-
-​	信号是 Linux 内核向进程发送的**异步通知**（可以理解为 “进程级别的中断”），用于告知进程发生了某个事件（比如用户按 Ctrl+C、进程访问非法内存、其他进程主动发送信号等）。
-
-## `singal`函数
-
-​	**异步信号安全函数**：信号是 “异步” 的（可能在进程执行任意代码时触发），因此处理函数中只能调用「无全局状态、无锁、可重入」的函数（如`write`/`_exit`/`memset`），绝对不能用`printf`/`exit`/`malloc`（这些函数内部有全局缓冲区 / 锁，会导致程序崩溃）。
-
-``` c
-#include <signal.h>  // 必须包含的头文件
-
-// 定义信号处理函数的类型（参数是信号编号，无返回值）
-typedef void (*sighandler_t)(int);
-
-// 核心函数：设置信号处理方式 
-// signum:要处理的信号编号（比如 SIGINT、SIGTERM，也可以直接写数字如 2、15）
-// handler:信号的处理方式，有 3 种取值：
-// 1. SIG_IGN：忽略该信号（SIGKILL/SIGSTOP 除外）
-// 2. SIG_DFL：恢复信号的默认行为
-// 3. 自定义函数指针：信号触发时执行该函数
-sighandler_t signal(int signum, sighandler_t handler);
-```
-
-使用实例：
-
-`STDIN_FILENO` ， 以只读方式打开`/dev/pts/1`。
-
-`STDOUT_FILENO`，以只写方式打开`/dev/pts/1`。
-
-`STDERR_FILENO`，以只写方式打开`/dev/pts/1`。
-
-``` c
-#include <stdio.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <errno.h>  // 新增：处理错误码
-#include <string.h> // 新增：memset
-
-#define MAX_LEN 100
-
-// 信号处理函数：仅使用异步信号安全函数（write）
-void input_handler(int num) {
-    char data[MAX_LEN];
-    ssize_t len; 
-    
-    memset(data, 0, sizeof(data));
-    
-    // 读取标准输入，处理read的返回值
-    len = read(STDIN_FILENO, data, MAX_LEN - 1); // 预留1个字节给'\0'，避免越界
-    
-    // 分情况处理read返回值
-    if (len == -1){
-        const char *err_msg = "read error!\n";
-        write(STDOUT_FILENO, err_msg, strlen(err_msg));
-        return;
-    } else if (len == 0) {
-        // 处理EOF（Ctrl+D）
-        const char *eof_msg = "EOF received, exit!\n";
-        write(STDOUT_FILENO, eof_msg, strlen(eof_msg));
-        _exit(0); // 信号处理中退出用_exit（异步安全），而非exit
-    }
-    
-    // 手动添加字符串结束符（确保不越界）
-    data[len] = '\0';
-    
-    // 用write替代printf（异步信号安全）
-    const char *prefix = "input: ";
-    write(STDOUT_FILENO, prefix, strlen(prefix));
-    write(STDOUT_FILENO, data, len);
-}
-
-
-int main(void) {
-    int oflags;
-    int ret; // 用于接收fcntl返回值
-    
-    // // 第一步：注册SIGIO信号的处理函数
-    if (signal(SIGIO, input_handler) == SIG_ERR) {
-        perror("signal set SIGIO failed");
-        return 1;
-    }
-    
-    // 设置标准输入的属主为当前进程
-    ret = fcntl(STDIN_FILENO, F_SETOWN, getpid());
-    if (ret == -1) {
-        perror("fcntl F_SETOWN failed");
-        return 1;
-    }
-    
-    // 获取文件状态标志
-    oflags = fcntl(STDIN_FILENO, F_GETFL);
-    if (oflags == -1) {
-        perror("fcntl F_GETFL failed");
-        return 1;
-    }
-    // 设置FASYNC标志
-    ret = fcntl(STDIN_FILENO, F_SETFL, oflags | FASYNC);
-    if (ret == -1) {
-        perror("fcntl F_SETFL failed");
-        return 1;
-    }
-    
-    // 替换忙等循环：用pause()休眠，等待信号（CPU占用率0%）
-    while (1) {
-        pause(); // 进程休眠，直到收到任意信号
-    }
-    
-    return 0;
-}
-```
-
-# 网络通信
-## 基本组成及概念
-  服务器依据**端口区别同一IP下的两个连接**，一般来说80端口为http服务，22端口为ssh服务。因此采用IP和端口表示源或目的。
-  两个对象：**server：被动响应请求，client:主动发起请求**。
-  两种传输方式：**TCP / UDP**。其中TCP面向连接的，能够提供可靠的数据交付，而UDP则相反。
-
-
-
 # 多线程
+## pthread 库
 
-## 谁提供用户态的锁
+### 编译链接
+
+编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接 pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；然后`#include <pthread.h>`。
+
+``` bash
+gcc xxx.c -pthread
+```
+### 常用 API
+
+#### 获取线程号
+
+Linux采用POSIX线程。进程有唯一对应的**PID**,线程有**TID**.本质是一个`pthread_t`变量,但对于线程号而言，在其所属的进程上下文中才有意义。
+
+``` c
+#include <pthread.h>
+int main()
+{
+	pthread_t pthread_self(void);//获取主线程的tid号
+}
+
+typedef unsigned long int pthread_t;
+pthread_t tid_1 = 0;
+```
+
+#### 创建线程
+
+``` c
+#include <pthread.h>
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine) (void*), void *arg);
+//argc[0]：线程号变量的指针
+//argc[1]：线程的属性，一般传入NULL表示默认
+
+//argc[2]：函数指针，线程的执行函数
+//garc[3]：传入参数，不传入为NULL 传入多个参数则使用结构体 (注意void *可以直接传入变量，使用时将其数据类型强制转化回来就行)
+//如果为地址传入，则两个直接相关，变量传入则相互独立
+
+//注意线程运行顺序随机，因此需在主线程中加入sleep()函数，释放CPU，使其去执行子线程。当主线程伴随进程结束，所创建出来的子线程也会结束。
+```
+#### 退出线程
+
+``` c
+#include <pthread.h>
+//线程自身主动退出
+void pthread_exit(void *retval); //退出可以给主线程传递一个void *数据(主线程通过join函数获取)，
+                                 //不传为NULL 传出的数据需要用static修饰
+
+//其他线程让其退出
+int pthread_cancel(pthread_t thread); //argc[0]:tid号 成功：返回0
+
+
+//线程资源回收，等待子线程都执行完毕再退出主线程
+int pthread_join(pthread_t thread, void **retval);       //阻塞方式,直到成功返回才返回
+int pthread_tryjoin_np(pthread_t thread, void **retval); //非阻塞,成功返回0
+//argv[0]:tid
+//argv[1]:接受传入数据(类型为地址)的变量的地址(万能指针)
+```
+
+#### 操作函数
+
+| 函数                          | 说明                                       |
+| :---------------------------- | :----------------------------------------- |
+| `pthread_create`              | 创建线程，可设置属性（栈大小、分离状态等） |
+| `pthread_join`                | 等待线程终止，类似 C++ `join()`            |
+| `pthread_detach`              | 分离线程，结束时自动回收资源               |
+| `pthread_exit`                | 终止当前线程                               |
+| `pthread_cancel`              | 请求取消另一个线程（需要取消点配合）       |
+| `pthread_setcancelstate/type` | 设置线程取消状态和类型（延迟/异步）        |
+| `pthread_self`                | 获取当前线程 ID                            |
+
+**注意**：
+
+- 线程创建时默认是**可汇合**状态，必须被 `join` 或 `detach`，否则**资源泄漏**。
+- 无内置“joinable”检查，需自行维护状态。
+
+## C++11 标准线程库
+
+**面向对象封装，类型安全，支持 RAII**，底层通常基于 pthread 实现。C++11 起引入了线程支持库，包括线程管理、互斥量、条件变量、原子操作和 future 异步模型等。
+
+### 编译链接
+
+编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接 pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；然后`#include <thread>`。
+
+### 常用API
+
+#### 创建线程
+
+C++11标准线程库中采用` std::thread`类型表示一个线程变量：
+
+``` c++
+#include <thread>
+#include <iostream>
+
+void func(int x) {
+    std::cout << "Thread running, arg = " << x << std::endl;
+}
+
+int main() {
+    std::thread t1(func, 42);          // 传递函数和参数
+    std::thread t2([] { func(100); });  // lambda 方式
+
+    t1.join();
+    t2.join();
+}
+```
+
+#### 核心操作
+
+| 操作              | 说明                                           |
+| :---------------- | :--------------------------------------------- |
+| `join()`          | 阻塞等待线程结束，回收资源                     |
+| `detach()`        | 分离线程，后台运行（必须确保不访问已销毁数据） |
+| `joinable()`      | 返回线程是否可汇合（未被 join/detach 且有效）  |
+| `get_id()`        | 获取线程 ID                                    |
+| `native_handle()` | 获取底层 `pthread_t`（便于混合编程）           |
+
+**注意事项**：
+
+- 线程对象析构前必须处于不可汇合状态（`!joinable()`），否则 `std::terminate` 被调用。
+- 使用 RAII 包装（如 `std::jthread`）来保证异常安全。
+
+### 异步任务与结果传递
+
+#### 如果没有这套？
+
+在没有 `std::future` / `std::promise` 这类抽象之前（例如纯 C 的 FreeRTOS 或 Linux C 开发），异步任务间的结果传递都是基于**最基础的同步原语**手动构建的。本质上，我们需要解决三个问题：
+
+1. **共享状态**：在生产者-消费者之间共享一块内存。
+2. **同步通知**：生产者告知消费者“结果已就绪”，消费者等待这个通知。
+3. **异常/错误传递**：需要额外的标志或预定义错误值来指示任务失败。
+
+---
+
+FreeRTOS中最简单的方式：把结果直接放入**队列**，消费者从队列中阻塞读取。
+
+**优点**：简单，队列自带同步和缓冲。
+**缺点**：只能一对一传递，且结果类型固定；难以传递异常信息（需要额外协议，如负值表示错误）。
+
+---
+
+使用 **事件组** 传递状态：事件组允许设置/等待多个事件位，可用于表示结果就绪或错误。
+
+---
+
+| 场景                          | pthread 实际做法                                        | 相当于 C++ 的                                                |
+| :---------------------------- | :------------------------------------------------------ | :----------------------------------------------------------- |
+| **简单两线程握手**            | 互斥锁 + 条件变量 + 一个结果变量                        | `promise` + `future`，但无需封装                             |
+| **生产者-消费者队列**         | 互斥锁 + 条件变量 + 环形缓冲区                          | `std::queue` + `std::condition_variable`                     |
+| **线程池/投递任务并获取结果** | 自定义任务结构体（含函数指针 + future 字段）            | `std::packaged_task` + `std::future`                         |
+| **一次性异步计算**            | 创建线程，`join` 后用全局或传出参数获取结果             | `std::async`                                                 |
+| **多任务并行等待任意一个**    | 用 `poll`/`select` 模拟，或每个任务设标志位，主线程轮询 | `std::future::wait_for` + `std::future::wait_any` (需自己封装) |
+
+可以看出，只有当需要 **将任务与结果解耦、跨线程传递未来值** 时，才会用到类似于 future 的封装。日常开发中大量使用的是“互斥锁 + 条件变量”直接解决问题，但是存在以下问题：
+
+**异常 / 错误传递**
+
+任务可能失败，你不仅需要传递结果，还要传递“是否成功”以及错误原因。手动方案需要在共享结构体中添加错误码、错误字符串等，消费端必须检查。一旦忘记检查，错误就会被忽略。`promise/future` 的 `set_exception` 和 `get()` 重抛机制把错误处理**强制统一**了。
+
+**结果的唯一所有权与生命周期**
+
+简单变量 `int result` 生命周期由作用域管理，但如果结果是一个动态分配的对象（如字符串、复杂结构），谁来释放？如果消费者 `get` 后忘记释放，就会内存泄漏。`future` 通过移动语义或 `shared_future` 明确所有权，并且析构时自动清理共享状态，减轻了心智负担。
+
+**消费者的生命周期与安全性**
+
+如果消费者还在等待，生产者所在线程却异常退出且没有设置结果，那么消费者将永远阻塞。C++ 中，`promise` 如果析构前未设置值，会自动设置 `broken_promise` 异常，消费者 `get()` 会抛出异常，从而**不会无限阻塞**。这种“约定式”的安全保证，手动模式极难做到不漏。
+
+**多个消费者等待同一个结果**
+
+你需要广播给多个线程，手写就要用 `pthread_cond_broadcast`，同时每个线程在获得结果后还不能破坏共享数据（比如别释放掉字符串）。如果每个消费者要独立拥有结果，就要复制。`std::shared_future` 直接提供了“多个消费者安全共享同一结果”的语义，还能拷贝。
+
+**超时等待和“等待任意一个实现复杂**
+
+你想同时等待多个任务，并在**第一个完成时**立即处理。手动方案通常需要为每个任务设置一个标志，主线程在一个循环里轮询所有标志（忙等）或使用多个条件变量，代码迅速膨胀。`std::future::wait_for` 和自定义的 `wait_any` 封装（标准未直接提供）将复杂性隐藏起来了。
+
+**无法表示任意返回类型**
+
+当你要做一个通用的线程池，任务可以是任何返回类型的函数。手动模式下，你需要定义一个通用结构体，里面包含函数指针和 `void*` 结果指针，还要手动管理类型转换。而 `std::packaged_task` 将任意可调用对象包装成统一接口，并通过关联的 `future` 提供强类型的结果，这正是线程池的理想构件。
+
+#### 三剑客
+
+`std::future`、`std::promise`、`std::async` 和 `std::packaged_task` 构成了一套**异步任务与结果传递**机制。它们**将“如何启动任务”与“如何获取结果”解耦**，让我们能用更高层次的方式编写并发程序，而不必手动管理线程和锁。
+
+- `std::future`：一个**只读**的“期待值”句柄，从异步任务中获取结果（或异常）。
+- `std::promise`：一个**只写**的“承诺”端，用于手动设置结果或异常，并**关联一个 `future`**。
+- `std::packaged_task`：将**任意可调用对象包装成一个异步任务**，其结果通过关联的 `future` 获取。
+- `std::async`：一个便捷函数，自动创建线程（或延迟执行）来运行任务，并返回一个 `future`。
+
+它们的关系可以理解为一条**通道**：
+
+``` c
+任务提供方 (promise / packaged_task / async)
+       |
+       | 设置值或异常
+       v
+     共享状态
+       |
+       | 查询或获取
+       v
+  future / shared_future (消费方)
+```
+---
+
+`std::future<T>`：代表一个**唯一的**异步结果持有者，只能移动，不可拷贝。
+
+- 通过 `get()` **获取结果**：
+  - 若结果尚未就绪，**阻塞**当前线程直到结果可用。
+  - 若已就绪，立即返回。
+  - **只能调用一次**，调用后 `valid()` 变为 `false`。
+- 也可用 `wait()` **等待但不取值**，`wait_for()` 和 `wait_until()` 实现限时等待。
+
+```c++
+std::future<int> fut = std::async([]{ return 42; });
+
+std::cout << fut.get();  // 42，调用后 fut.valid() 为 false
+```
+
+---
+
+`std::shared_future<T>`：允许多个消费者共享同一个结果，**可拷贝**。
+
+- `get()` 可多次调用，每次返回相同的结果（或反复抛出存储的异常）。
+- 通常通过 `share()` 转移所有权，或用 `std::shared_future` 构造函数从 `future` 移动创建。
+
+``` c++
+std::future<int> fut = std::async([]{ return 100; });
+
+std::shared_future<int> shared = fut.share();
+// 现在可以拷贝给多个线程读取
+auto copy = shared;
+std::cout << shared.get() << " " << copy.get(); // 100 100
+```
+
+---
+
+`std::promise<T>` 是**写端**。
+
+通过 `set_value()` 或 `set_exception()` 设置异步操作的结果，然后与之关联的 `future` 就能读到该结果。这可以在任何地方（比如创建的 `std::thread` 内部）将结果“发送”出去。
+
+``` c++
+void compute(std::promise<int> prom) {
+    try {
+        // 复杂计算
+        int result = 40 + 2;
+        prom.set_value(result);  // 设置结果
+    } catch (...) {
+        prom.set_exception(std::current_exception()); // 传递异常
+    }
+}
+
+int main() {
+    std::promise<int> prom;
+    std::future<int> fut = prom.get_future();  // 关联 future 对象
+    std::thread t(compute, std::move(prom));   // promise 移动给线程
+    std::cout << fut.get() << std::endl;       // 阻塞直到 compute 设置结果
+    
+    t.join();
+}
+```
+
+**关键点**：
+
+- `get_future()` 只能调用一次，之后 `promise` 和 `future` 通过**共享状态**关联。
+- 如果 promise 在析构前没有设置值或异常，析构时将设置 `std::future_error` 异常（`broken_promise`），导致 `future.get()` 抛出异常。
+- promise 本身不可拷贝，只能移动。
+
+**适用场景**：
+
+- 需要将结果从一个线程传递给另一个，且不使用更高级的 `packaged_task` 或 `async`。
+- 例如线程池中，提交任务时返回 `future`，内部用 promise 实现结果回传。
+
+---
+
+`std::async` 是一个模板函数，它**接受一个可调用对象和参数**，返回一个 `std::future`，并负责启动任务的执行。
+
+通过**启动策略**控制是立即新开线程还是延迟执行：
+
+- `std::launch::async`：**必须**在新线程中异步执行。
+- `std::launch::deferred`：**延迟**执行，直到返回的 `future` 调用了 `get()` 或 `wait()`，任务才会在**当前线程**中同步执行。
+- 默认策略（两者组合）：由实现决定，通常等价于 `async`，但不保证一定新开线程。
+
+``` c++
+#include <future>
+#include <iostream>
+
+int work(int x) {
+    return x * 2;
+}
+
+int main() {
+    // 在新线程中异步执行
+    auto fut = std::async(std::launch::async, work, 21);
+    std::cout << fut.get(); // 42
+
+    // 延迟执行：fut.get() 时在当前线程同步调用
+    auto fut2 = std::async(std::launch::deferred, work, 100);
+    // 此时 work 尚未调用
+    std::cout << fut2.get(); // 200，此时在当前线程执行
+}
+```
+
+**特点**：
+
+- 返回的 `future` 在析构时，如果使用了 `std::launch::async` 策略，会**阻塞等待**任务完成（相当于隐式 `join`）；若为 `deferred`，则什么都不做。这个行为可以保证异步任务在 future 销毁前完成，避免“悬空”线程。
+- 使用默认策略时，析构是否阻塞取决于实现，为了可移植性，通常建议明确指定策略或确保持有 future 足够久。
+- 能自动传递异常：任务抛出异常时，`get()` 会重新抛出该异常。
+
+---
+
+`std::packaged_task` 将任意可调用对象（函数、lambda、函数对象）包装成一个**可移动的异步任务**。
+
+通过 `get_future()` 关联 `future`对象。可以将 `packaged_task` 传递给线程、线程池或直接调用，其执行结果会自动通过 `future` 传递。
+
+``` c++
+#include <future>
+#include <thread>
+#include <iostream>
+
+int main() {
+    std::packaged_task<int(int,int)> task([](int a, int b){
+        return a + b;
+    });
+
+    std::future<int> fut = task.get_future();
+
+    // 将任务移入线程执行
+    std::thread t(std::move(task), 3, 4);
+    std::cout << "Result: " << fut.get() << std::endl; // 7
+    t.join();
+}
+```
+
+**关键点**：
+
+- `packaged_task` 只能移动，不能拷贝。
+- 调用 `get_future()` 后，必须确保在某个线程中通过 `operator()` 执行该任务，否则 `future` 将永远等不到结果。
+- 如果 `packaged_task` 在未执行时就被析构，关联的 `future` 会收到 `std::future_error`（`broken_promise`）。
+- 你可以在 `operator()` 调用时捕获异常，它会自动调用 `promise::set_exception`。
+
+**适用场景**：
+
+- **线程池**：将 `packaged_task` 作为任务队列的元素，提交后返回 `future`。
+- 需要将任务与执行分离，但又要方便地获取结果。
+- 实现自定义的任务调度器。
+
+## 锁
+
+### 谁提供用户态的锁
 
 在 C++ 开发中，锁的概念确实非常容易混淆，因为我们实际上跨越了**操作系统层**、**语言标准层**和**硬件指令层**三个维度。
 
@@ -1360,43 +1575,44 @@ int main(void) {
 | **顺序锁 (SeqLock)**   | ❌ (Linux内核有，应用层无)     | ❌                           | ✅                                |
 | **条件变量**           | `pthread_cond_t`              | `std::condition_variable`   | ❌                                |
 
-## 自旋锁
+### 自旋锁
 
-### 与内核自旋锁的区别
+#### 与内核自旋锁的区别
 
-#### 无法阻止被抢占
+**1.无法阻止被抢占：**
 
 在用户态（比如 C++ 应用程序），线程就像是租用 CPU 的打工人。不管当前有没有拿到自旋锁，只要操作系统分配给你的时间片用完了，调度器就会无情地把你踢下 CPU，换别的线程上。
 
-- **灾难场景：** 线程 A 拿到了用户态自旋锁，正在修改数据，突然时间片到了，被操作系统挂起。此时线程 B 被调度上 CPU，也想拿这个锁。因为 A 拿着锁却不在运行，B 就会在 CPU 上疯狂执行 `while` 循环（死等），白白烧毁整个时间片的 CPU 资源。这在实时系统中是灾难性的延迟来源。
+**灾难场景：** 线程 A 拿到了用户态自旋锁，正在修改数据，突然时间片到了，被操作系统挂起。此时线程 B 被调度上 CPU，也想拿这个锁。因为 A 拿着锁却不在运行，B 就会在 CPU 上疯狂执行 `while` 循环（死等），白白烧毁整个时间片的 CPU 资源。这在实时系统中是灾难性的延迟来源。
 
 内核态自旋锁：直接**禁用抢占 (`preempt_disable`)。**
 
 当代码运行在内核态并调用 `spin_lock()` 时，它不仅仅是去修改一个原子变量。它的底层实现会自动通知操作系统调度器：“从现在起，**不管我的时间片有没有用完，你都不准把我踢下 CPU！”**这就保证了，**只要内核线程拿到了自旋锁，它就一定能一口气把临界区的代码跑完并释放锁**。绝对不会出现“拿着锁去睡觉”或“拿着锁被强行换下班”的荒唐事。
 
-#### 无法对抗硬件中断
+---
+
+**2.无法对抗硬件中断**
 
 **用户态：对硬件一无所知。**用户态程序根本没有权限去管网卡的硬件中断。
 
 **内核态：可以屏蔽硬件中断 (`spin_lock_irqsave`)。**在内核中，网卡接收到数据时会触发一个硬件中断。中断的优先级是极高的，它会瞬间打断当前 CPU 正在执行的任何普通代码。
 
----
+**灾难场景：** 假设主线程拿到了一个自旋锁，正在处理网卡缓存。突然，网卡来了一个新数据，触发了中断。CPU 立刻暂停主线程，跳去执行“网卡中断处理函数”。但是中断处理函数也需要访问同一个网卡缓存，于是它也去请求那个自旋锁。
 
-- **灾难场景：** 假设主线程拿到了一个自旋锁，正在处理网卡缓存。突然，网卡来了一个新数据，触发了中断。CPU 立刻暂停主线程，跳去执行“网卡中断处理函数”。但是中断处理函数也需要访问同一个网卡缓存，于是它也去请求那个自旋锁。
-- **结果：** 死锁！主线程拿着锁被中断打断了，中断函数在死等主线程释放锁。CPU 直接彻底卡死。
+**结果：** 死锁！主线程拿着锁被中断打断了，中断函数在死等主线程释放锁。CPU 直接彻底卡死。
 
 为了解决这个问题，内核自旋锁提供了特权版本 `spin_lock_irqsave`。当内核线程获取这个锁时，**它会直接向 CPU 寄存器发送指令，把当前 CPU 的硬件中断接收功能给关掉！** 这样就保证了在修改核心数据时，连网卡、定时器这种底层硬件都无法打断它。用户态根本不可能有这种权限。
 
-#### 爆炸半径的区别
+---
+
+**3.爆炸半径不同**
 
 - **用户态自旋锁**写崩： 顶多就是你的**当前进程** CPU 占用率飙升到 100%（俗称死循环），或者你的电机控制进程卡死。你按一下 `Ctrl+C` 或者 `kill -9` 就能把进程杀掉，Linux 系统本身依然运行良好。
 - **内核态自旋锁**写崩： 如果你在编写内核驱动时，自旋锁忘记释放，或者引发了上面说的中断死锁，由于它禁用了抢占甚至中断，这个 **CPU 核心**就彻底变成了僵尸。如果你锁死了所有核心，整个 Linux 系统会瞬间失去响应（鼠标不动、键盘没反应、网络断开），直接触发 **Kernel Panic（内核恐慌）**，只能拔电源硬重启。
 
-### Pthread 库
+#### pthread 库
 
-#### 核心API
-
-自旋锁（`pthread_spinlock_t`）。**核心特性**：完全排他性锁，等待线程不睡眠，而是在循环中不断检查锁状态（"自旋"）。
+**核心API：**自旋锁（`pthread_spinlock_t`）。**核心特性**：完全排他性锁，等待线程不睡眠，而是在循环中不断检查锁状态（"自旋"）。
 
 ``` c++
 #include <pthread.h>
@@ -1435,11 +1651,9 @@ pthread_spin_unlock(&spinlock);
 pthread_spin_destroy(&spinlock);
 ```
 
-### CPP手动实现
+#### CPP手动实现
 
-C++ 标准库**没有直接提供自旋锁**，但可以使用`std::atomic_flag`（C++11 引入的原子布尔类型）轻松实现。
-
-#### 源码实现
+C++ 标准库**没有直接提供自旋锁**，但可以使用`std::atomic_flag`（C++11 引入的**原子布尔类型**）轻松实现：
 
 ``` c++
 #include <atomic>
@@ -1483,9 +1697,7 @@ void thread_func() {
 }
 ```
 
-
-
-### 注意事项
+#### 注意事项
 
 - **仅适用于多核 CPU 系统**：单 CPU 系统上自旋锁会导致死锁（持有锁的线程无法被抢占）
 
@@ -1495,11 +1707,11 @@ void thread_func() {
 
 - 高竞争场景下性能会急剧下降（大量 CPU 时间浪费在自旋上）
 
-## 互斥锁
+### 互斥锁
 
 **核心特性**：完全排他性锁，任何时刻仅一个线程可持有，等待线程**进入睡眠状态**。
 
-### Pthread 库
+#### pthread 库
 
 `pthread_mutex_t`：
 
@@ -1520,9 +1732,34 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
 ```
 
+#### CPP线程库
+
+C++ 提供多种互斥量（mutex）和自动锁管理。
+
+``` c++
+#include <mutex>
+
+std::mutex mtx;
+int counter = 0;
+
+void increment() {
+    std::lock_guard<std::mutex> lock(mtx);  // RAII 自动加解锁
+    ++counter;
+}
+
+// 或使用更灵活的 unique_lock
+void flexible_increment() {
+    std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+    // ... 一些不需要锁的操作
+    lock.lock();
+    ++counter;
+    lock.unlock();  // 可提前解锁
+}
+```
 
 
-### 注意事项
+
+#### 注意事项
 
 - 加锁和解锁必须**严格成对出现**，否则会导致死锁或其他线程永久阻塞；
 
@@ -1530,11 +1767,11 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
 - 默认互斥锁不支持递归加锁（同一线程重复加锁会导致死锁），如需递归锁需设置`PTHREAD_MUTEX_RECURSIVE`属性
 
-## 读写锁
+### 读写锁
 
 核心特性：**读共享、写独占**。多个线程可同时持有读锁，写锁持有期间所有其他线程都被阻塞。**读写锁仅用于读多写少场景**：读操作频率至少是写操作的 10 倍以上时，读写锁才能体现出性能优势
 
-### 与原子读写锁的区别
+#### 与原子读写锁的区别
 
 如果把这两种锁拆开来看，它们都具备“读写分离”（允许多个读者同时访问，但写者排他）的特性。它们之间真正的、也是唯一的根本区别在于：**当锁已经被别人占用时，当前申请锁的线程接下来该干什么？**
 
@@ -1546,7 +1783,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
 | **适用临界区大小**     | 长临界区（涉及 I/O、复杂计算、系统调用） | **极短临界区（仅仅是复制几个字节的内存等）** |
 | **实时性保证**         | 差（存在调度不确定性）                   | **强（只要临界区极短，延迟是确定的）**       |
 
-#### 等待机制不同
+**1.等待机制不同：**
 
 - **标准读写锁**（如 `std::shared_mutex` 或 `pthread_rwlock_t`）：
   - **机制：阻塞挂起（睡觉）。** 如果线程 A 发现有写者占用着锁，它会立刻向操作系统报告：“我拿不到锁，我先睡一会儿，等锁空出来了你叫醒我。”
@@ -1555,12 +1792,16 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
   - **机制：自旋死等（罚站）。** 如果线程 A 发现有写者占用，它绝不主动睡觉（在它拥有的时间片内），而是在一个 `while` 循环里不断地使用 CPU 检查锁的状态：“好了没？好了没？好了没？”
   - **结果：** 线程 A 一直霸占着 CPU 核心不放，直到锁被释放它立刻冲进去。
 
-####  底层依赖不同
+---
+
+**2.底层依赖不同：**
 
 - **标准读写锁：** 深度依赖**操作系统内核的调度机制**。在 Linux 中，它底层通常调用 `futex`（快速用户态互斥锁）。加锁解锁操作可能涉及用户态到内核态的切换。
 - **原子读写锁：** 完全剥离操作系统，纯粹依赖 **CPU 硬件级别的原子指令**（如 x86 的 `LOCK CMPXCHG`，即 CAS 操作）。它在纯用户态运行，系统调度器甚至不知道这个锁的存在。
 
-#### 性能代价不同
+---
+
+**3.性能代价不同：**
 
 - **标准读写锁：**
   - **优点：** 节省 CPU 资源。拿不到锁就让出 CPU 给别人干活。
@@ -1569,7 +1810,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
   - **优点：零唤醒延迟。** 因为线程一直在 CPU 上盯着，锁一释放，它只需要几个纳秒（几条 CPU 指令的时间）就能立刻拿到锁进入临界区。
   - **致命缺点：** 如果临界区代码执行时间很长，等锁的线程会把当前 CPU 核心跑满 100%，白白烧电而不产出任何价值。
 
-### Pthread 库
+#### pthread 库
 
 `pthread_rwlock_t`；核心特性：**读共享、写独占**。多个线程可同时持有读锁，写锁持有期间所有其他线程都被阻塞。
 
@@ -1590,7 +1831,7 @@ int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
 int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
 ```
 
-### CPP 库
+#### CPP 库
 
 ``` c++
 #include <shared_mutex>
@@ -1609,9 +1850,7 @@ public:
 };
 ```
 
-
-
-### 注意事项
+#### 注意事项
 
 - 读锁和写锁使用**同一个`pthread_rwlock_unlock`函数**释放
 
@@ -1621,7 +1860,7 @@ public:
 
 - 仅在**读多写少**场景下性能优于互斥锁，写操作频繁时性能可能更差
 
-## 实际工程中的选型场景
+### 实际工程中的选型场景
 
 在常规的业务逻辑或网络请求中，无脑使用 C++ 标准库的 `std::mutex` + `std::lock_guard` 是最安全、最正确的选择。
 
@@ -1634,62 +1873,14 @@ public:
 3. 使用基于环形缓冲的**无锁队列 (Lock-free Queue)** 进行数据传递。
 
  线程是**操作系统所能调度的最小单位**。通过多线程编程使得**一个进程执行多个不同的任务**。**线程享有共享资源，即进程中的全局变量每个线程都可以访问**。
-## 线程相关
 
-编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；
+## 信号量/条件变量
 
-``` bash
-gcc xxx.c -pthread
-```
-- **获取线程号：**Linux采用POSIX线程。进程有唯一对应的**PID**,线程有**TID**.本质是一个`pthread_t`变量,但对于线程号而言，在其所属的进程上下文中才有意义。
-
-  ``` c
-  #include <pthread.h>
-  int main()
-  {
-  	pthread_t pthread_self(void);//获取主线程的tid号
-  }
-  
-  typedef unsigned long int pthread_t;
-  pthread_t tid_1 = 0;
-  ```
-- **线程的创建：**(传入多个参数使用**结构体**)
-
-``` c
-#include <pthread.h>
-int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine) (void*), void *arg);
-//argc[0]：线程号变量的指针
-//argc[1]：线程的属性，一般传入NULL表示默认
-
-//argc[2]：函数指针，线程的执行函数
-//garc[3]：传入参数，不传入为NULL 传入多个参数则使用结构体 (注意void *可以直接传入变量，使用时将其数据类型强制转化回来就行)
-//如果为地址传入，则两个直接相关，变量传入则相互独立
-
-//注意线程运行顺序随机，因此需在主线程中加入sleep()函数，释放CPU，使其去执行子线程。当主线程伴随进程结束，所创建出来的子线程也会结束。
-```
-- 线程退出：
-
-``` c
-#include <pthread.h>
-//线程自身主动退出
-void pthread_exit(void *retval); //退出可以给主线程传递一个void *数据(主线程通过join函数获取)，
-                                 //不传为NULL 传出的数据需要用static修饰
-
-//其他线程让其退出
-int pthread_cancel(pthread_t thread); //argc[0]:tid号 成功：返回0
-
-
-//线程资源回收，等待子线程都执行完毕再退出主线程
-int pthread_join(pthread_t thread, void **retval);       //阻塞方式,直到成功返回才返回
-int pthread_tryjoin_np(pthread_t thread, void **retval); //非阻塞,成功返回0
-//argv[0]:tid
-//argv[1]:接受传入数据(类型为地址)的变量的地址(万能指针)
-```
-## 信号量
+### 信号量
 
 管**数量** → 代表 “有 N 个资源可用”，线程拿一个少一个，还回去多一个。可以**单独用**，不需要锁。
 
-### 创建/删除
+#### 创建/删除
 
 通过信号量来**解决线程的执行顺序**。
 ``` c
@@ -1704,7 +1895,8 @@ int sem_init(sem_t *sem, int pshared, unsigned int value);  // 信号量初始�
 
 int sem_destory(sem_t *sem);  // 删除信号量
 ```
-###  P/V操作
+#### P/V操作
+
 ``` c
 #include <semaphore.h>
 
@@ -1714,8 +1906,7 @@ int sem_trywait(sem_t *sem);  // 非阻塞式申请信号量资源
 int sem_post(sem_t *sem); // 释放此信号量的资源
 ```
 
-
-## 条件变量
+### 条件变量
 
 管**状态** → 代表 “某个条件是否成立”（如队列非空、任务就绪），**必须配合互斥锁一起用（条件检查 + 等待必须原子操作，防止竞态）**，自己本身不存任何 “计数”。
 
@@ -1727,7 +1918,7 @@ int sem_post(sem_t *sem); // 释放此信号量的资源
 2. 线程 B：条件满足后 → 发送通知；
 3. 线程 A：被唤醒 → 重新抢锁 → 检查条件 → 执行业务。
 
-### 创建/删除
+#### 创建/删除
 
 ``` c
 // 动态初始化
@@ -1739,7 +1930,7 @@ pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 int pthread_cond_destroy(pthread_cond_t *cond);
 ```
 
-### 等待/唤醒
+#### 等待/唤醒
 
 这个函数**原子执行 3 步**：**自动释放互斥锁**；线程进入**休眠**（不占 CPU）；被唤醒后 → **自动重新加锁**
 
@@ -1773,7 +1964,7 @@ int pthread_cond_signal(pthread_cond_t *cond);
 int pthread_cond_broadcast(pthread_cond_t *cond);
 ```
 
-### 消费者固定模板
+#### 消费者固定模板
 
 ``` c
 // 1. 加锁
@@ -1792,9 +1983,7 @@ do_something();
 pthread_mutex_unlock(&mutex);
 ```
 
-
-
-## 对比
+### 对比
 
 | 维度             | 互斥锁 `mutex`                       | 信号量 `semaphore`                       | 条件变量 `condition_variable`                                |
 | :--------------- | :----------------------------------- | :--------------------------------------- | :----------------------------------------------------------- |
@@ -2273,6 +2462,124 @@ private:
 
 } // namespace myactua
 
+```
+
+# 信号
+
+**Signal-Driven I/O 的核心思想：**
+
+> 进程告诉内核："当这个文件描述符有数据时，发 `SIGIO` 信号通知我"，然后进程去做别的事（或休眠），不用轮询检查。
+
+	信号是 Linux 内核向进程发送的**异步通知**（可以理解为 “进程级别的中断”），用于告知进程发生了某个事件（比如用户按 Ctrl+C、进程访问非法内存、其他进程主动发送信号等）。
+
+## `singal`函数
+
+	**异步信号安全函数**：信号是 “异步” 的（可能在进程执行任意代码时触发），因此处理函数中只能调用「无全局状态、无锁、可重入」的函数（如`write`/`_exit`/`memset`），绝对不能用`printf`/`exit`/`malloc`（这些函数内部有全局缓冲区 / 锁，会导致程序崩溃）。
+
+``` c
+#include <signal.h>  // 必须包含的头文件
+
+// 定义信号处理函数的类型（参数是信号编号，无返回值）
+typedef void (*sighandler_t)(int);
+
+// 核心函数：设置信号处理方式 
+// signum:要处理的信号编号（比如 SIGINT、SIGTERM，也可以直接写数字如 2、15）
+// handler:信号的处理方式，有 3 种取值：
+// 1. SIG_IGN：忽略该信号（SIGKILL/SIGSTOP 除外）
+// 2. SIG_DFL：恢复信号的默认行为
+// 3. 自定义函数指针：信号触发时执行该函数
+sighandler_t signal(int signum, sighandler_t handler);
+```
+
+使用实例：
+
+`STDIN_FILENO` ， 以只读方式打开`/dev/pts/1`。
+
+`STDOUT_FILENO`，以只写方式打开`/dev/pts/1`。
+
+`STDERR_FILENO`，以只写方式打开`/dev/pts/1`。
+
+``` c
+#include <stdio.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <errno.h>  // 新增：处理错误码
+#include <string.h> // 新增：memset
+
+#define MAX_LEN 100
+
+// 信号处理函数：仅使用异步信号安全函数（write）
+void input_handler(int num) {
+    char data[MAX_LEN];
+    ssize_t len; 
+    
+    memset(data, 0, sizeof(data));
+    
+    // 读取标准输入，处理read的返回值
+    len = read(STDIN_FILENO, data, MAX_LEN - 1); // 预留1个字节给'\0'，避免越界
+    
+    // 分情况处理read返回值
+    if (len == -1){
+        const char *err_msg = "read error!\n";
+        write(STDOUT_FILENO, err_msg, strlen(err_msg));
+        return;
+    } else if (len == 0) {
+        // 处理EOF（Ctrl+D）
+        const char *eof_msg = "EOF received, exit!\n";
+        write(STDOUT_FILENO, eof_msg, strlen(eof_msg));
+        _exit(0); // 信号处理中退出用_exit（异步安全），而非exit
+    }
+    
+    // 手动添加字符串结束符（确保不越界）
+    data[len] = '\0';
+    
+    // 用write替代printf（异步信号安全）
+    const char *prefix = "input: ";
+    write(STDOUT_FILENO, prefix, strlen(prefix));
+    write(STDOUT_FILENO, data, len);
+}
+
+
+int main(void) {
+    int oflags;
+    int ret; // 用于接收fcntl返回值
+    
+    // // 第一步：注册SIGIO信号的处理函数
+    if (signal(SIGIO, input_handler) == SIG_ERR) {
+        perror("signal set SIGIO failed");
+        return 1;
+    }
+    
+    // 设置标准输入的属主为当前进程
+    ret = fcntl(STDIN_FILENO, F_SETOWN, getpid());
+    if (ret == -1) {
+        perror("fcntl F_SETOWN failed");
+        return 1;
+    }
+    
+    // 获取文件状态标志
+    oflags = fcntl(STDIN_FILENO, F_GETFL);
+    if (oflags == -1) {
+        perror("fcntl F_GETFL failed");
+        return 1;
+    }
+    // 设置FASYNC标志
+    ret = fcntl(STDIN_FILENO, F_SETFL, oflags | FASYNC);
+    if (ret == -1) {
+        perror("fcntl F_SETFL failed");
+        return 1;
+    }
+    
+    // 替换忙等循环：用pause()休眠，等待信号（CPU占用率0%）
+    while (1) {
+        pause(); // 进程休眠，直到收到任意信号
+    }
+    
+    return 0;
+}
 ```
 
 # 输入设备
