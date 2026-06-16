@@ -714,17 +714,16 @@ uintptr_t address = reinterpret_cast<uintptr_t>(int_ptr);
 
 ## `explicit`
 
-`explicit` 是 C++ 中专门用来**修饰类的构造函数**的关键字，核心作用只有一个（只有用在构造函数/极小部分模板）：
+`explicit` 是 C++ 中专门用来**修饰类的构造函数**的关键字，核心作用只有一个（只有用在构造函数/极小部分模板）：**强制构造函数只能被「显式调用」，禁止(单)参数构造函数的「隐式类型转换」**，从根源避免代码因编译器自动转换产生意外 bug。
 
-**禁止单参数构造函数的「隐式类型转换」，强制构造函数只能被「显式调用」**，从根源避免代码因编译器自动转换产生意外 bug。
-
-如果一个类的构造函数**只有一个参数**（或者有多个参数，但除了第一个都有默认值），编译器会默认允许：把「构造函数的参数类型」**自动隐式转换成当前类的对象**，不需要手动写构造语法。
+如果一个类的构造函数**只有一个参数**（或者有多个参数，但除了第一个都有默认值），编译器会默认允许：把「构造函数的参数类型」**自动隐式转换成当前类类型的对象**，不需要手动写构造语法。
 
 无 explicit 的危险示例（隐式转换）:
 
-![explicit用法](./assets/explicit用法.png)
+<img src="./assets/explicit用法.png" alt="explicit用法" style="zoom:33%;" />
 
-几乎所有企业 C++ 编码规范：**所有单参数构造函数，默认必须加 explicit**。
+> 几乎所有企业 C++ 编码规范：**所有单参数构造函数，默认必须加 explicit**。
+>
 
 ## `const`与`mutable`
 
@@ -5300,3 +5299,142 @@ public:
 double imag(const double & im) const { ... }
 double imag(const double   im) const { ... }
 ```
+
+# 统一初始化
+
+统一初始化以花括号 `{}` 为语法载体，系统性地解决传统初始化的问题，也是现代 C++ 推荐默认使用 `{}` 初始化的核心理由。
+
+## 传统初始化
+
+### 语法歧义
+
+C++ 语法有一条经典规则：**凡是能被解释为函数声明的语句，都会优先被解析为函数声明**。这导致使用圆括号 `()` 初始化对象时，极易出现反直觉的歧义：
+
+``` c++
+// 本意：调用Widget的默认构造函数创建对象w
+// 实际：被编译器解析为「返回Widget类型、无参数的函数w」的声明
+Widget w(); 
+```
+
+这种歧义在带参数的场景中会更加隐蔽，是 C++ 历史上最经典的语法陷阱之一。
+
+---
+
+统一初始化方案：
+
+``` c++
+Widget w1{};        // 明确执行默认构造，无任何歧义
+Widget w2{10};      // 明确调用带参构造函数
+```
+
+无论是否带参数、参数是否为类型，`{}` 都只会被解释为对象初始化，不会产生函数声明的歧义。
+
+### 隐式窄化转换
+
+使用 `=` 或 `()` 初始化时，编译器会静默执行可能丢失精度的**窄化转换（Narrowing Conversion）**，不会给出任何提示，极易埋下隐蔽 bug：
+
+``` c++
+int a = 3.14;   // 合法，double静默截断为3，精度丢失无警告
+int b(3.14);    // 合法，同样静默截断
+```
+
+---
+
+花括号初始化会在**编译期严格检查窄化转换**，凡是可能丢失数据的隐式类型转换都会直接报错，从语法层面规避精度丢失风险。
+
+``` c++
+int a{3.14};        // 编译报错：禁止从 double 到 int 的窄化转换
+char c{1000};       // 编译报错：1000超出char的表示范围，属于窄化
+```
+
+### 未定义行为
+
+对于 `int`、`double`、指针等内置类型，传统默认初始化（`int a;`）会留下不确定的垃圾值，访问属于未定义行为。而空花括号会执行**值初始化（Value Initialization）**，保证内置类型被零初始化：
+
+``` c++
+int a;      // 默认初始化，值为内存中的垃圾值，访问有风险
+int b{};    // 值初始化，保证值为 0
+int* p{};   // 值初始化，保证为 nullptr
+```
+
+
+
+## `initializer_list<>`
+
+### 构造函数
+
+一个类可以接收 `std::initializer_list` 的构造函数：
+
+<img src="./assets/initializer_list构造函数.png" alt="initializer_list构造函数" style="zoom:33%;" />
+
+如果没有写接收 `std::initializer_list` 的构造函数，使用`{}`进行构造则编译器会尝试把这一包东西进行分割来匹配普通构造函数。
+
+### 优先匹配
+
+当一个类同时存在普通构造函数和接收 `std::initializer_list` 的构造函数时，花括号初始化会**优先匹配 initializer_list 版本**，这会导致 `{}` 和 `()` 的语义出现差异。如：
+
+``` c++
+std::vector<int> v1(5, 10);  // 普通构造：创建5个元素，每个值为10
+std::vector<int> v2{5, 10};  // initializer_list构造：创建2个元素，值为5和10
+```
+
+花括号的核心语义是「用一组值初始化对象」，因此优先匹配接收值列表的构造函数。使用时只需区分「构造参数」和「初始化元素列表」的语义即可。
+
+### 实现原理
+
+#### 核心数据结构
+
+`std::initializer_list` 是一个极度轻量的平凡类型（trivial type），**内部只保存两个信息：底层数组的首指针、元素个数**。它没有任何动态内存分配，拷贝成本和拷贝一个指针几乎一致。
+
+> 源码中把构造函数申明为`private`，但是编译器可以调用构造函数来创建对象。
+
+``` c++
+template<typename _Tp>
+class initializer_list {
+public:
+    using value_type      = _Tp;
+    using reference       = const _Tp&;
+    using const_reference = const _Tp&;
+    using size_type       = size_t;
+    using iterator        = const _Tp*;  // 迭代器本质就是const指针
+    using const_iterator  = const _Tp*;
+
+private:
+    iterator  _M_begin;   // 一个指针，指向底层数组首地址
+    size_type _M_len;     // 元素个数
+
+public:
+    // 空列表：指向null，长度为0
+    constexpr initializer_list() noexcept
+        : _M_begin(nullptr), _M_len(0) {}
+
+    constexpr size_type size()  const noexcept { return _M_len; }
+    constexpr iterator begin()  const noexcept { return _M_begin; }
+    constexpr iterator end()    const noexcept { return _M_begin + _M_len; }
+};
+```
+
+#### 编译器的隐式行为
+
+当写下 `{1, 2, 3}` 并用来初始化 `initializer_list<int>` 时，编译器会在后台自动完成两件事：
+
+1. 在当前栈帧上创建一个**匿名的 `const int` 类型临时数组**，并按列表值完成初始化：`const int __tmp_arr[3] = {1, 2, 3};`
+2. 构造一个 `initializer_list<int>` 对象，内部指针指向这个临时数组的首地址，长度设为 3。
+
+也就是说：
+
+> `std::initializer_list` 本身不存储任何元素，它只是一个「视图」，真实的数据存放在编译器自动生成的栈上常量数组里。
+
+这也是它为什么这么轻量、为什么元素不可修改的根本原因 —— 底层数组本身就是 `const` 限定的常量。
+
+#### 临时数组
+
+`initializer_list<T>`构造函数执行完毕，整个初始化表达式结束。`initializer_list` 临时对象、编译器生成的栈上临时数组 `__tmp_arr` 都会被销毁。
+
+但此时对象内部的 `data_` 已经完整拷贝了所有数据（**构造函数中手动实现**），所以完全不受影响 —— 这就是「用 `initializer_list` 构造容器是安全的」的根本原因：**数据被搬走了，不是存了视图**。
+
+<img src="./assets/临时数组.png" alt="临时数组" style="zoom: 33%;" />
+
+### 对容器的影响
+
+<img src="./assets/统一初始化对容器的影响.png" alt="统一初始化对容器的影响" style="zoom: 33%;" />
