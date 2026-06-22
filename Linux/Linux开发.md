@@ -1734,7 +1734,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
 #### CPP线程库
 
-C++ 提供多种互斥量（mutex）和自动锁管理。
+C++ 提供多种互斥锁（`mutex`）和自动锁管理。
 
 ``` c++
 #include <mutex>
@@ -1874,15 +1874,24 @@ public:
 
  线程是**操作系统所能调度的最小单位**。通过多线程编程使得**一个进程执行多个不同的任务**。**线程享有共享资源，即进程中的全局变量每个线程都可以访问**。
 
-## 信号量/条件变量
+## 信号量
 
-### 信号量
+管理**资源数量**：代表 “有 N 个资源可用”，线程拿一个少一个，还回去多一个。
 
-管**数量** → 代表 “有 N 个资源可用”，线程拿一个少一个，还回去多一个。可以**单独用**，不需要锁。
+**条件可以简化为具有二值性**：通过**二值信号量**来进行同步（线程的执行顺序）。
+
+C++ 标准库提供的信号量（C++20）和 POSIX / pthread 库提供的信号量，在设计上都是**线程安全**。
+
+**信号量是“非所有权的”**，线程A执行了`sem_wait`，可以由线程B执行`sem_post`，这在生产者-消费者模型中非常自然：生产者释放资源，消费者获取资源，双方互不干涉。
+
+> **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
+>
+> - 条件能简化为 `count > 0` → 用 `sem_t`进行同步（二值信号量的计数值本身就是条件，且本身具有线程安全性）
+
+### 核心API
 
 #### 创建/删除
 
-通过信号量来**解决线程的执行顺序**。
 ``` c
 #include <semaphore.h>
 
@@ -1903,114 +1912,25 @@ int sem_destory(sem_t *sem);  // 删除信号量
 int sem_wait(sem_t *sem);     // 尝试获取，检测此信号量是否有资源可用，没有则阻塞
 int sem_trywait(sem_t *sem);  // 非阻塞式申请信号量资源
 
-int sem_post(sem_t *sem); // 释放此信号量的资源
+int sem_post(sem_t *sem); 	  // 释放此信号量的资源
 ```
 
-### 条件变量
+### 适用场景
 
-管**状态** → 代表 “某个条件是否成立”（如队列非空、任务就绪），**必须配合互斥锁一起用（条件检查 + 等待必须原子操作，防止竞态）**，自己本身不存任何 “计数”。
+#### 二值信号量（记忆性）
 
-用来解决：**线程需要等待某个条件满足才能继续执行**的场景。
+> **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
+>
+> - 条件能简化为 `count > 0` → 用 `sem_t`进行同步（二值信号量的计数值本身就是条件，且本身具有线程安全性）
 
-核心机制：**等待 - 通知**
-
-1. 线程 A：条件不满足 → 阻塞等待（释放锁，不占用 CPU）；
-2. 线程 B：条件满足后 → 发送通知；
-3. 线程 A：被唤醒 → 重新抢锁 → 检查条件 → 执行业务。
-
-#### 创建/删除
-
-``` c
-// 动态初始化
-int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
-// 静态初始化
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-
-
-int pthread_cond_destroy(pthread_cond_t *cond);
-```
-
-#### 等待/唤醒
-
-这个函数**原子执行 3 步**：**自动释放互斥锁**；线程进入**休眠**（不占 CPU）；被唤醒后 → **自动重新加锁**
-
-> 原子性：解锁 + 休眠 是一步完成的，不会出现中间状态，绝对安全。
-
-``` c
-int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
-```
-
-定时等待：
-
-``` c
-int pthread_cond_timedwait(
-    pthread_cond_t *cond,
-    pthread_mutex_t *mutex,
-    const struct timespec *abstime
-);
-```
+**信号量特性**：信号量拥有“记忆性”。如果线程A执行了`sem_post`（V操作），此时没有线程在等待，信号量会保持值为1。当线程B随后调用`sem_wait`时，它能立即获取信号量并继续运行，不会阻塞。
+**条件变量问题**：条件变量本身不维护状态，仅作为通知机制。如果线程A发送通知时线程B未在`pthread_cond_wait`上阻塞，该通知将丢失。线程B后续进入等待时将永远阻塞。必须额外定义一个共享变量（如`int count`）来记录状态，并在互斥锁的保护下严格检查该变量。
 
 ---
-
-**唤醒一个等待线程：**
-
-``` c
-int pthread_cond_signal(pthread_cond_t *cond);
-```
-
-**唤醒所有等待线程：**
-
-``` c
-int pthread_cond_broadcast(pthread_cond_t *cond);
-```
-
-#### 消费者固定模板
-
-``` c
-// 1. 加锁
-pthread_mutex_lock(&mutex);
-
-// 2. 【必须用while】循环检查条件（防虚假唤醒）
-while(条件不成立) {
-    // 3. 阻塞等待（自动解锁+休眠）
-    pthread_cond_wait(&cond, &mutex);
-}
-
-// 4. 条件成立，执行业务逻辑
-do_something();
-
-// 5. 解锁
-pthread_mutex_unlock(&mutex);
-```
-
-### 对比
-
-| 维度             | 互斥锁 `mutex`                       | 信号量 `semaphore`                       | 条件变量 `condition_variable`                                |
-| :--------------- | :----------------------------------- | :--------------------------------------- | :----------------------------------------------------------- |
-| **内部状态**     | 二进制：锁定 / 未锁定                | 整型计数器：`≥0` 表示可用资源数          | **无独立状态**，完全依赖外部条件                             |
-| **所有权**       | 严格绑定：谁 `lock`，谁必须 `unlock` | 无所有权：任意线程可 `wait` 或 `post`    | 无所有权，但 `wait` 时必须持有配套 mutex                     |
-| **阻塞语义**     | 锁被占用则阻塞，直到锁释放           | 计数器 `≤0` 则阻塞，直到 `post` 唤醒     | 阻塞直到其他线程调用 `signal/broadcast`                      |
-| **典型使用模式** | `lock(); /* 临界区 */ unlock();`     | `sem_wait(); /* 使用资源 */ sem_post();` | `while(!条件) pthread_cond_wait(&cv, &mtx);`<br>`pthread_cond_signal(&cv);` |
-| **虚假唤醒**     | 不存在                               | 不存在                                   | **存在**，必须用 `while` 循环检查条件                        |
-| `wait` 原子性    | 不适用                               | 不释放其他锁                             | **自动释放 mutex + 阻塞 + 唤醒后重新加锁**                   |
-| 跨进程支持       | 需设置 `PTHREAD_PROCESS_SHARED`      | 原生支持（命名信号量 `sem_open`）        | 需配合进程共享 mutex                                         |
-| 典型场景         | 保护共享变量、链表、配置结构         | 控制线程池并发数、固定大小缓冲区、限流   | 生产者-消费者“队列非空/非满”等待、任务完成通知               |
-
-💡 **关键区别**：
-
-- `mutex` 管的是**数据访问权**保护临界区代码，防止多个线程同时修改共享数据；`semaphore` 管的是**资源数量或事件**，控制同时访问特定资源的线程数量，或作为事件通知机制；`condition_variable` 管的是**状态变化通知**，线程等待某个逻辑条件变为真，并由另一线程唤醒。
-- **条件变量永远不能单独使用**，必须搭配一个 mutex 来保护“条件谓词”（condition predicate）。
-- 提供信号量的主要目的是提供一种**进程间同步**的方式（如命名信号量可用于不共享内存的独立进程）；而互斥锁和条件变量是作为**线程间同步**机制说明的（总是共享内存区）。
-
----
-
-### 信号量场景
-
-####  状态维护缺失导致“信号丢失”(记忆性)
 
 使用信号量（线程A等待线程B完成初始化，可以简化条件为具有二值性）：
 
-``` c
+``` c++
 #include <semaphore.h>
 
 sem_t sem;
@@ -2031,53 +1951,13 @@ void* thread_b(void* arg) {
 }
 ```
 
-使用条件变量替代：
+#### 环形缓冲区的生产消费模型（管理资源）
 
-``` c
-#include <pthread.h>
+**场景描述**：生产者与消费者共用一个大小为 N 的环形缓冲区。生产者关心的是“剩余空位数”，消费者关心的是“已有数据数”。
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+若使用条件变量，必须定义两个条件变量（`not_full`和`not_empty`），并配合一个互斥锁和一个或两个整型计数器。每次加锁后需手动检查计数器状态并等待，逻辑极其繁琐。而**信号量天生就是“资源计数器”**，其PV操作原语完美映射了“申请资源”与“释放资源”的语义，且在未满/未空时可以不加锁直接通过，具有更高的并发度。
 
-int ready = 0; // 必须手动维护状态
-// 线程A (等待者)
-void* thread_a(void* arg) {
-    pthread_mutex_lock(&mutex);
-    while (ready == 0) { // 必须用while防止虚假唤醒
-        pthread_cond_wait(&cond, &mutex);
-    }
-    pthread_mutex_unlock(&mutex);
-    // 执行后续任务
-    return NULL;
-}
-// 线程B (通知者)
-void* thread_b(void* arg) {
-    // 执行初始化...
-    pthread_mutex_lock(&mutex);
-    ready = 1; // 必须在锁内修改状态
-    pthread_cond_signal(&cond);
-    pthread_mutex_unlock(&mutex);
-    return NULL;
-	}
-```
-
-**信号量特性**：信号量拥有“记忆性”。如果线程A执行了`sem_post`（V操作），此时没有线程在等待，信号量会保持值为1。当线程B随后调用`sem_wait`时，它能立即获取信号量并继续运行，不会阻塞。
-**条件变量问题**：条件变量本身不维护状态，仅作为通知机制。如果线程A发送通知时线程B未在`pthread_cond_wait`上阻塞，该通知将丢失。线程B后续进入等待时将永远阻塞。
-**替代代价**：必须额外定义一个共享变量（如`int count`）来记录状态，并在互斥锁的保护下严格检查该变量。
-
-但信号量是“非所有权的”，线程A执行了`sem_wait`，可以由线程B执行`sem_post`，这在生产者-消费者模型中非常自然：生产者释放资源，消费者获取资源，双方互不干涉。
-
-若试图用条件变量模拟信号量的“通知”功能，通常会陷入死锁陷阱。例如，线程A持有锁并等待条件变量，此时它释放了锁进入休眠；若线程B需要通过加锁来发送通知，这是可行的。但如果逻辑反转，或者锁的粒度设计不当，极易导致死锁或逻辑耦合过度。
-
----
-
-#### 环形缓冲区的生产消费模型(管理资源)
-
-**场景描述**：生产者与消费者共用一个大小为N的环形缓冲区。生产者关心的是“剩余空位数”，消费者关心的是“已有数据数”。
-
-若使用条件变量，必须定义两个条件变量（`not_full`和`not_empty`），并配合一个互斥锁和一个或两个整型计数器。每次加锁后需手动检查计数器状态并等待，逻辑极其繁琐。而信号量天生就是“资源计数器”，其PV操作原语完美映射了“申请资源”与“释放资源”的语义，且在未满/未空时可以不加锁直接通过，具有更高的并发度。
-
-``` c
+``` c++
 #include <semaphore.h>
 #include <stdlib.h>
 #define CAPACITY 8
@@ -2092,9 +1972,8 @@ typedef struct {
 
 void producer(RingQueue *rq, int item) {
     // P操作：申请一个空位资源。若empty_slots为0，自动阻塞等待
-    // 信号量自带状态，无需先加锁再判断
     sem_wait(&rq->empty_slots);
-    // 此处若为多生产者需加锁保护pos，若单生产者则无需加锁
+
     rq->buffer[rq->pos++] = item;
     rq->pos %= CAPACITY;
     // V操作：释放一个数据资源，唤醒可能在等待的消费者
@@ -2113,103 +1992,182 @@ int consumer(RingQueue *rq) {
 }
 ```
 
-### 条件变量场景
+## 条件变量
+
+管**状态** → **线程需要等待某个复杂条件满足才能继续执行**的场景。**必须配合互斥锁一起用（条件检查 + 等待必须原子操作，防止竞态）**，自己本身不存任何 “计数”。
 
 > **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
 >
-> - 条件能简化为 `count > 0` → 用 `sem_t`进行同步（二值信号量的计数值本身就是条件）
-> - 条件依赖多变量、逻辑组合、需广播或优雅退出 → **必须用 `pthread_mutex_t` + `pthread_cond_t`**
+> - 条件能简化为 `count > 0` → 用 `sem_t`进行同步（二值信号量的计数值本身就是条件，且本身具有线程安全性）
+>
+> - 条件依赖多变量、逻辑组合（这些变量不具有线程安全性，需要对这些变量的访问进行加锁，而**解锁和等待信号之间会存在一个窗口**）：
+>
+>   ``` c++
+>   pthread_mutex_t mutex;
+>   
+>   void *worker(void *arg) {
+>       while (1) {
+>           pthread_mutex_lock(&mutex);
+>           if (!queue_empty(&task_queue) || shutdown_requested) {
+>               // 条件满足，处理...
+>               pthread_mutex_unlock(&mutex);
+>           } else {
+>               pthread_mutex_unlock(&mutex);  // ❌ 解锁
+>   
+>               sem_wait(&cond_sem);           // 等待信号 —— 危险！
+>           }
+>       }
+>   }
+>   ```
+>
+> - 需广播或优雅退出 → **必须用 `pthread_mutex_t` + `pthread_cond_t`**
+>
+> - 理论上信号量可以替代条件变量，但实践中代价高昂且容易出错；条件变量之所以依然存在，是因为它在语义匹配、安全性、可维护性和性能上针对“多条件等待”场景做了专门优化。
+
+### 核心API
+
+#### 创建/删除
+
+``` c
+// 动态初始化
+int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
+// 静态初始化
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+
+int pthread_cond_destroy(pthread_cond_t *cond);
+```
+
+#### 等待/唤醒
+
+这个函数**原子执行 3 步**：**释放互斥锁**；线程进入**休眠**（不占 CPU）；被唤醒后 → **自动重新加锁。**
+
+> 原子性：解锁 + 休眠 是原子完成的，不会出现中间状态，绝对安全。
+
+``` c
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+```
+
+定时等待：
+
+``` c
+int pthread_cond_timedwait(
+    pthread_cond_t *cond,
+    pthread_mutex_t *mutex,
+    const struct timespec *abstime
+);
+```
+
+---
+
+**释放条件变量，唤醒一个等待线程：**
+
+``` c
+int pthread_cond_signal(pthread_cond_t *cond);
+```
+
+**释放条件变量，唤醒所有等待线程：**
+
+``` c
+int pthread_cond_broadcast(pthread_cond_t *cond);
+```
+
+### 消费者固定模板
+
+``` c
+void *worker(void *arg) {
+    while (1) {  // 外层循环：线程持续工作
+        
+        pthread_mutex_lock(&mutex);
+        // 内层循环：防虚假唤醒，确保条件满足才跳出
+        while ( 条件不满足(指不满足可以进行处理任务的条件，比如：队列空 && !关闭标志) ) {
+            pthread_cond_wait(&cond, &mutex);
+        }
+
+        // 处理任务
+        取任务();
+        pthread_mutex_unlock(&mutex);
+        执行任务(); 
+    }
+    return NULL;
+}
+```
+
+
+### 适用场景
+
+> **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
+>
+> - 条件能简化为 `count > 0` → 用 `sem_t`进行同步（二值信号量的计数值本身就是条件，且本身具有线程安全性）
+>
+> - 条件依赖多变量、逻辑组合（这些变量不具有线程安全性，需要对这些变量的访问进行加锁，而**解锁和等待信号之间会存在一个窗口**）：
+>
+>   ``` c++
+>   pthread_mutex_t mutex;
+>   
+>   void *worker(void *arg) {
+>       while (1) {
+>           pthread_mutex_lock(&mutex);
+>           if (!queue_empty(&task_queue) || shutdown_requested) {
+>               // 条件满足，处理...
+>               pthread_mutex_unlock(&mutex);
+>           } else {
+>               pthread_mutex_unlock(&mutex);  // ❌ 解锁
+>               
+>               sem_wait(&cond_sem);           // 等待信号 —— 危险！
+>           }
+>       }
+>   }
+>   ```
+>
+> - 需广播或优雅退出 → **必须用 `pthread_mutex_t` + `pthread_cond_t`**
+>
 > - 理论上信号量可以替代条件变量，但实践中代价高昂且容易出错；条件变量之所以依然存在，是因为它在语义匹配、安全性、可维护性和性能上针对“多条件等待”场景做了专门优化。
 
 **最根本的原因**：信号量无法实现 "检查条件 + 等待" 的原子操作，信号量的`sem_wait`和条件检查是两个完全独立的操作，中间存在不可消除的竞态窗口（如果需要消除则要使用互斥锁，完全违背“信号量无需锁”的直觉）；信号量无法实现广播；信号量由于有记忆性消费的可能为历史信号，而条件变量的原子性保证了**线程阻塞的瞬间，一定已经错过了之前的所有 `signal`，只会响应未来的 `signal`**。
 
-#### 竞态窗口(原子性)
+#### 条件依赖多变量、逻辑组合
 
-如果条件有一次性信号比如`is_shutdown`，由于竞态窗口的存在这个线程会卡死在`sem_wait(&sem);`，无法检测到这个条件的变化，将永远阻塞在这里。
+条件依赖多变量、逻辑组合（这些变量不具有线程安全性，需要对这些变量的访问进行加锁，而**解锁和等待信号之间会存在一个窗口**）：
 
 ``` c
 // 线程A
 pthread_mutex_lock(&mutex);
-while (条件不满足) {
+if (组合条件不满足) {
+    
     pthread_mutex_unlock(&mutex); // 先释放锁
     
-    /* 会产生竞态窗口 */
+    /* 产生竞态窗口 */
     
     sem_wait(&sem);               // 再等待信号量
 }
 ```
 
-#### 令牌残留(记忆性)
+---
 
-- 消费者 2 被**历史信号**骗醒了一次，执行了无意义的 `unlock/lock` 循环。在高频场景下，这会引发 **CPU 空转 + 锁竞争风暴**。
-- 更严重的是：`sem` 的计数已经与**真实可用数据量**脱节。如果后续有多个消费者交替到达，信号量的“令牌池”会持续失衡，最终导致**部分消费者永久饥饿**。
-
-| 步骤 | 线程       | 操作                                                         | `state`     | `sem` | 说明                                  |
-| :--- | :--------- | :----------------------------------------------------------- | :---------- | :---- | :------------------------------------ |
-| 初始 | -          | 初始化                                                       | `EMPTY`     | `0`   | -                                     |
-| 1    | Producer A | `lock → state=NOT_EMPTY → sem_post → unlock`                 | `NOT_EMPTY` | `1`   | 发送了1个唤醒令牌                     |
-| 2    | Consumer 1 | `lock → 检查 while(EMPTY) 为假 → **跳过 sem_wait** → 消费 → state=EMPTY → unlock` | `EMPTY`     | `1`   | **根本没调用 `sem_wait`，令牌未消耗** |
-| 3    | Consumer 2 | `lock → while(EMPTY) 为真 → unlock → sem_wait`               | `EMPTY`     | `0`   | 发现 `sem=1`，**立即返回**（未阻塞）  |
-| 4    | Consumer 2 | 重新 `lock → while(EMPTY) 仍为真 → unlock → sem_wait`        | `EMPTY`     | `0`   | 此时 `sem=0`，**真正阻塞**            |
-
-如果为了消除竞态窗口则会导致死锁：
-
-``` c
-// 线程A
-pthread_mutex_lock(&mutex);
-while (条件不满足) {
-    // 先P操作（等待信号量），再释放锁
-    sem_wait(&sem);     // 如果sem为0，线程A阻塞在这里
-    pthread_mutex_unlock(&mutex); // 线程A被阻塞，根本执行不到这一行！
-}
-// 执行临界区代码
-pthread_mutex_unlock(&mutex);
-```
-
-**死锁产生的过程：**
-
-1. 线程A获取了互斥锁 `mutex`。
-2. 线程A发现条件不满足，准备等待。它执行了 `sem_wait(&sem)`。
-3. 由于此时信号量的值为0，**线程A被阻塞，并带着互斥锁 `mutex` 进入了睡眠状态**。
-4. 此时，线程B（负责改变条件并发送信号的线程）登场。线程B需要修改共享变量使条件成立，然后执行 `sem_post(&sem)` 唤醒线程A。
-5. 但是！线程B在修改共享变量前，必须先获取互斥锁 `mutex`（`pthread_mutex_lock(&mutex)`）。
-6. 而互斥锁 `mutex` 正被沉睡的线程A死死捏在手里。
-7. **结果：线程A拿着锁等信号，线程B发信号需要锁，双方互相等待，形成死锁。**
+**POSIX 标准规定**：`sem_wait` 只操作内部计数器，不关联任何 mutex。使用信号量来替代则必须手动拆分“解锁→等待→加锁”，这必然留下时间窗口。而 `pthread_cond_wait` 在内核态用 `futex` 保证这三步是原子事务：`pthread_cond_wait` 与互斥锁的解锁**原子绑定**，它能保证：当我因条件不满足而睡眠时，**我先释放锁**（允许生产者进入），醒来时**我立刻重新持有锁**。
 
 ---
 
-条件变量实现：**条件变量的绝妙之处就在于它把“释放锁”和“进入等待”合并成了一个原子操作。**
+> 为什么必须先解锁再获取信号量？
 
-``` c
-// 正确实现：条件变量+互斥锁
-bool task_ready = false;
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+如果不释放锁就直接等待信号量，就会立即死锁。原因很简单：
 
+- **信号量（`sem_t`）本身与互斥锁没有任何关联。**
+  调用 `sem_wait` 时，它只会对信号量的内部计数器减一，如果计数器为 0 就阻塞当前线程。**它完全不知道、也不会去释放你持有的其他锁。**
+- **互斥锁是“谁加锁，谁解锁”。**
+  如果你在持有 `mutex` 的情况下因为 `sem_wait` 而阻塞，那么锁就永远攥在你手里，其他线程永远不可能获取到同一个 `mutex` 来修改共享条件并执行 `sem_post` 唤醒你。
 
-void consumer_thread() {
-    pthread_mutex_lock(&mutex);
-    while (!task_ready) {
-        // ✅ 原子操作：释放mutex + 进入等待状态
-        // 被唤醒后自动重新获取mutex，然后重新检查条件
-        pthread_cond_wait(&cond, &mutex);
-    }
-    pthread_mutex_unlock(&mutex);
-    process_task();
-}
+这样就形成了一个死循环：
 
-
-void producer_thread() {
-    pthread_mutex_lock(&mutex);
-    task_ready = true;
-    pthread_cond_signal(&cond);
-    pthread_mutex_unlock(&mutex);
-}
-```
+1. 线程 A 加锁，检查条件不成立。
+2. 线程 A 调用 `sem_wait` 阻塞，但锁仍然被 A 持有。
+3. 生产者线程 B 想要修改条件并 `sem_post`，但它首先需要获取同一把锁。
+4. B 永远拿不到锁，A 永远等不到 `post`。死锁。
 
 #### 线程池销毁(广播)
 
-**`post(1)` 无法实现 `broadcast`**：线程池中有多个工作线程阻塞等待任务，当线程池需要关闭（shutdown）时，主线程必须一次性唤醒所有等待的工作线程，让它们检测到退出标志并安全终止。
+**`post(1)` 无法实现 `broadcast`**：线程池中有多个工作线程阻塞等待任务，当线程池需要关闭（`shutdown`）时，主线程必须一次性唤醒所有等待的工作线程，让它们检测到退出标志并安全终止。
 
 如果使用信号量，主线程无法通过一次操作唤醒所有线程；若循环执行`sem_post`，则需要精确知道等待线程的数量，且在多线程动态入队出队的过程中极易出错。同时，线程退出逻辑通常依赖复杂的共享状态（如`shutdown`标志），信号量无法表达这种布尔状态。
 
@@ -2260,34 +2218,7 @@ void threadpool_shutdown(ThreadPool* pool) {
 }
 ```
 
-
-
-**缺陷1：竞态窗口导致“信号丢失”(Lost Wakeup)**
-
-``` c
-void* worker_sem(void* arg) {
-    
-    pthread_mutex_lock(&mtx);
-    /* 没有任务或者收到暂停信号 */
-    if (task_count == 0 || !is_running) {
-        /* 等待之前必须先解锁，不然会死锁 */
-        pthread_mutex_unlock(&mtx); 
-        
-        // ⚡ 竞态窗口！此时主线程调用 sem_post(&sem)
-        
-        sem_wait(&sem); 
-        pthread_mutex_lock(&mtx);
-    }
-    task_count--;
-    pthread_mutex_unlock(&mtx);
-    return NULL;
-}
-
-```
-
-**POSIX 标准规定**：`sem_wait` 只操作内部计数器，不关联任何 mutex。你必须手动拆分“解锁→等待→加锁”，这必然留下时间窗口。而 `pthread_cond_wait` 在内核态用 `futex` 保证这三步是原子事务：`pthread_cond_wait` 与互斥锁**原子绑定**，它能保证：当我因条件不满足而睡眠时，**我先释放锁**（允许生产者进入），醒来时**我立刻重新持有锁**。这种“检查状态 -> 释放锁并睡眠 -> 醒来持有锁再检查”的原子性环路是条件变量独有的，它能完美处理虚假唤醒和多消费者竞争下的状态一致性。
-
-**缺陷3：计数器污染（State Drift）**
+**计数器污染（State Drift）**
 
 假设你硬编码 `sem_post(&sem)` 唤醒 5 次。5 个线程醒来，但其中 3 个发现 `is_running` 又被改为 `false`，必须继续等。此时信号量计数器已变为 `0`。 下次真正 `resume` 时，你只能 `post(1)`，但实际有 3 个线程在等！**内部计数器与外部业务状态彻底脱节**，必须引入额外的状态机同步，代码复杂度指数上升。
 
@@ -2326,141 +2257,6 @@ void resume_all_cv(void) {
     pthread_cond_broadcast(&cv); // 唤醒所有等待者
     pthread_mutex_unlock(&mtx);
 }
-
-```
-
-## 线程安全队列
-
-**普通队列**：先进先出的容器（比如排队买票），单线程用（一个人放数据、一个人拿数据）完全没问题。
-
-**线程安全队列**：给多线程专用的队列，自带**并发保护锁**，✅ **空队列时消费者会等待，满队列时生产者会等待**。
-
-核心原理：加了**互斥锁**（同一时间只允许一个线程操作队列）+**条件变量**（阻塞 / 唤醒线程），从根源杜绝并发冲突。
-
----
-
-如果用**普通队列**，多线程并发操作会触发**竞态条件**（并发编程最恶心的随机 bug）：
-
-例：两个线程同时往空队列写数据，都判断「队列是空的」，然后同时写入 → 直接覆盖一个数据，数据永久丢失！
-
----
-
-### CPP实现
-
-C++中有同步队列，标准库进行了封装。
-
-关键点：
-
-- 利用 **RAII（资源获取即初始化）** 机制，自动完成互斥锁的**加锁**和**解锁**，彻底避免手动锁导致的死锁风险：
-
-  `std::lock_guard`：C++ 标准库提供的**锁守卫模板类**，专门用于**自动管理互斥锁的生命周期**。
-
-  `<std::mutex>`：模板参数，指定要管理的**锁类型**为**标准互斥锁**（`std::mutex` 是 C++ 最基础的独占式互斥锁）。
-
-  `std::lock_guard<std::mutex>  lock(mutex_);`
-
-  ``` c++
-  std::mutex mutex_;
-  
-  void func() {
-      mutex_.lock(); // 手动加锁
-      // 临界区代码（多线程竞争的共享资源）
-      if (条件) return; // 提前返回！unlock 没执行 → 锁永久占用 → 死锁
-      mutex_.unlock(); // 手动解锁
-  }
-  ```
-
-  **优点：**避免一旦临界区抛异常、提前返回，`unlock()` 永远不会执行，导致死锁。
-
-源码实现：
-
-
-``` c++
-#pragma once
-
-#include <queue>  // c++标准普通队列
-#include <mutex>  // 互斥锁：实现线程互斥访问
-#include <condition_variable>  // 条件变量：实现线程等待/唤醒
-#include <chrono>  // 时间库
-
-namespace myactua {
-
-/* 线程安全队列 */
-template<typename T>
-class ThreadSafeQueue {
-public:
-    ThreadSafeQueue() = default;
-    ~ThreadSafeQueue() = default;
-
-    void push(const T &value) {
-        /* 自动加锁：lock_guard 构造时加锁，离开作用域自动解锁 */
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(value);
-        /* 唤醒一个正在等待数据的线程（比如pop阻塞的线程） */
-        cond_.notify_one();
-    }
-	
-    /* ====================== 入队：右值版本（移动传参，效率更高）====================== */
-    /* 作用：塞临时数据/可移动对象，避免拷贝，提升性能 */
-    void push(T &&value) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(std::move(value));
-        cond_.notify_one();
-    }
-	
-    /* ====================== 出队（核心函数！支持超时/非阻塞/阻塞）====================== */
-    // 参数：value 用来接收出队的数据；timeout_ms 超时时间(毫秒)
-    // 返回值：true=成功出队，false=超时/空队列
-    bool pop(T &value, int timeout_ms = -1) {
-        //  unique_lock：灵活锁！支持条件变量 等待/解锁/重新加锁; 不能用 lock_guard，因为 wait 会自动释放锁
-        std::unique_lock<std::mutex> lock(mutex_);
-        // ---------- 分支1：超时等待（timeout>0）----------
-        if (timeout_ms > 0) {
-            if (!cond_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                               [this] { return !queue_.empty(); })) {
-                return false;
-            }
-        } 
-        // ---------- 分支2：非阻塞（timeout=0）----------
-        else if (timeout_ms == 0) {
-            if (queue_.empty()) {
-                return false;
-            }
-        }
-        // ---------- 分支3：永久阻塞（timeout=-1，默认值）----------
-        else {
-            // 一直等待，直到队列不为空（线程挂起，不占CPU）
-            cond_.wait(lock, [this] { return !queue_.empty(); });
-        }
-        // 走到这里：队列一定有数据！移动赋值：高效取出数据，避免拷贝
-        value = std::move(queue_.front());
-        queue_.pop();
-        return true;
-    }
-
-    bool empty() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.empty();
-    }
-
-    size_t size() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::queue<T> empty;
-        std::swap(queue_, empty);
-    }
-
-private:
-    mutable std::queue<T> queue_;
-    mutable std::mutex mutex_;
-    std::condition_variable cond_;
-};
-
-} // namespace myactua
 
 ```
 

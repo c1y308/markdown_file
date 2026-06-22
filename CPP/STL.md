@@ -1472,7 +1472,7 @@ vector 支持**随机访问**，效率 O (1)：
 
 ### 增删改
 
-#### 尾部
+#### 尾部（增加）
 
 | 函数                   | 作用                                     |
 | ---------------------- | ---------------------------------------- |
@@ -1500,16 +1500,64 @@ vector 支持**随机访问**，效率 O (1)：
 | `v.assign(n, val)`      | 赋值 n 个 val，覆盖原有元素         | O(n)                |
 | `v.assign(beg, end)`    | 用迭代器区间赋值                    | O(n)                |
 
-示例：
+**示例**：
 
 ``` c++
 vector<int> v{1,2,3};
-v.push_back(4);     	  // {1,2,3,4}
-v.pop_back();       	  // {1,2,3}
-v.insert(v.begin()+1, 9); // {1,9,2,3}
-v.erase(v.begin());  	  // {9,2,3}
-v.clear();                // 空
+v.push_back(4);     	  	// {1,2,3,4}
+v.pop_back();       	  	// {1,2,3}
+v.insert(v.begin() + 1, 9); // {1,9,2,3}
+v.erase(v.begin());  	  	// {9,2,3}
+v.clear();                	// 空
 ```
+
+#### 删除指定下标的多个元素
+
+``` c++
+#include <vector>
+#include <algorithm>
+
+/**
+ * @brief 删除 vector 中指定下标的多个元素
+ * @param vec 目标 vector（引用传递，直接修改原对象）
+ * @param indices 待删除的下标列表（支持乱序、重复）
+ */
+template <typename T>
+void erase_by_indices(std::vector<T>& vec, const std::vector<size_t>& indices)
+{
+    // 1. 复制下标列表，避免修改外部传入的原数据
+    std::vector<size_t> sorted_idx = indices;
+
+    // 2. 排序 + 去重，排除重复下标
+    std::sort(sorted_idx.begin(), sorted_idx.end());
+    /* unique 函数只做元素重排，不重复的元素移到容器前部，标记出去重后的边界(传入的区间必须是已排序的) */
+    auto dup_end = std::unique(sorted_idx.begin(), sorted_idx.end());
+    sorted_idx.erase(dup_end, sorted_idx.end());
+
+    // 3. 从后往前（降序）遍历删除，核心：删后面的元素不会影响前面的下标
+    for (auto it = sorted_idx.rbegin(); it != sorted_idx.rend(); ++it)
+    {
+        const size_t pos = *it;
+        // 边界检查：下标合法才执行删除，越界直接跳过
+        if (pos < vec.size())
+        {
+            vec.erase(vec.begin() + pos);
+        }
+    }
+}
+```
+
+**为什么必须降序删除**
+
+vector 是**连续内存结构**，删除第 `i` 个元素后，`i` 之后所有元素的下标都会自动减 1。如果从小到大删除，删完前面的元素，后续的下标就全部错位了，会删错位置。**从后往前删时，被删元素前面的下标不受影响，逻辑绝对安全**。
+
+**排序与去重的作用**
+
+输入的下标可能是乱序、重复的，排序后才能方便地逆序遍历；去重可以避免重复删除同一下标导致的逻辑错误或越界。
+
+**边界检查**
+
+所有下标都会校验 `pos < vec.size()`，非法下标直接跳过，避免触发未定义行为导致程序崩溃。
 
 ## 常见问题
 
