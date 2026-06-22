@@ -643,14 +643,16 @@ clean:
 
 Linux 系统执行`gcc`命令时，会按以下优先级找编译器：
 
-1. 若设置了`CC`环境变量 → 优先用`$CC`指定的编译器（比如`CC=arm-buildroot-linux-gnueabihf-gcc`）；
+1. 若设置了**`CC`环境变量** → 优先用`$CC`指定的编译器（比如`CC=arm-buildroot-linux-gnueabihf-gcc`）；
 2. 若未设置`CC` → **按`PATH`环境变量的目录顺序**，找第一个名为`gcc`的可执行文件；
 3. 若`PATH`中无`gcc` → 检查系统`/usr/bin/gcc`软链接（默认指向原生 gcc，若被篡改则指向 ARM 编译器）。
 
 ``` makefile
 $@  # 表示当前规则的目标名
+
 $<  # 第一个依赖文件
 $^  # 所有的依赖
+
 %   # 通配符表示
 $() # 引用变量
 
@@ -685,66 +687,6 @@ B = $(foreach f, $(A), f.o)
 
 C = $(filter %.o, $(B))      # 从变量中的值取出符合要求格式的值
 D = $(filter-out %.o, $(B))  # 从变量中的值取出不符合要求格式的值
-```
-
-# Cmake
-
-CMake 只做两件事：编译**库**（`add_library`）、编译**可执行文件**（`add_executable`）；
-
-**两个关键路径**
-
-- 头文件路径：`target_include_directories`（编译器找头文件）；
-- 库文件路径：`link_directories`（链接器找库）；
-
-**构建顺序**
-
-先编译自定义库 → 再编译可执行文件 → 可执行文件链接库；
-
-## 实例
-
-``` cmake
-cmake_minimum_required(VERSION 3.8)
-project(MYACTUA_EtherCat)  # 仅标识工程，不参与编译、链接、头文件配置
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# 1. 自定义变量
-set(IGH_PATH /home/cat/ethercat)
-
-# 2. 全局库路径
-link_directories(
-    ${IGH_PATH}/lib
-    /opt/etherlab/lib
-)
-
-# 3. 用.cpp文件创建目标库
-add_library(MYACTUA_EtherCat
-    src/motor_control.cpp
-    src/CiA402.cpp
-    src/EthercatAdapterIGH.cpp
-)
-# 4. 给目标库配置头文件路径
-target_include_directories(MYACTUA_EtherCat PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${IGH_PATH}/include
-    /opt/etherlab/include
-)
-
-# 5. 给目标库链接依赖库
-target_link_libraries(MYACTUA_EtherCat
-    ethercat
-    pthread
-    rt
-)
-
-# 6. 编译可执行文件
-add_executable(simple_test examples/simple_test.cpp)
-add_executable(debug_tool  examples/debug_tool.cpp)
-
-# 7. 可执行文件链接库
-target_link_libraries(simple_test MYACTUA_EtherCat)
-target_link_libraries(debug_tool  MYACTUA_EtherCat)
 ```
 
 # 虚拟文件系统

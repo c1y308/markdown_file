@@ -240,7 +240,7 @@ cmake -B build -DENABLE_TSAN=ON
 - -fno-omit-frame-pointer ：保留栈帧指针，让错误报告中的调用栈更完整
 - add_link_options() ：CMake 3.13+ 引入，为链接阶段添加选项。ASan/TSan 在链接阶段也 必须 传入相同的 -fsanitize= 标志，因为它们需要链接对应的运行时库
 
-### CTest与子目录
+### 添加子目录
 
 ``` cmake
 enable_testing()
@@ -273,9 +273,9 @@ CMake 项目组织的核心命令。工作原理：
 
 ### 构建库
 
-先处理 base/ → 定义 RCom_base 这个 INTERFACE 库：
+先处理 base/ → 定义 `RCom_base` 这个` INTERFACE` 库：
 
-1.使用`add_library`命令来声明一个库目标，告诉 CMake 需要构建什么类型的库以及由哪些**源文件**组成。
+使用`add_library`命令来声明一个库目标，告诉 CMake 需要构建什么类型的库以及由哪些**源文件**组成。
 
 ``` cmake
 add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
@@ -283,7 +283,7 @@ add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
             [source1] [source2 ...])
 ```
 
-**库类型**
+#### 库类型
 
 | 类型          | 说明                                                         |
 | :------------ | :----------------------------------------------------------- |
@@ -295,7 +295,9 @@ add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
 
 ---
 
-2.`target_include_directories` —— **指定头文件搜索路径**
+#### 添加头文件目录
+
+`target_include_directories` —— **指定头文件搜索路径**
 
 这个命令用于为指定的目标添加头文件包含目录。它可以精确控制这些路径的传播范围，是现代 CMake 中替代全局 `include_directories` 的推荐方式。
 
@@ -308,16 +310,25 @@ target_include_directories(<target>
 - `<target>`：必须是由 `add_library` 或 `add_executable` 创建的目标。
 - 路径项通常是绝对路径或相对路径（相对于当前 `CMakeLists.txt`），常用 `CMAKE_CURRENT_SOURCE_DIR` 来构造。
 
-**传播控制关键字的含义**：这是整个命令的精华，用来管理依赖关系中的包含路径传递：
+#### 传播控制关键字
 
-- **PRIVATE**
-  包含目录只对 `<target>` 自身的编译有效，不会传递给依赖它的其他目标。
+是整个命令的精华，用来管理依赖关系中的包含路径传递：
+
+- `PRIVATE`：
+
+  包含目录只对 `<target>` 库自身的编译有效，不会传递给依赖它的其他目标。当一个库的源文件需要某头文件、某编译选项或某依赖库，但这些需求**完全不出现在对外接口**中时，就应该用 `PRIVATE`。
+
   适用于：**库内部使用的头文件，不暴露给使用者**。
-- **INTERFACE**
-  包含目录不会用于 `<target>` 自己的编译，但会传递给所有直接链接了该目标的其他目标。适用于：header-only 库（`INTERFACE` 库）或者提供纯接口依赖的场景。
-- **PUBLIC**
+
+- `INTERFACE`：
+  包含目录不会用于 `<target>`库自己的编译，但会**传递**给所有直接链接了该目标的其他目标。
+  
+  适用于：header-only 库（因为 `header_only` 不编译任何源文件，所以它自身不需要 `include/`，但任何链接它的目标都需要这个路径才能找到头文件）或者**提供纯接口依赖**的场景。
+  
+- `PUBLIC`：
   同时具有 `PRIVATE` 和 `INTERFACE` 的效果：既用于自己的编译，也传递给依赖者。
-  适用于：库的公共头文件目录，库自身和外部使用者都需要。
+  
+  适用于：库的公共头文件目录，**库自身和外部使用者都需要**。
 
 假设库的结构如下：
 
