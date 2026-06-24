@@ -53,9 +53,7 @@ int main(int argc, char **argv) {
 
 > **💡 小技巧**：在断言宏后添加 `<< "自定义错误信息"` 可输出诊断信息，方便定位失败原因。
 
-### 测试夹具
-
-#### 用途
+## 测试夹具
 
 当多个测试用例需要**相同的初始化或清理代码**时，如：
 
@@ -76,9 +74,7 @@ TEST(QueueTest, PushPop) {
 
 它利用类来管理共享资源（**不是共享同一个对象实例**，而是多个测试用例**共享同一套初始化和清理逻辑**，以及**共享相同的成员变量定义**），每个测试独立运行，互不干扰。
 
----
-
-#### 定义夹具类
+### 定义夹具类
 
 1. 定义一个公有继承自 `::testing::Test` 的类。
 2. 将测试共用的**成员变量**和**初始化/清理方法**放在 `protected` 区。
@@ -111,11 +107,9 @@ protected:
 
 > **🔑 关键区别**：`TEST` 宏用于独立测试，不共享环境，简单直接。`TEST_F` 宏用于基于夹具的测试，共享配置资源，能大幅减少重复代码。
 
----
+### 创建夹具类实例
 
-#### `TEST_F`
-
-第一个参数必须是**夹具类的名字**，GTest 会自动为你创建夹具实例。
+通过`TEST_F(夹具类名, 测试用例名)`，第一个参数必须是**夹具类的名字**，GTest 会自动创建夹具类的实例。
 
 ``` c++
 TEST_F(QueueTest, IsEmptyInitially) {
@@ -141,7 +135,7 @@ TEST_F(QueueTest, MultipleElements) {
 
 ## 项目入口
 
-### 最低版本声明与项目定义
+### 最低Cmake版本声明与项目定义
 
 ``` cmake
 cmake_minimum_required(VERSION 3.14)
@@ -273,6 +267,8 @@ CMake 项目组织的核心命令。工作原理：
 
 ### 构建库
 
+#### 给库添加源文件
+
 先处理 base/ → 定义 `RCom_base` 这个` INTERFACE` 库：
 
 使用`add_library`命令来声明一个库目标，告诉 CMake 需要构建什么类型的库以及由哪些**源文件**组成。
@@ -303,12 +299,12 @@ add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
 
 ```cmake
 target_include_directories(<target>
-    <INTERFACE|PUBLIC|PRIVATE> [items1...]
-    <INTERFACE|PUBLIC|PRIVATE> [items2...] ...)
+    <INTERFACE|PUBLIC|PRIVATE> [头文件路径]
+    <INTERFACE|PUBLIC|PRIVATE> [头文件路径] ...)
 ```
 
 - `<target>`：必须是由 `add_library` 或 `add_executable` 创建的目标。
-- 路径项通常是绝对路径或相对路径（相对于当前 `CMakeLists.txt`），常用 `CMAKE_CURRENT_SOURCE_DIR` 来构造。
+- **路径**项通常是绝对路径或相对路径（相对于当前 `CMakeLists.txt`），常用 `CMAKE_CURRENT_SOURCE_DIR` 来构造。
 
 #### 传播控制关键字
 
@@ -382,33 +378,9 @@ add_library(RCom_base INTERFACE)
 target_include_directories(RCom_base INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 ```
 
-### 外部依赖
-
-``` cmake
-include(FetchContent)
-FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG        v1.14.0
-)
-FetchContent_MakeAvailable(googletest)
-```
-
-**FetchContent** 是 CMake 3.11 引入的模块，在 configure 阶段自动下载外部依赖。与 ExternalProject 相比， FetchContent 在 configure 阶段 完成下载，使得依赖的 target 在当前项目中 直接可用 （ ExternalProject 则在 build 阶段下载，需要额外的集成手段）。
-
-三步工作流：
-
-1. `include(FetchContent)` — 加载模块
-
-2. `FetchContent_Declare(...)` — 声明资源（但不下载）
-
-3. `FetchContent_MakeAvailable(...) `— 下载、配置、使 target 可用
-
-下载后，你可以直接链接 gtest_main （这是 Google Test 自带的带 main 函数的库），无需手动写 main() 。
-
 ### 链接库 / 生成可执行文件
 
-再处理 base_test/ → 使用 RCom_base 库链接测试。
+#### `add_executable`命令
 
 ``` c++
 add_executable(unbounded_queue_test
@@ -421,8 +393,10 @@ target_link_libraries(unbounded_queue_test PRIVATE  // PRIVATE 表示不对外�
 add_test(NAME unbounded_queue_test COMMAND unbounded_queue_test)  // 向CTest注册测试
 																  // NAME是名称，COMMAND 是要运行的可执行文件
 add_executable(macros_test
-    macros_test.cpp
+    		   macros_test.cpp
 )
+    
+    
 target_link_libraries(macros_test PRIVATE
     RCom_base
     gtest_main
@@ -430,6 +404,34 @@ target_link_libraries(macros_test PRIVATE
 add_test(NAME macros_test COMMAND macros_test)
 
 ```
+
+#### 生成的可执行文件位置
+
+`add_executable()` 在哪个子目录的 `CMakeLists.txt` 里执行，可执行文件就生成到**执行`cmake ..`的 build 文件夹中对应子目录里**。
+
+### 外部依赖
+
+``` cmake
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0
+)
+FetchContent_MakeAvailable(googletest)
+```
+
+**FetchContent** 是 CMake 3.11 引入的模块，在 configure 阶段自动下载外部依赖。
+
+三步工作流：
+
+1. `include(FetchContent)` — 加载模块
+
+2. `FetchContent_Declare(...)` — 声明资源（但不下载）
+
+3. `FetchContent_MakeAvailable(...) `— 下载、配置、使 target 可用
+
+下载后，可以直接链接 `gtest_main` （这是 Google Test 自带的带 main 函数的库），**无需手动写 `main() `**。
 
 ### target 命令族
 

@@ -1451,11 +1451,14 @@ auto it = std::find(v.begin(), v.end(), target);
 | 函数                | 作用                                 | 时间复杂度 |
 | ------------------- | ------------------------------------ | ---------- |
 | `v.size()`          | 获取实际元素个数                     | O(1)       |
-| `v.capacity()`      | 获取当前总容量                       | O(1)       |
-| `v.empty()`         | 判断是否为空（size=0）               | O(1)       |
 | `v.resize(n)`       | 调整**元素个数**为 n，多删少补默认值 | O(n)       |
-| `v.resize(n, val)`  | 调整大小为 n，新增元素值为 val       | O(n)       |
+| `v.resize(n, val)`  | 调整元素个数为 n，新增元素值为 val   | O(n)       |
+| `v.max_size()`      | 理论上能容纳的最大**元素个数**       |            |
+|                     |                                      |            |
+| `v.empty()`         | 判断是否为空（size=0）               | O(1)       |
+|                     |                                      |            |
 | `v.reserve(n)`      | 预分配**容量**为 n，不改变 size      | O(n)       |
+| `v.capacity()`      | 当前已分配内存可容纳元素数           | O(1)       |
 | `v.shrink_to_fit()` | 释放多余容量，capacity=size          | O(n)       |
 
 ### 访问
