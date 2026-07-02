@@ -267,9 +267,9 @@ CMake 项目组织的核心命令。工作原理：
 
 ### 构建库
 
-#### 给库添加源文件
+#### 创建库并添加源文件
 
-先处理 base/ → 定义 `RCom_base` 这个` INTERFACE` 库：
+先处理 `base/` → 定义 `RCom_base` 这个` INTERFACE` 库：
 
 使用`add_library`命令来声明一个库目标，告诉 CMake 需要构建什么类型的库以及由哪些**源文件**组成。
 
@@ -291,7 +291,7 @@ add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
 
 ---
 
-#### 添加头文件目录
+#### 添加头文件搜索路径
 
 `target_include_directories` —— **指定头文件搜索路径**
 
@@ -314,7 +314,7 @@ target_include_directories(<target>
 
   包含目录只对 `<target>` 库自身的编译有效，不会传递给依赖它的其他目标。当一个库的源文件需要某头文件、某编译选项或某依赖库，但这些需求**完全不出现在对外接口**中时，就应该用 `PRIVATE`。
 
-  适用于：**库内部使用的头文件，不暴露给使用者**。
+  适用于：**库内部使用头文件，不暴露给使用者（极少情况）**。
 
 - `INTERFACE`：
   包含目录不会用于 `<target>`库自己的编译，但会**传递**给所有直接链接了该目标的其他目标。
@@ -325,6 +325,8 @@ target_include_directories(<target>
   同时具有 `PRIVATE` 和 `INTERFACE` 的效果：既用于自己的编译，也传递给依赖者。
   
   适用于：库的公共头文件目录，**库自身和外部使用者都需要**。
+
+---
 
 假设库的结构如下：
 
@@ -361,6 +363,7 @@ target_link_libraries(app PRIVATE my_lib)
 
 - `app` 会自动获得 `include/` 目录作为包含路径，从而能 `#include "my_lib/api.h"`。
 - 但 `app` **不会**获得 `src/` 目录，因此无法包含 `internal.h`，实现了良好的封装。
+- 比如`a.hpp`在库A的搜索路径中但是`target_include_directories`时是`private`属性，`b.cpp`链接了库A，但是include了`a.hpp`，会编译报错。
 
 对于 `header-only` 库（`INTERFACE` 库）：
 
@@ -374,19 +377,98 @@ target_include_directories(my_header_lib INTERFACE include/)
 如果不显式指定类型，默认行为由全局变量 `BUILD_SHARED_LIBS` 决定：`ON` 时生成动态库，`OFF` 时生成静态库。
 
 ``` cmake
-add_library(RCom_base INTERFACE)
+add_library(RCom_base INTERFACE)0
 target_include_directories(RCom_base INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 ```
 
 ### 链接库 / 生成可执行文件
 
-#### `add_executable`命令
+#### 链接库
+
+以 `target_link_libraries(libB XXX libA)` 为例，即「目标 libB 通过 XXX 权限链接目标 libA」，逐层拆解。
+
+---
+
+`PRIVATE`：私有依赖，仅自身使用
+
+- **对 libB 自身**：libB 编译、链接时都会使用 libA，能访问 libA 所有公开的头文件、函数、符号。
+- 对下游目标（比如链接 libB 的 app）：完全感知不到 libA 的存在。
+  - **不会自动继承 libA 的头文件搜索路径。**
+  - **不会自动链接 libA。**
+  - 不会继承 libA 的任何编译选项、宏定义等属性。
+
+**适用场景**：libA 只在 libB 的内部实现（.cpp 文件）中使用，libB 的公开头文件（.h）里完全不涉及 libA 的类型、函数、宏。
+
+> 典型例子：你的库内部用 spdlog 写日志，但对外头文件里没有任何 spdlog 相关的代码。
+
+`PUBLIC`：公开依赖，自身用且向下传递
+
+- **对 libB 自身**：和 PRIVATE 一样，完整使用 libA。
+- 对下游目标 app：完整继承 libA 的**所有公开属性（如果库本身的`target_include_directories`为`private`则无法继承）**。
+  - 自动获得 libA 的头文件搜索路径（不用再写 `target_include_directories`）
+  - 自动链接 libA（不用再写 `target_link_libraries(app libA)`）
+  - 自动继承 libA 的编译选项、宏定义、甚至 libA 自己的 PUBLIC 依赖（传递闭包）
+
+**适用场景**：libB 的公开头文件里用到了 libA 的内容（比如函数参数、类成员、宏定义、类型别名）。如果此时不用 PUBLIC，下游编译 libB 的头文件时会直接报错「找不到头文件」「未定义的类型」。
+
+> 典型例子：你的库头文件里用 Eigen 矩阵作为函数参数，下游调用你的函数必须认识 Eigen 类型。
+
+`INTERFACE`：接口依赖，自身不用、只传给下游
+
+- **对 libB 自身**：libB 自己不会链接 libA，编译时也不会使用 libA 的头文件。
+- **对下游目标 app**：和 PUBLIC 一样，完整继承 libA 的所有属性。
+
+**适用场景**：纯头文件库（Header-only Library）：自身没有 .cpp 实现，不需要编译链接，只用来向下游打包传递一组依赖。
+
+#### 动态库与静态库
+
+> 我有个困惑点，比如a链接了liba，但是liba依赖libb，a要使用liba的话肯定有libb参与啊？为什么说a就不需要链接libb了？
+
+这个困惑非常典型，核心是混淆了两个概念：**「最终链接/运行时 libb 必须存在」**和**「CMake 会不会自动帮你把 libb 加到 a 的链接列表里」**。 你的直觉是对的——只要 liba 调用了 libb 的代码，那最终生成可执行文件时，libb 的符号肯定要参与。
+
+但 `PRIVATE` 的意思不是「libb 消失了」，而是**「这个依赖是 liba 的内部私事，CMake 不会自动把它透传给下游 a」**。 至于下游 a 到底要不要手动写 `target_link_libraries(a libb)`，完全取决于 liba 是**共享库**还是**静态库**，两者天差地别。
+
+---
+
+共享库（SHARED）：PRIVATE 真的能彻底隐藏，a 完全不用管 这是最符合「a 不需要链接 libb」说法的场景，也是 CMake 设计的初衷。共享库（`.so`/`.dll`/`.dylib`）是**完整的链接产物：构建 liba 的时候，链接器已经完成了 liba 和 libb 的完整符号解析**。
+
+> 动态库自己是 “成品”，可以选择把依赖合并进自己内部。
+
+- 如果 libb 也是共享库：liba 的动态库文件里会记录「我依赖 libb」，但这个依赖是 liba 的内部信息。
+
+- 如果 libb 是静态库：libb 的代码会被直接打包进 liba 的动态库内部，对外完全不可见，**如果liba 是 PUBLIC 链接 libb 则会发生错误！（两份链接），必须用 PRIVATE!**
+
+当下游 a 链接 liba 时：
+
+- 编译链接阶段：a 只需要解析 liba 对外暴露的符号，**完全不需要知道 libb 的存在，也不需要 libb 的库文件**。
+-  运行阶段：操作系统加载器会顺着 liba 的依赖链自动加载 libb，但这是运行时行为，和 a 的编译链接无关。共享库的 `PRIVATE` 依赖是真正的**封装**：下游 a 感知不到 libb，也不需要做任何额外操作，符合「a 不用链接 libb」的描述。
+
+---
+
+静态库（STATIC）：**静态库的构建不调用链接器**。 静态库（`.a`/`.lib`）只是一堆目标文件（`.o`/`.obj`）的压缩归档包，它**没有真正的链接步骤**。你对静态库写 `target_link_libraries`，本质只是在 CMake 的目标属性里记录「这个静态库在使用时需要这些依赖」，并不会真的把 libb 的代码打包进 liba 里。
+
+> 如果 `a.cpp` 调用了 libb 的函数，`a.o` 里只会留下一个「未定义的符号占位符」；`liba.a` 里完完全全只有 liba 自己的代码，libb 的半行代码都不会出现在里面；
+>
+> 静态库自己是 “半成品”，不能合并任何依赖。
+
+如果 liba 是静态库，且用 `PRIVATE` 链接了 libb：CMake 只会保证：liba 自己编译源码时，能找到 libb 的头文件；CMake **不会**把 libb 的目标文件合并进 liba.a；CMake **不会**告诉下游 a：「你链接 liba 的时候，还要顺便链 libb」。 最终结果就是：a 只写 `target_link_libraries(a PRIVATE liba)` 的话，链接器会直接报 `undefined reference`（未定义的引用）——因为 liba 调用了 libb 的函数，但 libb 的代码根本没被链进最终的可执行文件里。 
+
+两种解决方案 1. **改成 `PUBLIC` 链接**：CMake 会自动把 libb 追加到 a 的链接列表里，a 不用手动写，这是最常用的做法； 2. **保持 `PRIVATE`，a 手动补链**：相当于你知道 liba 的内部依赖，自己手动补上 `target_link_libraries(a PRIVATE libb)`。
+
+| liba 类型     | liba 对 libb 的链接方式 | 下游 a 是否需要手动链接 libb | 核心原因                                                     |
+| ------------- | ----------------------- | ---------------------------- | ------------------------------------------------------------ |
+| 共享库 SHARED | PRIVATE                 | ❌ 不需要                     | 依赖被封装在动态库内部，编译时无感知                         |
+| 共享库 SHARED | PUBLIC                  | ❌ 不需要（自动传递）         | 会自动透传，但编译效果和 PRIVATE 接近，区别只在头文件是否可见 |
+| 静态库 STATIC | PRIVATE                 | ✅ 必须手动加（否则链接报错） | 静态库只是目标文件归档，不会合并依赖，且 CMake 不自动向下传递 |
+| 静态库 STATIC | PUBLIC                  | ❌ 不需要（自动传递）         | CMake 会自动把 libb 追加到 a 的链接列表中                    |
+
+#### 生成可执行文件
 
 ``` c++
 add_executable(unbounded_queue_test
     unbounded_queue_test.cpp
 )
-target_link_libraries(unbounded_queue_test PRIVATE  // PRIVATE 表示不对外传播
+target_link_libraries(unbounded_queue_test PRIVATE  // PRIVATE 表示不对外传播(可执行文件不会被链接)
     RCom_base
     gtest_main
 )
@@ -407,7 +489,7 @@ add_test(NAME macros_test COMMAND macros_test)
 
 #### 生成的可执行文件位置
 
-`add_executable()` 在哪个子目录的 `CMakeLists.txt` 里执行，可执行文件就生成到**执行`cmake ..`的 build 文件夹中对应子目录里**。
+`add_executable()` 在相对于项目入口的`CMakeLists.txt`的哪个子目录的 `CMakeLists.txt` 里执行，可执行文件就生成到**执行`cmake ..`的 build 文件夹中对应子目录里**。
 
 ### 外部依赖
 
@@ -1978,7 +2060,7 @@ C++ 的**非静态成员函数**可以理解为一个普通的函数，只是编
 
 ## 静态函数与静态变量
 
-在 C++ 中，类的**静态成员**（包括静态数据成员和静态成员函数）是属于**整个类**的成员，而非类的某个具体`object` —— 所有该类的`object`共享同一份静态成员，这是核心特征。
+在 C++ 中，类的**静态成员**（包括静态数据成员和静态成员函数）是属于**整个类**的成员，而非类的某个具体`object` —— 所有该类的`object`共享同一份静态成员变量，这是核心特征。
 
 **子类也会共享父类的静态成员函数和静态成员变量**。
 
@@ -2251,7 +2333,9 @@ int main()
 
 ### 三大件
 
-类带指针一定要写出**三大件**：**拷贝构造函数（定义一个对象如何`pass by value`）**，**拷贝赋值函数**（`=`的操作符重载）和**析构函数**；如果定义了拷贝赋值函数，使用`=`也可能调用拷贝构造函数：
+> 如果类没有指针成员变量，一般不必自己写 Big Three，用默认的一套即可。
+
+**类带指针成员变量**一定要写出**三大件**：**拷贝构造函数（定义一个对象如何`pass by value`）**，**拷贝赋值函数**（`=`的操作符重载）和**析构函数**；如果定义了拷贝赋值函数，使用`=`也可能调用拷贝构造函数：
 
 ``` c++
 Weight w1;
@@ -2520,7 +2604,7 @@ class HisString : public MyString{
 
 - `public`：外部、子类、自己都能访问
 - `protected`：子类、自己能访问，**外部不能**
-- `private`：只有自己能访问，子类、外部都不能
+- `private`：只有自己能访问，**外部、子类都不能**
 
 > 重点：**基类的 private 成员，无论哪种继承，子类永远访问不到！**
 
@@ -2718,8 +2802,6 @@ public:
 };
 ```
 
-
-
 ### 组合："有一个"(has-a) 
 
 组合描述的是类之间的**包含关系**，表示一个类 "拥有" 另一个类的实例作为其成员。
@@ -2745,15 +2827,13 @@ public:
 };
 ```
 
-
-
-### 表格对比
+### 对比
 
 | 对比维度         | 继承 (Inheritance)                        | 组合 (Composition)               |
 | ---------------- | ----------------------------------------- | -------------------------------- |
 | **关系本质**     | is-a (是一个)                             | has-a (有一个)                   |
 | **耦合度**       | 强耦合（子类依赖父类实现）                | 松耦合（仅依赖接口）             |
-| **代码复用方式** | 白盒复用（**子类可见父类实现细节**）      | 黑盒复用（仅可见接口）           |
+| **代码复用方式** | 白盒复用（**子类可见父类实现细节**）      | 黑盒复用（**仅可见接口**）       |
 | **封装性**       | 破坏封装（父类 protected 成员暴露给子类） | 保护封装（**内部实现完全隐藏**） |
 | **灵活性**       | 静态（编译时确定，无法动态改变）          | 动态（运行时可替换成员对象）     |
 | **多态支持**     | 天然支持（通过虚函数）                    | 需要手动实现（通过接口转发）     |
@@ -3269,7 +3349,11 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
 
 ## 声明/定义/实例化
 
+**模板声明中带默认值的部分，只能在声明里写一次，定义里必须删掉**—— 这和普通函数默认参数的规则完全一致。
+
 `template <typename T>` **只针对紧接着的类、函数或成员有效**，**作用一次后就失效**。
+
+---
 
 - **声明的作用是向编译器引入一个名称（标识符）**。声明只回答 "是什么"，不回答 "在哪里"、"怎么做"。
 
@@ -3588,9 +3672,9 @@ BoundedQueue<T>::~BoundedQueue() {
 
 当编译器实例化一个类模板`name<T>`时，它会：
 
-✅ **必须**：实例化类模板中**所有成员的声明**（包括成员函数、静态变量、嵌套类型的声明）
+✅ **必须**：实例化类模板中**所有成员的声明**（包括成员函数、静态变量、嵌套类型的声明）。
 
-❌ **不必**：实例化类模板中**未被使用的成员的定义**
+❌ **不必**：实例化类模板中**未被使用的成员的定义。**
 
 也就是说，编译器必须先知道这个类有哪些成员，才能确定这个类的大小和布局。但对于成员函数的具体实现，只要没人调用，就可以不生成代码。
 
@@ -3610,9 +3694,9 @@ int main() {
 
 这段代码**可以正常编译通过**！因为当实例化`Test<int>`时：
 
-- 编译器实例化了`good()`和`bad()`的**声明**（`void Test<int>::good();`和`void Test<int>::bad();`）
-- 但因为`bad()`从未被调用，编译器**没有实例化它的定义**
-- 所以`T::nonexistent_member`这个错误永远不会被触发
+- 编译器实例化了`good()`和`bad()`的**声明**（`void Test<int>::good();`和`void Test<int>::bad();`）。
+- 但因为`bad()`从未被调用，编译器**没有实例化它的定义。**
+- 所以`T::nonexistent_member`这个错误永远不会被触发。
 
 这就是 C++ 著名的 "**延迟实例化（Lazy Instantiation）**" 特性。
 
@@ -3665,7 +3749,6 @@ int main() {
   }
   ```
 
-  
 
 ## 模板特化
 
@@ -3754,8 +3837,6 @@ public:
     void show() { cout << "指针偏特化: " << *value << endl; }
 };
 ```
-
-
 
 ## Variadic Templates
 
