@@ -257,13 +257,13 @@ sudo apt search git
 
 ``` bash
 git config --global user.name "cjysdl"
-git config --global user.email "755381914@qq.com"
+git config --global user.email "2021111679@my.swjtu.edu.cn"
 ```
 
 获取ssh公钥：
 
 ``` bash
-ssh-keygen -t ed25519 -C 755381914@qq.com
+ssh-keygen -t ed25519 -C 2021111679@my.swjtu.edu.cn
 
 ls ~/.ssh/
 

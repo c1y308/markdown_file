@@ -408,7 +408,7 @@ ls -l $(which ethercat)
 
 ``` shell
 sudo nano /etc/udev/rules.d/99-ethercat.rules
-# 输入：
+# 输入：？
 SUBSYSTEM=="ethercat", GROUP="users", MODE="0666"
 
 # 重载udev规则
