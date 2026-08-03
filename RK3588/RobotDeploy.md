@@ -1,10 +1,11 @@
-{
+```{
     "http.proxy": "http://127.0.0.1:7900",
     "http.proxyStrictSSL": false,
     "github.copilot.advanced": {
         "debug.overrideProxyServer": "http://127.0.0.1:7900"
     }
 }
+```
 
 # 重构内核
 
@@ -220,89 +221,15 @@ sudo dpkg -i linux-headers-6.1.99-rt36-rk3588_*_arm64.deb
 
 ## EtherCAT
 
-### 协议
-
-在使用 `ecrt` 库之前，需要先建立以下模型：
-
-1. **Master (主站)**：整个 EtherCAT 网络的控制核心，负责发送和接收以太网数据帧。
-2. **Domain (域)**：用于管理和打包**过程数据 (Process Data)**。为了优化网络带宽，主站不会给每个从站单独发包，而是把多个从站的数据打包在一个 Domain 里一次性收发。一个应用通常至少需要一个 Domain。
-3. **PDO (过程数据对象)**：主站和从站之间周期性交互的数据。比如伺服电机的“目标位置”（主站写给从站的 RxPDO）和“当前位置”（从站发给主站的 TxPDO）。
-
-#### "飞读飞写"
-
-EtherCAT 的核心创新在于**数据帧在传输过程中被每个从站实时处理**，而非传统的"接收-处理-转发"模式。一个 EtherCAT 数据帧穿越整个网络时：
-
-- 每个从站使用**硬件（ESC, EtherCAT Slave Controller）\**在帧经过时\**动态抽取/插入**属于自己的数据
-- 帧延迟通常只有数百纳秒/站（硬件处理延迟）
-- 主站发出一个帧，遍历所有从站后返回，完成一次全双工数据交换
-
-``` PlainText
-                        ┌──────────┐    以太网帧     ┌──────┐ ┌──────┐ ┌──────┐
-                        │  EtherCAT │ ──────────────→ │ Slave│→│ Slave│→│ Slave│
-                        │  Master   │ ←────────────── │  0   │←│  1   │←│  N   │
-                        └──────────┘   （原路返回）    └──────┘ └──────┘ └──────┘
-```
-
-#### 数据帧结构
-
-EtherCAT 帧嵌入在标准以太网帧中（EtherType = 0x88A4 ），结构如下：
-
-``` PlainText
-                    ┌──────────┬──────────┬──────────────┬─────────────┬──────────────┐
-                    │  Eth Hdr │ EC Hdr   │   Datagram 1 │ Datagram 2  │ ...  │  FCS  │
-                    │ (14Byte) │ (2Byte)  │  (10+N Bytes)│             │      │(4Byte)│
-                    └──────────┴──────────┴──────────────┴─────────────┴──────────────┘
-```
-
-每个 Datagram（子报文）包含：
-
-| 字段    | 大小   | 含义                               |
-| ------- | ------ | ---------------------------------- |
-| Cmd     | 1 Byte | 命令类型（读 / 写 / 读写）         |
-| Idx     | 1 Byte | 帧索引                             |
-| Address | 4 Byte | 从站地址（自增 / 固定 / 逻辑地址） |
-| Len     | 11 bit | 数据长度                           |
-| R       | 3 bit  | 保留                               |
-| C       | 1 bit  | 循环标志（是否遍历多个从站）       |
-| IRQ     | 2 Byte | 中断请求 / 状态                    |
-| Data    | N Byte | 过程数据                           |
-
-更常用的简化命令类型：
-
-| 命令            | 说明                                                         |
-| --------------- | ------------------------------------------------------------ |
-| LRW（逻辑读写） | 最常用，在一帧内同时读取和写入逻辑地址空间 —— 即 PDO 的交换方式 |
-| LRD（逻辑读）   | 只读                                                         |
-| LWR（逻辑写）   | 只写                                                         |
-
-> 项目中使用的是 IgH Master 自动生成的 LRW 操作，开发者无需手动构造数据帧。
-
-#### CoE（CANopen over EtherCAT）协议
-
-本项目的电机控制遵循 CiA 402 （驱动与运动控制设备行规）基于 CoE 协议实现。全程通过 PDO（过程数据对象） 交换实时数据：
-
-| CoE 对象字典 | 方向        | 含义                  |
-| ------------ | ----------- | --------------------- |
-| 0x6040       | TX（主→从） | 控制字（Controlword） |
-| 0x6041       | RX（从→主） | 状态字（Statusword）  |
-| 0x6060       | TX          | 运行模式设置          |
-| 0x6061       | RX          | 运行模式显示          |
-| 0x607A       | TX          | 目标位置              |
-| 0x6064       | RX          | 实际位置              |
-| 0x60FF       | TX          | 目标速度              |
-| 0x606C       | RX          | 实际速度              |
-| 0x6071       | TX          | 目标扭矩              |
-| 0x6077       | RX          | 实际扭矩              |
-
 ### 加载驱动
 
-这两个模块均来自**IgH EtherCAT Master**（Linux 系统下最主流的开源 EtherCAT 主站实现，广泛用于工业自动化、机器人运动控制等实时控制场景）：
+两个模块均来自**IgH EtherCAT Master**（Linux 系统下最主流的开源 EtherCAT 主站实现，广泛用于工业自动化、机器人运动控制等实时控制场景）：
 
-1. `ec_master.ko`：EtherCAT 主站的**核心内核模块**
+1. `ec_master.ko`：EtherCAT 主站的**核心内核模块**。
 
-   是整个 EtherCAT 协议栈的核心载体，负责 EtherCAT 总线拓扑管理、从站设备配置、PDO 过程数据 / SDO 邮箱通信、分布式时钟 DC 同步、数据帧封装与解析、总线状态机管理等核心功能，同时为用户态应用提供标准的控制接口（/dev/EtherCATx）。
+   是整个 EtherCAT 协议栈的核心载体，负责 EtherCAT 总线拓扑管理、从站设备配置、PDO 过程数据 / SDO 邮箱通信、分布式时钟 DC 同步、数据帧封装与解析、总线状态机管理等核心功能，同时为用户态应用提供标准的控制接口（`/dev/EtherCATx`）。
 
-2. `ec_stmmac.ko`：EtherCAT 主站针对 stmmac 网卡的**专用实时驱动模块**
+2. `ec_stmmac.ko`：EtherCAT 主站针对 stmmac 网卡的**专用实时驱动模块**。
 
    stmmac 是 Synopsys DesignWare 系列以太网 MAC 控制器的标准驱动，广泛用于瑞芯微 RK 系列、STM32MP1、NXP i.MX 等 ARM 嵌入式平台。该模块是为 EtherCAT 深度优化的专用驱动，替代 Linux 标准网络栈，直接对接网卡硬件，为 ec_master 提供低延迟、低抖动的帧收发能力，相比通用驱动能大幅提升 EtherCAT 通信的实时性。
 
@@ -335,7 +262,7 @@ sudo depmod -a
 
 ---
 
-然后配置模块固定启动参数
+然后配置模块固定启动参数：
 
 **创建模块参数配置文件**，让系统每次加载 ec_master 时，自动带上指定的 MAC 地址参数：
 
@@ -352,7 +279,7 @@ options ec_master main_devices=fa:fd:53:a0:a5:55
 
 ---
 
-其次配置开机自动加载，固定加载顺序
+其次配置开机自动加载，固定加载顺序：
 
 **创建 systemd 开机加载配置文件，按正确顺序**指定要自动加载的模块：
 
@@ -385,16 +312,13 @@ dmesg | grep EtherCAT
 
 验证无报错后，重启系统，再次执行`lsmod | grep ec_`，即可确认模块已开机自动加载。
 
-### 修改设备权限
+#### 修改设备权限
 
 ![img](./assets/ethercat权限错误.png)
 
-Linux 的 `/dev` 目录是**临时文件系统（tmpfs）**，**关机 / 重启后会清空**，所有设备节点（包括 `/dev/ethercat0`）会重新生成。
+Linux 的 `/dev` 目录是**临时文件系统（tmpfs）**，**关机 / 重启后会清空**，所有设备节点（包括 `/dev/EtherCAT0`）会重新生成。
 
-存放系统中所有的**设备文件**，全称是 Device Nodes，/dev 是用来传递**真实业务数据流**和发送**复杂控制指令（ioctl）**的地方。
-
-**驱动视角**：在 Linux 驱动中，硬件通常被抽象为三种：字符设备（按字节流访问，如串口、鼠标）、块设备（按数据块访问，如硬盘、U盘）和网络设备（不通过 /dev，走 Socket）。
-**当驱动程序向内核注册一个字符或块设备时，系统会在 /dev 下创建一个对应的文件**（例如 /dev/ttyS0 代表串口，/dev/sda 代表硬盘），应用程序通过标准的 C 语言文件 I/O 函数（open、read、write、ioctl）来操作这些文件。
+**驱动视角**：在 Linux 驱动中，硬件通常被抽象为三种：字符设备（按字节流访问，如串口、鼠标）、块设备（按数据块访问，如硬盘、U盘）和网络设备（不通过 /dev，走 Socket）。**当驱动程序向内核注册一个字符或块设备时，系统会在 `/dev` 下创建一个对应的文件**（例如 `/dev/ttyS0` 代表串口，`/dev/sda` 代表硬盘），应用程序通过标准的 C 语言文件 I/O 函数（`open、read、write、ioctl`）来操作这些文件。
 
 ---
 
@@ -417,27 +341,7 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-### `<ecrt.h>`
-
-该头文件仅归属于 IgH EtherCAT Master 开源主站，SOEM 等其他 EtherCAT 主站方案不使用该头文件。
-
----
-
-**内核能力封装与接口隔离**
-
-它将内核态 EtherCAT 主站驱动的核心能力**封装为用户态可直接调用的标准 C 接口**，隐藏了内核模块、`/dev/EtherCAT0`设备节点的底层操作细节，开发者无需深入内核驱动，即可完成 EtherCAT 主站的全流程开发。
-
-**核心数据与类型规范定义**
-
-定义了 EtherCAT 主站开发的**核心数据结构**、**句柄类型**、状态枚举、错误码与常量，比如`ec_master_t`（主站实例句柄）、`ec_slave_config_t`（从站配置句柄）、`ec_domain_t`（过程数据域句柄）等，统一了用户程序与协议栈之间的数据交互格式。
-
-**全生命周期 API 声明**
-
-声明了 EtherCAT 主站从初始化、配置、运行到释放的全流程函数原型，覆盖实时通信、从站管理、分布式时钟同步、对象字典访问等所有核心功能，是用户程序调用主站能力的唯一标准入口。
-
----
-
-#### 安装库
+### 安装`<ecrt.h>`库
 
 ``` shell
 # 安装依赖
@@ -454,91 +358,260 @@ sudo make install
 
 安装后，头文件默认路径为 `/opt/etherlab/include`，库文件为 `/opt/etherlab/lib`。
 
----
+### `<ecrt.h>`库开发
 
-#### 创建主站/域
+该头文件仅归属于 `IgH EtherCAT Master` 开源主站，SOEM 等其他 EtherCAT 主站方案不使用该头文件。
+
+#### 申请主站
 
 在这个阶段，要告诉系统：我要用哪个主站？我要建几个域？网络里有哪些从站？它们各自需要交换什么数据？
 
-``` c
-ecrt_request_master(0)    ──→  ① 请求主站实例
-ecrt_master_create_domain ──→  ② 创建过程数据域
-        ↓
-for each slave:
-  ecrt_master_slave_config   ──→  ③ 告诉主站并配置每个从站（VID + 物理位置）
-  ecrt_slave_config_pdos     ──→  ④ 映射 PDO 条目 → SM
-  ecrt_slave_config_dc       ──→  ⑤ 配置分布式时钟（DC）
-  ecrt_domain_reg_pdo_entry_list ──→  ⑥ 注册 PDO 条目到域
-        ↓
-ecrt_master_activate    ──→  ⑦ 激活主站（状态机：INIT→OP）
-ecrt_domain_data        ──→  ⑧ 获取域数据指针
-```
-
-
-
 ---
 
-首先需要请求并独占一个 EtherCAT 主站实例：
+首先需要请求并独占一个 `EtherCAT` 主站实例：
 
 ``` c++
-//参数： master_index 通常为 0（代表系统中的第一个主站 eth0 或配置的第一个网卡）。
+//参数： master_index 通常为 0（代表系统中的第一个主站 eth0 或配置的第一个网卡，绝大多数只有一张 EtherCAT 网卡）。
 //返回： ec_master_t* 主站句柄。
 
-ecrt_request_master(unsigned int master_index);
+ec_master_t* ecrt_request_master(unsigned int master_index);
 ```
 
----
+**一张物理网卡在同一时刻只能被一个 IgH EtherCAT 主站实例占用，但一个主站可以关联多张网卡**。
 
-然后在主站下创建一个新的过程数据域（Domain），它是一块连续的内存区域，它将分散在各个从站的 PDO Entry 聚合到主站的一块连续内存中。域用于合并多个从站的数据，以便用一个以太网帧进行交换：
+#### 创建数据域
+
+然后在指定的 EtherCAT 主站 `master` 下创建一个新的**过程数据域**（process data domain；不是PDO，PDO是Process Data Object，过程数据对象），并返回对应的 `ec_domain_t*` 句柄。过程数据域**是一块连续的内存区域**，它将分散在各个从站的 `PDO`（其实是`PDO entry`） 聚合到主站的一块连续内存中。数据域**用于合并多个从站的数据**，以便用一个以太网帧进行交换：
 
 ``` c++
-//返回： ec_domain_t* 域句柄。
-ecrt_master_create_domain(ec_master_t *master);
+// 该函数会分配内存
+ec_domain_t* ecrt_master_create_domain(ec_master_t *master);
 ```
 
-#### 同步管理器 与 PDO 映射
+它是：一组需要周期性交换的 PDO 数据，以及为了交换这些数据所建立的过程映像、FMMU 配置、EtherCAT datagram 和 Working Counter 状态的管理对象。IgH 内部的 `ec_domain` 包含：
 
-获取特定从站的配置句柄。**需要提供从站的物理位置或别名，以及它的身份信息（厂家 ID 和产品代码）以便主站校验**。
+- 所属的 `ec_master_t*`；
+- **过程数据的大小，内存指针**；用于过程数据交换的 datagram；
+- FMMU 配置，逻辑地址；
+- 实际和期望 Working Counter。
+
+可以把它想象成一个“周期通信数据包组”，假设控制两个伺服电机，每个电机交换以下数据：
+
+``` c++
+RxPDO：主站 → 从站
+├── Control Word       2 字节
+└── Target Position    4 字节
+
+TxPDO：从站 → 主站
+├── Status Word        2 字节
+└── Actual Position    4 字节  
+```
+
+两个电机合起来，应用程序最终会看到类似这样的内存：
+
+``` text
+domain_pd
+│
+├── offset 0：Motor 1 Control Word
+├── offset 2：Motor 1 Target Position
+├── offset 6：Motor 1 Status Word
+├── offset 8：Motor 1 Actual Position
+├── offset 12：Motor 2 Control Word
+├── offset 14：Motor 2 Target Position
+├── offset 18：Motor 2 Status Word
+└── offset 20：Motor 2 Actual Position
+```
+
+##### 分配内存地址
+
+使用`uint8_t* domain_pd`指向 Domain 的一片过程数据内存。应用程序通过偏移量读取、写入：
+
+``` c++
+if(ecrt_master_activate(master))
+{
+    std::cerr << "激活主站失败\n";
+    return false;
+}
+
+uint8_t *ecrt_domain_data(ec_domain_t *domain ;
+domain1_pd = ecrt_domain_data(domain1));
+
+
+/* 这些映射偏移量通过ecrt_domain_reg_pdo_entry_list()配置 */
+uint16_t status_word = EC_READ_U16(domain_pd + offset_status_word);
+
+int32_t actual_position = EC_READ_S32(domain_pd + offset_actual_position);
+
+EC_WRITE_U16(domain_pd + offset_control_word, control_word);
+
+EC_WRITE_S32(domain_pd + offset_target_position, target_position);
+```
+
+所以，Domain 的核心用途就是把分布在多个 EtherCAT 从站中的 PDO 数据映射为应用程序能够直接访问的一片过程数据内存。
+
+#### 创建从站配置句柄
+
+创建**指定主站**上**指定物理ID**对应的从站的配置句柄。它的作用不是“立刻向从站发送配置”，而是：
+
+> 在 Master 内为指定从站获取或创建一个 `ec_slave_config_t` 对象，后续所有 PDO、DC、SDO 和状态查询都通过这个对象完成。
+
+官方文档说明，若同一 `alias + position` 的配置对象已经存在，则会复用；若 Vendor ID 或 Product Code 不一致，则返回错误。该函数需要在主站激活前的非实时阶段调用。
+
+后续通过`alias + position + vendor_id + product_code`在这个主站中找到这个对应的`ec_slave_config_t`。
 
 ``` c++
 // 返回： ec_slave_config_t* 从站配置句柄。
-ecrt_master_slave_config(ec_master_t *master, uint16_t alias, uint16_t position, uint32_t vendor_id, uint32_t product_code);
-
+ec_slave_config_t* ecrt_master_slave_config( ec_master_t *master,	// 主站
+                                            
+                                             uint16_t alias,		// 别名(一般为 0，依赖物理ID顺序)
+                                             uint16_t position,		// 物理ID
+                                             uint32_t vendor_id,	// 厂商ID
+                                             uint32_t product_code);// 产品代码
 
 // 具体应用实现
 std::array<ec_slave_config_t *, kNumSlaves> sc = {};
-const uint16_t position = kSlavePositions[i];
-sc[i] = ecrt_master_slave_config(master, 0, position, VID_PID);
+
+for (std::size_t i = 0; i < kNumSlaves; i++) 
+{   
+    /*...*/
+    const uint16_t position = kSlavePositions[i];
+    sc[i] = ecrt_master_slave_config(master, 0, position, VID_PID);
+    /*...*/
+}
 ```
 
----
+#### 配置从站PDO布局
+
+##### `ecrt_slave_config_pdos()`
 
 PDO 映射的三层嵌套是 IgH 中最容易绕晕的部分。为了配置从站要交互什么数据，IgH 使用了三层嵌套的结构体，从微观到宏观依次是：`PDO Entry -> PDO -> Sync Manager`，最终将最顶层的 `ec_sync_info_t` 数组传给 `ecrt_slave_config_pdos()` 函数。
 
-在通过`ecrt_domain_reg_pdo_entry_list()` 注册 PDO entry 时，需要在当前 `slave config` 里查找这些 entry 属于哪个 PDO/SyncManager。也就是说它依赖前面已经通过 `ecrt_slave_config_pdos(sc[i], EC_END, device_syncs)` 建好的 PDO assignment/mapping。IGH 文档里 `ecrt_slave_config_reg_pdo_entry()` 也说明它会搜索已分配的 PDO；如果 entry 没有被映射，会报错。
-
----
-
-
-第一步：定义 PDO Entry 数组，即`ec_pdo_entry_info_t` (PDO 条目 - 最微观的数据)：定义一个**具体的数据字典对象**（如“控制字”、“目标位置”）。
+**注意到现在为止，PDO还没有和domain产生任何联系！~**
 
 ``` c++
-/* 是一个三元组 */
+int ecrt_slave_config_pdos( ec_slave_config_t* sc,
+  							unsigned int n_syncs,
+    						const ec_sync_info_t syncs[]
+);
+```
+
+它的作用是：根据 `ec_sync_info_t` 中描述的 Sync Manager、PDO Assignment 和 PDO Mapping，为**这个从站**设置完整的 PDO 配置。该函数实际上是多个底层配置函数的便捷封装，包括：
+
+- 配置 Sync Manager；
+- 清除和增加 PDO Assignment；
+- 清除和增加 PDO Mapping；
+- 配置每个 PDO Entry 的索引、子索引和位长度。
+
+##### `ec_sync_info_t`
+
+这里定义：
+
+- 存储`ec_pdo_info_t`数组的位置；
+
+- PDO 分配给哪个 Sync Manager；
+- 数据方向；
+- Watchdog 模式。
+
+``` c++
+/** 同步管理器配置信息
+ *
+ * 该结构体可用于配置多个同步管理器，包含PDO分配与PDO映射功能。
+ * 在函数 ecrt_slave_config_pdos() 中作为入参类型使用。
+ */
+
 typedef struct {
-    uint16_t index;      // 对象字典的索引 (例如: 0x6040 控制字)
-    uint8_t  subindex;   // 子索引 (例如: 0x00)
-    uint8_t  bit_length; // 数据的位长度 (例如: 16位就是 16)
+    uint8_t index; 		 /**< 同步管理器索引。有效值必须小于宏 #EC_MAX_SYNC_MANAGERS；
+                     			 也可设置为 0xff 用于标记列表末尾。 */
+    ec_direction_t dir;  /**< 同步管理器数据方向。 */
+    
+    unsigned int n_pdos; /**< pdos 数组内PDO的数量。 */
+    ec_pdo_info_t *pdos; /**< 待分配PDO数组。数组内至少存放 n_pdos 个PDO信息。 */
+    
+    ec_watchdog_mode_t watchdog_mode; /**< 看门狗工作模式。 */
+} ec_sync_info_t;
+```
+
+应用示例：
+
+``` c++
+ec_sync_info_t EthercatAdapterIGH::device_syncs[] = {
+    {0, EC_DIR_OUTPUT, 0, NULL, EC_WD_DISABLE},
+    {1, EC_DIR_INPUT,  0, NULL, EC_WD_DISABLE},
+    {2, EC_DIR_OUTPUT, 1, &EthercatAdapterIGH::device_pdos[0], EC_WD_ENABLE},
+    {3, EC_DIR_INPUT,  1, &EthercatAdapterIGH::device_pdos[1], EC_WD_DISABLE},
+    {0xff, EC_DIR_INVALID, 0, nullptr, EC_WD_DEFAULT}
+};  
+```
+
+##### `ec_pdo_info_t`
+
+这里定义：
+
+- 从`ec_pdo_info_t`**数组哪里开始**的**多少个** Entry 属于哪个 PDO；
+
+``` c++
+/** PDO 配置信息
+ *
+ * 该数据类型为 ec_sync_info_t 结构体中 pdos 成员的类型。
+ *
+ * 参考函数 ecrt_slave_config_pdos()。
+ */
+typedef struct {
+    uint16_t index; 		/**< PDO 索引。 */
+    
+    unsigned int n_entries; /**< 需要进行映射的 PDO 条目数量。数值为 0 代表使用从站默认映射配置
+                              （该方式仅在总线配置阶段从站在线时可用） */
+    
+    ec_pdo_entry_info_t *entries; /**< 待映射的 PDO 条目数组。可以为空指针 NULL，
+                                    若非空，则数组至少包含 n_entries 个条目信息。 */
+} ec_pdo_info_t;
+```
+
+应用示例：
+
+``` c++
+ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
+    // RX 主站发送
+    {0x1601, 8, &EthercatAdapterIGH::device_pdo_entries[0]},
+    // TX 主站接收
+    {0x1a00, 7, &EthercatAdapterIGH::device_pdo_entries[8]},
+};
+```
+
+##### `ec_pdo_entry_info_t`
+
+这里才真正定义：
+
+- Entry 的顺序；
+- 每个 Entry 有多少 bit；
+
+``` c++
+/** PDO条目配置信息
+ *
+ * 该数据类型是 ec_pdo_info_t 结构体中 entries 成员对应的类型。
+ *
+ * 参考函数 ecrt_slave_config_pdos()。
+ */
+typedef struct { 
+    uint16_t index;      /**< PDO条目的对象字典索引。 */
+    uint8_t  subindex;   /**< PDO条目的对象字典子索引。 */
+    uint8_t  bit_length; /**< PDO条目的数据长度，单位：比特。 */
 } ec_pdo_entry_info_t;
+```
 
+应用示例：
 
+``` c++
+// ---定义静态配置模板---
 ec_pdo_entry_info_t EthercatAdapterIGH::device_pdo_entries[] = {
     {0x6040, 0x00, 16},  // 控制字
     {0x607a, 0x00, 32},  // 目标位置
     {0x60ff, 0x00, 32},  // 目标转速
     {0x6071, 0x00, 16},  // 目标扭矩
-    {0x6072, 0x00, 16},  // 最大扭矩
+    {0x2000, 0x00, 32},  // PVT_KP
+    {0x2001, 0x00, 32},  // PVT_KD
     {0x6060, 0x00, 8},   // 设置运行模式
-    {0x5ffe, 0x00, 8},   // 填充字节
+    {0x2ffd, 0x00, 8},   // 填充字节
     /* ========== RxPDO (主站从从站接收) ========== */
     {0x6041, 0x00, 16},   // 状态字
     {0x6064, 0x00, 32},   // 实际位置
@@ -546,166 +619,87 @@ ec_pdo_entry_info_t EthercatAdapterIGH::device_pdo_entries[] = {
     {0x6077, 0x00, 16},  // 实际扭矩
     {0x603f, 0x00, 16},  // 错误码
     {0x6061, 0x00, 8},   // 运行模式
-    {0x5ffe, 0x00, 8},   // 填充字节
+    {0x2ffe, 0x00, 8},   // 填充字节
 };
 ```
 
----
+#### 配置程序读写数据位置
 
-第二步：组织为 PDO，即`ec_pdo_info_t` ，一个 PDO 对象（如 RxPDO 0x1600）内部包含一个或多个具体的条目（**进行数据打包**）。
+假设 `device_syncs` 已经告诉主站，从站 PDO 是：
 
-底层的 EtherCAT 芯片（ESC）和伺服单片机**不接收散装货物**，它们只认“纸箱（PDO）”。
+```text
+RxPDO，主站写给电机
+├── 0x6040:00 Control Word       16 bit
+├── 0x607A:00 Target Position    32 bit
+└── 0x6060:00 Operation Mode      8 bit
+
+TxPDO，电机返回主站
+├── 0x6041:00 Status Word        16 bit
+└── 0x6064:00 Actual Position    32 bit
+```
+
+主站现在知道从站的 PDO 排列，但你的 C++ 程序仍然不知道：控制字在 domain 内存的第几个字节？目标位置在哪里等信息？
+
+##### `ecrt_domain_reg_pdo_entry_list()`
+
+就是解决这个问题。它会**把从站配置和某个 Domain 关联起来**：
+
+1. 根据 `alias + position + VID + PID` 找到从站的`ec_slave_config_t`；
+2. 根据 `index + subindex` 找到指定 PDO Entry；
+3. 将该 Entry 注册到 `domain1`；
+4. 计算该 Entry 在 Domain 过程数据区中的字节偏移；
+5. 把偏移写入提供的 `slave_offsets[i]` 成员。官方将其定义为一次性向 Domain 批量注册 PDO Entry；`ec_pdo_entry_reg_t::offset` 正是用来接收 Entry 在过程数据区中的字节偏移。
 
 ``` c++
+/** PDO条目批量注册用列表记录类型
+ *
+ * 该结构体用作函数 ecrt_domain_reg_pdo_entry_list() 的数组入参
+ */
 typedef struct {
-    uint16_t 	 index;                      	// PDO 的索引 (例如: 0x1600)
-    unsigned int n_entries;              		// 包含的 Entry 数量
-    const 		 ec_pdo_entry_info_t *entries;  // 指向 Entry 数组的指针
-} ec_pdo_info_t;
-
-
-ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
-    // RX 主站发送
-    {0x1600, 7, &EthercatAdapterIGH::device_pdo_entries[0]},
-    // TX 主站接收
-    {0x1a00, 7, &EthercatAdapterIGH::device_pdo_entries[7]},
-};
-
-```
-
-> 为什么需要PDO层而不直接用PDO entry进行数据传输？
-
----
-
-第三步：分配给同步管理器，即`ec_sync_info_t` (同步管理器 - 管理数据的收发通道)：EtherCAT 通过 Sync Manager (SM) 来管理数据的读写方向。通常 SM2 用于主站写（RxPDO），SM3 用于主站读（TxPDO）。它是 EtherCAT **从站控制器（ESC芯片）内部**的**硬件通道**，负责管理双端口 RAM (DPRAM) 的访问，防止主站和从站同时读写同一块内存。
-
-``` c++
-typedef struct {
-    uint8_t index;               // Sync Manager 索引 (通常 2 是输出，3 是输入)
-    ec_direction_t dir;          // 方向 (EC_DIR_OUTPUT 或 EC_DIR_INPUT)
-    unsigned int n_pdos;         // 映射的 PDO 数量
-    const ec_pdo_info_t *pdos;   // 指向 PDO 数组的指针
-    ec_watchdog_mode_t watchdog; // 看门狗配置 (通常用 EC_WD_ENABLE)
-} ec_sync_info_t;
-
-/* 完成通道分配 */
-ec_sync_info_t EthercatAdapterIGH::device_syncs[] = {
-    {0, EC_DIR_OUTPUT, 0, NULL, EC_WD_DISABLE},
-    {1, EC_DIR_INPUT,  0, NULL, EC_WD_DISABLE},
-    {2, EC_DIR_OUTPUT, 1, &EthercatAdapterIGH::device_pdos[0], EC_WD_ENABLE},
-    {3, EC_DIR_INPUT,  1, &EthercatAdapterIGH::device_pdos[1], EC_WD_DISABLE},
-    {0xff, EC_DIR_INVALID, 0, nullptr, EC_WD_DEFAULT}
-}; 
-
-/* 将 PDO 映射/通道分配绑定给从站 */
-ecrt_slave_config_pdos(sc[i], EC_END, device_syncs);
-```
-
-同步管理器（SM）是 ESC 硬件的 DMA 通道 ，负责在主站与从站应用层之间搬运过程数据：
-
-| SM 通道 | 方向 | 用途                    | 看门狗 |
-| ------- | ---- | ----------------------- | ------ |
-| SM0     | 输出 | 邮箱协议（SDO/Mailbox） | 关闭   |
-| SM1     | 输入 | 邮箱协议（SDO/Mailbox） | 关闭   |
-| SM2     | 输出 | 过程数据（主站→从站）   | 启用   |
-| SM3     | 输入 | 过程数据（从站→主站）   | 关闭   |
-
-> 关键：SM2 启用了看门狗（ EC_WD_ENABLE ），意味着主站必须周期性发送过程数据，否则从站会触发看门狗超时并进入 SAFE 状态。
-
-`ecrt_slave_config_pdos`的作用是： 在从站的 ESC 硬件中写入 SM 配置寄存器 ，告诉从站：
-
-- SM2 用于接收主站发来的过程数据（含 1 个 PDO，即 0x1601 ，含 8 个条目），**从站需要的接收数据 PDO 是什么样子。**
-
-- SM3 用于发送主站需要的过程数据（含 1 个 PDO，即 0x1a00 ，含 7 个条目），**从站需要的发送数据的 PDO 是什么样子。**
-
-`ecrt_master_activate(master); `时主站通过总线把 `ecrt_slave_config_pdos` 记录的 SM 配置 写入每个从站的 ESC 硬件寄存器 ：
-
-``` c++
-主站写入从站 ESC 的关键寄存器（通过 EtherCAT 总线）：
-┌──────────────────────────────────────┐
-│  SM2 配置寄存器 (0x0810-0x0817):     │
-│    物理起始地址 = 0x1000             │
-│    长度 = 22 字节 (TxPDO 的大小)      │
-│    控制寄存器 = 0x0044 (输出 + 看门狗) │
-│                                      │
-│  SM3 配置寄存器 (0x0818-0x081F):     │
-│    物理起始地址 = 0x2000             │
-│    长度 = 16 字节 (RxPDO 的大小)      │
-│    控制寄存器 = 0x0020 (输入)         │
-└──────────────────────────────────────┘
-```
-
-
-
----
-
-最后通过`ecrt_domain_reg_pdo_entry_list(domain1, reg);`将 PDO 注册到域：在主站 domain 内存中为每个 PDO 条目（字典索引）分配空间，并返回字节偏移量 。
-
-每条注册记录中：
-
-- position + VID_PID ：定位到具体的从站。
-- 0x6040 + 0 ：定位到该从站的 CoE 对象字典条目。
-- &slave_offsets[i].off_ctrl_word ：这是 输出参数 ！函数调用后，这个地址被填充为该条目在 domain1_pd 内存块中的字节偏移。
-
-``` c
-domain1_pd 内存布局（示意）:
-┌────────────────────────────────────────────┐
-│ offset 0:   Slave0.ctrl_word  (2B)         │
-│ offset 2:   Slave0.target_pos (4B)         │
-│ offset 6:   Slave0.target_vel (4B)         │
-│ ...                                        │
-│ offset 22:  Slave0.status_word (2B)        │
-│ ...                                        │
-│ offset 38:  Slave1.ctrl_word (2B)          │  ← 下一个从站
-│ ...                                        │
-└────────────────────────────────────────────┘
-```
-
-之后运行时直接用 domain1_pd + off_xxx 就可以读写对应从站的对应字段：
-
-``` c++
-EC_WRITE_U16(domain1_pd + off.off_ctrl_word, pdo.control_word);  // 写
-uint16_t sw = EC_READ_U16(domain1_pd + off.off_status_word);     // 读
-```
-
-具体代码：
-
-``` c++
-// ec_pdo_entry_reg_t 用于将程序变量指针与物理硬件的字典索引绑定。
-typedef struct {
-    uint16_t alias;        // 从站别名
-    uint16_t position;     // 从站在总线上的物理位置
+    uint16_t alias; 	/* 从站别名地址 */
+    uint16_t position; 	/* 从站物理地址（总线位置） */
+    uint32_t vendor_id; 	/* 从站厂商ID */
+    uint32_t product_code; 	/* 从站产品代码 */
     
-    uint32_t vendor_id;    // 厂家 ID
-    uint32_t product_code; // 产品代码
+    uint16_t index; 		/* PDO条目对象字典索引 */
+    uint8_t	 subindex; 		/* PDO条目对象字典子索引 */
     
-    uint16_t index;        // 要读取/写入的字典索引 (如 0x6040)
-    uint8_t  subindex;     // 子索引
-    unsigned int *offset;  // 【核心】输出参数！IgH会自动算出该变量在内存里的偏移量，并存入这个指针指向的变量。
-    
-    unsigned int *bit_position; // 如果不是字节对齐的布尔值，这里会返回位偏移
+    unsigned int *offset; 		/* 指针，用于存放该PDO条目在过程数据域内的字节偏移地址 */
+    unsigned int *bit_position; /* 指针，用于存放该数据在对应字节内的位偏移(0~7)。
+                                  可赋值为NULL；若设为NULL，当PDO条目无法按字节对齐时，将返回报错。 */
 } ec_pdo_entry_reg_t;
 
 
-/* 把当前从站的 PDO 注册进主站的当前域 */
+int ecrt_domain_reg_pdo_entry_list( ec_domain_t *domain, 						/* Domain. */
+        							const ec_pdo_entry_reg_t *pdo_entry_regs); 	/* Array of PDO */
+```
+
+它表达的是：
+
+> 请在 `position` 位置的指定型号从站中，找到 `0x6040:00` 控制字，将它加入 `domain1`，然后把它在 Domain 过程数据内存中的字节偏移写入 `slave_offsets[i].off_ctrl_word`。
+
+`ec_pdo_entry_reg_t` 的字段正是：从站地址、厂商和产品身份、PDO Entry 的 Index/Subindex，以及用于接收字节偏移和位偏移的指针。
+
+具体应用示例：
+
+``` c++
 ec_pdo_entry_reg_t reg[] ={
-    {0, position, VID_PID, 0x6040, 0, &slave_offsets[i].off_ctrl_word,  nullptr},
-    {0, position, VID_PID, 0x607A, 0, &slave_offsets[i].off_target_pos, nullptr},
-    {0, position, VID_PID, 0x60FF, 0, &slave_offsets[i].off_target_vel, nullptr},
-    {0, position, VID_PID, 0x6071, 0, &slave_offsets[i].off_target_torque, nullptr},
-    {0, position, VID_PID, 0x6072, 0, &slave_offsets[i].off_max_torque, nullptr},
-    {0, position, VID_PID, 0x6060, 0, &slave_offsets[i].off_mode_of_op, nullptr},
+    { 0, position, VID_PID, 0x6040, 0, &slave_offsets[i].off_ctrl_word, nullptr},
+    { 0, position, VID_PID, 0x607A, 0, &slave_offsets[i].off_target_pos, nullptr},
+    { 0, position, VID_PID, 0x60FF, 0, &slave_offsets[i].off_target_vel, nullptr},
+    { 0, position, VID_PID, 0x6071, 0, &slave_offsets[i].off_target_torque, nullptr},
+    { 0, position, VID_PID, 0x2000, 0, &slave_offsets[i].off_pvt_kp, nullptr},
+    { 0, position, VID_PID, 0x2001, 0, &slave_offsets[i].off_pvt_kd, nullptr},
+    { 0, position, VID_PID, 0x6060, 0, &slave_offsets[i].off_mode_of_op, nullptr},
 
-    {0, position, VID_PID, 0x6041, 0, &slave_offsets[i].off_status_word, nullptr},
-    {0, position, VID_PID, 0x6064, 0, &slave_offsets[i].off_pos, nullptr},
-    {0, position, VID_PID, 0x606C, 0, &slave_offsets[i].off_vel, nullptr},
-    {0, position, VID_PID, 0x6077, 0, &slave_offsets[i].off_torque, nullptr},
-    {0, position, VID_PID, 0x603F, 0, &slave_offsets[i].off_error,  nullptr},
-    {0, position, VID_PID, 0x6061, 0, &slave_offsets[i].off_mode_disp, nullptr},
-    {0, 0, 0, 0, 0, 0, nullptr, nullptr} // 结束标志
+    { 0, position, VID_PID, 0x6041, 0, &slave_offsets[i].off_status_word, nullptr},
+    { 0, position, VID_PID, 0x6064, 0, &slave_offsets[i].off_pos, nullptr},
+    { 0, position, VID_PID, 0x606C, 0, &slave_offsets[i].off_vel, nullptr},
+    { 0, position, VID_PID, 0x6077, 0, &slave_offsets[i].off_torque, nullptr},
+    { 0, position, VID_PID, 0x603F, 0, &slave_offsets[i].off_error, nullptr},
+    { 0, position, VID_PID, 0x6061, 0, &slave_offsets[i].off_mode_disp, nullptr},
+    { 0, 0, 0, 0, 0, 0, nullptr, nullptr} // 结束标志
 };
-
-
 
 if (ecrt_domain_reg_pdo_entry_list(domain1, reg)) 
 {
@@ -713,9 +707,37 @@ if (ecrt_domain_reg_pdo_entry_list(domain1, reg))
               << "，物理位置 " << position << "\n";
     return false;
 }
+
 ```
 
-#### DC时钟
+存储反馈信息的结构体：
+
+``` c++
+struct SlaveOffsets
+{
+    unsigned int off_ctrl_word;     // 0x6040:00
+    unsigned int off_target_pos;    // 0x607A:00
+    unsigned int off_target_vel;    // 0x60FF:00
+    unsigned int off_target_torque; // 0x6071:00
+    unsigned int off_pvt_kp;        // 0x2000:00
+    unsigned int off_pvt_kd;        // 0x2001:00
+    unsigned int off_mode_of_op;    // 0x6060:00
+    unsigned int off_reserved_tx;   // 0x2FFD:00
+    unsigned int off_status_word;   // 0x6041:00
+    unsigned int off_pos;           // 0x6064:00
+    unsigned int off_vel;           // 0x606C:00
+    unsigned int off_torque;        // 0x6077:00
+    unsigned int off_error;         // 0x603F:00
+    unsigned int off_mode_disp;     // 0x6061:00
+    unsigned int off_reserved_rx;   // 0x2FFE:00
+};
+
+std::vector<SlaveOffsets> slave_offsets;
+```
+
+
+
+#### 配置从站DC时钟
 
 在 EtherCAT 开发中，特别是涉及到**多轴伺服电机的同步插补控制**时，`ecrt_slave_config_dc()` 是必不可少的。它负责配置 EtherCAT 的核心杀手锏：**分布式时钟 (Distributed Clocks, 简称 DC)**。如果不配置 DC，主站发包到达各个从站的时间会有微小的网络延迟差（Jitter），导致多个电机动作不一致。配置了 DC 后，总线上的所有从站会根据一个“参考时钟”对齐时间，确保所有电机在**同一微秒**内同步执行指令。
 
@@ -845,8 +867,6 @@ void EthercatAdapterIGH::receivePhysical() {
     }
 }
 ```
-
-
 
 #### 发送数据
 
@@ -1942,6 +1962,50 @@ policy_step() 构造 observation 时读取这些缓存
 dmesg | tail -n 20
 ```
 
+## 核心数据结构
+
+``` c++
+class SerialPort {
+public:
+    SerialPort();
+    ~SerialPort();
+    
+    /* 只有一个串口，禁止拷贝构造和拷贝复制 */
+    SerialPort(const SerialPort&) = delete;
+    SerialPort& operator=(const SerialPort&) = delete;
+    SerialPort(SerialPort&&) = delete;
+    SerialPort& operator=(SerialPort&&) = delete;
+    
+    /* 打开/关闭操作 */
+    bool open(const std::string& device, int baudrate);
+    void close();
+    bool is_open() const;
+    
+    /* 读/写操作 */
+    int read(uint8_t* buffer, int max_len);
+    int write(const uint8_t* data, int len);
+    
+    bool set_baudrate(int baudrate);
+    void flush();
+    
+    const std::string& get_device_path() const { return device_path_; }
+    int get_baudrate() const { return baudrate_; }
+    int get_file_descriptor() const { return fd_; }
+
+private:
+    int baudrate_to_constant(int baudrate);
+    
+    int fd_;  					// 对应文件描述符
+    std::string device_path_;	// /dev/xxx(ttyUSB0)
+    int baudrate_;  			// 波特率
+    
+    struct termios oldtio_;
+    struct termios newtio_;
+};
+```
+
+
+
 ## CRC校验
 
 ### 为什么选择异或
@@ -2189,7 +2253,72 @@ uint8_t IMUParser::CRC8_Table(const std::vector<uint8_t>& data) {
 }
 ```
 
+## 面试相关
 
+维度一：避开“隐形地雷”——精准的 TTY 状态配置（Raw Mode 的本质）
+因为你懂了 TTY 中间有一层叫 **“线路规程 (Line Discipline)”** 的东西，你知道它是处理字符的，IMU 发送的是**二进制传感器数据**，里面很可能包含 0x03（在 ASCII 中是 Ctrl+C）、0x0A（换行符）。
+
+如果不把 TTY 设置为**绝对的原始模式 (Raw Mode)**，内核的线路规程就会自作主张：把 0x03 拦截下来当成中断信号（导致你的程序莫名其妙被杀掉），或者把 0x0A 替换成 0x0D 0x0A，导致你的 IMU 数据包校验和 (CRC) 永远对不上！
+
+**面试话术：**
+
+> “在处理 IMU 串口通信时，我深入研究了 Linux TTY 子系统架构。为了防止内核的 N_TTY 线路规程对二进制传感数据的转义（如回显、特殊控制字符捕获），我通过 cfmakeraw() 和修改 c_lflag 等标志位，彻底旁路了线路规程的加工机制，确保应用层拿到的是纯净、无损的字节流。很多新手遇到 IMU 数据丢包或 CRC 校验失败，其实根源都在于没有理解 TTY 的工作模式。”
+
+------
+
+
+
+维度二：系统级性能调优——理解阻塞与缓冲区
+
+**普通学生：** 写一个 while(1) { read(fd, buf, 100); }，读不到数据就一直卡着。
+**你的深度：**
+你了解 TTY 的底层是有一层缓冲区（Flip Buffer）的。IMU 的频率很高（比如 400Hz），如何高效读取而不占用过多 CPU，同时不增加延迟？
+你需要深度理解 termios 里的 VMIN 和 VTIME 机制。
+
+- **VMIN=0, VTIME=0：** 非阻塞轮询（极其消耗 CPU，企业开发绝对禁止）。
+- **VMIN>0, VTIME>0：** 企业级常用的组包读取。比如 IMU 一帧数据是 32 字节。你可以设置 VMIN=32。内核 TTY 驱动收到数据后，不到 32 字节**不会唤醒**你的应用层进程，这极大减少了从内核态到用户态的上下文切换次数（Context Switch），降低了系统负载。
+
+**面试话术：**
+
+> “IMU 的数据具有高频且定长的特性。我没有使用简单的非阻塞轮询，而是结合 TTY 驱动底层的唤醒机制，通过精确调优 VMIN 和 VTIME 参数，让内核 TTY 子系统帮我做第一层的‘数据聚合’。只有当完整的一帧数据到达缓冲区时，才触发系统调用唤醒读线程。这使得我的串口接收模块在保证实时性的同时，将 CPU 占用率降到了最低。”
+
+------
+
+
+
+维度三：高并发与异步架构——结合 I/O 多路复用
+
+**普通学生：** 串口收数据就专门开一个死循环线程。如果以后加了 GPS 串口、雷达网口，就再开一堆线程。
+**你的深度：**
+既然串口 /dev/ttyS0 也是一个文件描述符 (FD)，它完全可以和网络 Socket、Eventfd 统一管理。
+
+- 使用 epoll 或 select 来监听 TTY 文件的可读事件。
+- 结合 **Ring Buffer (环形缓冲区)**：在单线程中用 epoll 监听到 TTY 有数据，立刻 read 出来塞进 Ring Buffer，然后继续去监听其他设备。另一个专门的数据处理线程从 Ring Buffer 取出数据进行解包和卡尔曼滤波计算。这种**“I/O 与 计算解耦”**是典型的企业级架构。
+
+**面试话术：**
+
+> “我将 TTY 串口读取模块设计为异步事件驱动架构。因为串口在 Linux 中也是标准的字符设备 FD，我利用 epoll 将 IMU 串口、控制端 TCP Socket 统一放入事件循环中管理。同时引入了无锁环形缓冲区(Lock-free Ring Buffer)，解决了底层 TTY 高频接收与上层姿态解算算法处理速度不匹配的生产-消费问题。”
+
+
+
+维度四：排障与调试能力（Debug 能力是高级工程师的试金石）
+
+**普通学生：** 串口读不到数据，只会重启程序、拔插排线。
+**你的深度：**
+你知道数据流向是：硬件 -> 中断 -> TTY Buffer -> VFS -> 应用程序。排错也要一层一层剥开。
+
+1. **硬件层：** 用示波器看引脚波形。
+2. **驱动层：** 运行 dmesg | grep tty。如果看到 ttyS0: input overrun，你就知道是 CPU 负载太高，内核 TTY Flip Buffer 溢出了，数据在内核态就丢了，应用层怎么改代码都没用。
+3. **VFS 层：** 发现无法打开 /dev/ttyUSB0。你会用 lsof /dev/ttyUSB0 或 fuser 去查是不是 ModemManager 或者其他无头进程占用了 TTY 设备。
+4. **不写代码看数据：** 你知道如何使用 Linux 原生工具链排障。通过命令 stty -F /dev/ttyUSB0 raw speed 115200 配置终端，然后直接用 cat /dev/ttyUSB0 | hexdump -C 就能在终端里验证底层硬件有没有发数据过来。
+
+**面试话术：**
+
+> “在开发过程中，我不仅关注应用层代码，更注重构建完整的 Linux 系统级排障链路。遇到数据异常时，我会通过 dmesg 排查底层的 overrun 溢出，使用 lsof 排查 TTY 占用，利用 stty 和 hexdump 甩开自己写的代码，直接验证底层链路。这种定位问题的思维，帮助我在项目中快速隔离了硬件层、内核驱动层和应用层的 Bug。”
+
+**总结：**
+不要在简历上写“熟练使用 termios 库读取串口”。
+改成：**“基于 Linux TTY 子系统特性，设计并实现高吞吐、低延迟的 IMU 数据采集管道，通过旁路线路规程与精准调优 I/O 参数，解决了高频二进制数据的丢包与粘包问题，并结合 epoll 构建了高并发传感器数据融合框架。”**
 
 # 推理
 
@@ -2459,15 +2588,17 @@ uint8_t IMUParser::CRC8_Table(const std::vector<uint8_t>& data) {
 
 这一层如果能拿训练日志或仿真数据做 replay 对齐，会省很多时间。
 
-## 模式扩展
+# 手柄
 
-基础 locomotion 跑稳之后，再考虑：
+``` shell
+cat /proc/bus/input/devices
 
-- frame_stack
-- interrupt
-- attn_enc
-- beyondmimic
-- motion prior
-- Python binding
+ls -l /dev/input/event*
 
-这些都应该是第二阶段，不要一开始全做。
+ls -l /dev/event*
+
+sudo evtest
+```
+
+
+

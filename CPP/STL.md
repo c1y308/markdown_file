@@ -2404,9 +2404,9 @@ if (key_compare(a, b)) { … }  // 通过该对象调用
 
 哈希表（Hash Table）是一种能以**常数平均时间 O(1)** 完成插入、删除和查找操作的基础数据结构。
 
-哈希表的核心思想是使用哈希函数（Hash Function）将任意类型的键值（Key）映射到一个大小可接受的索引范围内。
+哈希表的核心思想是使用哈希函数（`Hash Function`）将任意类型的键值（`Key`）映射到一个大小可接受的索引范围内。哈希表真正节省的是：**不需要按照 key 的最大值预留整个地址空间。**
 
-1. **哈希函数 (`HashFcn`)**：负责根据键值生成一个哈希码（hash code），通常是 `size_t` 类型。
+1. **哈希函数 (`HashFcn`)**：负责根据键值生成一个哈希码（`hash code`），通常是 `size_t` 类型。
 2. **映射定位 (Modulus / Mapping)**：得到哈希码后，通过取模运算（如 `hash_code % bucket_count`），将其映射到`bucket`数组的一个具体索引上。
 
 <img src="./assets/为什么要有哈希表.png" alt="为什么要有哈希表" style="zoom:25%;" />
@@ -2701,19 +2701,15 @@ _Node_iterator& operator++() {
 
 分为**仿函数**和**函数指针**形式传入。
 
-![哈希函数如何传入](./assets/哈希函数如何传入.png)
+<img src="./assets/哈希函数如何传入.png" alt="哈希函数如何传入" style="zoom: 33%;" />
 
 也可以以偏特化实现哈希函数：
 
-![偏特化实现哈希函数](./assets/偏特化实现哈希函数.png)
+<img src="./assets/偏特化实现哈希函数.png" alt="偏特化实现哈希函数" style="zoom:33%;" />
 
 ### 通过`variadic templates`实现
 
-![万用哈希函数实现](./assets/万用哈希函数实现.png)
-
-## `<unordered_set/multiset>`
-
-## `<unordered_map/multimap>`
+<img src="./assets/万用哈希函数实现.png" alt="万用哈希函数实现" style="zoom:33%;" />
 
 
 

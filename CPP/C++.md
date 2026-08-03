@@ -291,7 +291,7 @@ add_library(<name> [STATIC | SHARED | MODULE | OBJECT | INTERFACE]
 
 ---
 
-#### 添加头文件搜索路径
+#### 头文件搜索路径 / 头文件传播关键字
 
 `target_include_directories` —— **指定头文件搜索路径**
 
@@ -306,7 +306,7 @@ target_include_directories(<target>
 - `<target>`：必须是由 `add_library` 或 `add_executable` 创建的目标。
 - **路径**项通常是绝对路径或相对路径（相对于当前 `CMakeLists.txt`），常用 `CMAKE_CURRENT_SOURCE_DIR` 来构造。
 
-#### 传播控制关键字
+---
 
 是整个命令的精华，用来管理依赖关系中的包含路径传递：
 
@@ -317,7 +317,7 @@ target_include_directories(<target>
   适用于：**库内部使用头文件，不暴露给使用者（极少情况）**。
 
 - `INTERFACE`：
-  包含目录不会用于 `<target>`库自己的编译，但会**传递**给所有直接链接了该目标的其他目标。
+  包含的搜索目录不会用于 `<target>`库自己的编译，但会**传递**给直接链接了该目标的其他目标。
   
   适用于：header-only 库（因为 `header_only` 不编译任何源文件，所以它自身不需要 `include/`，但任何链接它的目标都需要这个路径才能找到头文件）或者**提供纯接口依赖**的场景。
   
@@ -363,7 +363,7 @@ target_link_libraries(app PRIVATE my_lib)
 
 - `app` 会自动获得 `include/` 目录作为包含路径，从而能 `#include "my_lib/api.h"`。
 - 但 `app` **不会**获得 `src/` 目录，因此无法包含 `internal.h`，实现了良好的封装。
-- 比如`a.hpp`在库A的搜索路径中但是`target_include_directories`时是`private`属性，`b.cpp`链接了库A，但是include了`a.hpp`，会编译报错。
+- 比如`a.hpp`在库A的搜索路径中，但是在`target_include_directories`时是`private`属性；`b.cpp`链接了库A，但是`include`了`a.hpp`，会编译报错。
 
 对于 `header-only` 库（`INTERFACE` 库）：
 
@@ -383,77 +383,84 @@ target_include_directories(RCom_base INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 ### 链接库 / 生成可执行文件
 
-#### 链接库
+#### 链接库 / 链接传播关键字
 
-以 `target_link_libraries(libB XXX libA)` 为例，即「目标 libB 通过 XXX 权限链接目标 libA」，逐层拆解。
+以 `target_link_libraries(libB XXX libA)` 为例，即「目标 `libB` 通过 XXX 权限链接目标 `libA`」，逐层拆解。
 
 ---
 
-`PRIVATE`：私有依赖，仅自身使用
+`PRIVATE`：私有依赖，仅自身使用：
 
-- **对 libB 自身**：libB 编译、链接时都会使用 libA，能访问 libA 所有公开的头文件、函数、符号。
-- 对下游目标（比如链接 libB 的 app）：完全感知不到 libA 的存在。
-  - **不会自动继承 libA 的头文件搜索路径。**
-  - **不会自动链接 libA。**
-  - 不会继承 libA 的任何编译选项、宏定义等属性。
+- **对 libB 自身**：`libB` 编译、链接都会使用 `libA`，能访问 `libA` 所有公开的头文件、函数、符号。
+- 但对下游目标（比如链接 `libB` 的 app）：完全感知不到 `libA` 的存在。
+  - **不会自动继承 `libA` 的头文件搜索路径。**
+  - **不会自动链接 `libA`。**
+  - **不会继承` libA` 的任何编译选项、宏定义等属性**。
 
-**适用场景**：libA 只在 libB 的内部实现（.cpp 文件）中使用，libB 的公开头文件（.h）里完全不涉及 libA 的类型、函数、宏。
+**适用场景**：`libA` 只在 `libB` 的内部实现（.cpp 文件）中使用，`libB` 的公开头文件（.h）里完全不涉及 `libA` 的类型、函数、宏。
 
 > 典型例子：你的库内部用 spdlog 写日志，但对外头文件里没有任何 spdlog 相关的代码。
 
-`PUBLIC`：公开依赖，自身用且向下传递
+---
+
+`PUBLIC`：公开依赖，自身用且向下传递。
 
 - **对 libB 自身**：和 PRIVATE 一样，完整使用 libA。
-- 对下游目标 app：完整继承 libA 的**所有公开属性（如果库本身的`target_include_directories`为`private`则无法继承）**。
-  - 自动获得 libA 的头文件搜索路径（不用再写 `target_include_directories`）
-  - 自动链接 libA（不用再写 `target_link_libraries(app libA)`）
-  - 自动继承 libA 的编译选项、宏定义、甚至 libA 自己的 PUBLIC 依赖（传递闭包）
+- 对下游目标 `app`：完整继承 `libA` 的**所有公开属性（如果库本身的`target_include_directories`为`private`则无法继承）**。
+  - **自动获得 `libA` 的头文件搜索路径**（不用再写 `target_include_directories`）
+  - **自动链接 `libA`**（不用再写 `target_link_libraries(app libA)`）
+  - **自动继承 `libA` 的编译选项、宏定义**、甚至 libA 自己的 PUBLIC 依赖（传递闭包）
 
-**适用场景**：libB 的公开头文件里用到了 libA 的内容（比如函数参数、类成员、宏定义、类型别名）。如果此时不用 PUBLIC，下游编译 libB 的头文件时会直接报错「找不到头文件」「未定义的类型」。
+**适用场景**：`libB` 的公开头文件里用到了 `libA` 的内容（比如函数参数、类成员、宏定义、类型别名）。如果此时不用 PUBLIC，下游编译 libB 的头文件时会直接报错「找不到头文件」「未定义的类型」。
 
 > 典型例子：你的库头文件里用 Eigen 矩阵作为函数参数，下游调用你的函数必须认识 Eigen 类型。
 
-`INTERFACE`：接口依赖，自身不用、只传给下游
+---
 
-- **对 libB 自身**：libB 自己不会链接 libA，编译时也不会使用 libA 的头文件。
+`INTERFACE`：接口依赖，自身不用、只传给下游。
+
+- **对 libB 自身**：`libB` 自己不会链接`libA`，编译时也不会使用 `libA` 的头文件。
 - **对下游目标 app**：和 PUBLIC 一样，完整继承 libA 的所有属性。
 
-**适用场景**：纯头文件库（Header-only Library）：自身没有 .cpp 实现，不需要编译链接，只用来向下游打包传递一组依赖。
+**适用场景**：**纯头文件库**（Header-only Library）：自身没有 .cpp 实现，不需要编译链接，只用来向下游打包传递一组依赖。
 
 #### 动态库与静态库
 
-> 我有个困惑点，比如a链接了liba，但是liba依赖libb，a要使用liba的话肯定有libb参与啊？为什么说a就不需要链接libb了？
+> 我有个困惑点，比如 `a` 链接了 `liba`，但是`liba` 依赖`libb`，`a `要使用`liba`的话肯定有`libb `参与啊？为什么如果`liba`使用了`private`链接了`libb`也可以？`a` 不需要链接`libb`？
 
-这个困惑非常典型，核心是混淆了两个概念：**「最终链接/运行时 libb 必须存在」**和**「CMake 会不会自动帮你把 libb 加到 a 的链接列表里」**。 你的直觉是对的——只要 liba 调用了 libb 的代码，那最终生成可执行文件时，libb 的符号肯定要参与。
-
-但 `PRIVATE` 的意思不是「libb 消失了」，而是**「这个依赖是 liba 的内部私事，CMake 不会自动把它透传给下游 a」**。 至于下游 a 到底要不要手动写 `target_link_libraries(a libb)`，完全取决于 liba 是**共享库**还是**静态库**，两者天差地别。
+ `PRIVATE` 的意思不是「libb 消失了」，而是**「这个依赖是 liba 的内部私事，CMake 不会自动把它透传给下游 a」**。 至于下游 a 到底要不要手动写 `target_link_libraries(a libb)`，完全取决于 liba 是**共享库**还是**静态库**，两者天差地别。
 
 ---
 
-共享库（SHARED）：PRIVATE 真的能彻底隐藏，a 完全不用管 这是最符合「a 不需要链接 libb」说法的场景，也是 CMake 设计的初衷。共享库（`.so`/`.dll`/`.dylib`）是**完整的链接产物：构建 liba 的时候，链接器已经完成了 liba 和 libb 的完整符号解析**。
+动态库（SHARED）：PRIVATE 真的能彻底隐藏，a 完全不用管。 这是最符合「a 不需要链接 libb」说法的场景，也是 CMake 设计的初衷。共享库（`.so`/`.dll`/`.dylib`）是**完整的链接产物（动态库链接动态库不会复制代码，只记录依赖关系，符号只做引用标记，运行时的时候加载；链接静态库则会复制代码）**：构建 liba 的时候，链接器已经完成了 liba 和 libb 的完整符号解析。
 
 > 动态库自己是 “成品”，可以选择把依赖合并进自己内部。
 
-- 如果 libb 也是共享库：liba 的动态库文件里会记录「我依赖 libb」，但这个依赖是 liba 的内部信息。
+- **`libb` 也是动态库**：`liba` 的动态库文件里会记录「我依赖 `libb`」，但这个依赖是 `liba` 的内部信息。
 
-- 如果 libb 是静态库：libb 的代码会被直接打包进 liba 的动态库内部，对外完全不可见，**如果liba 是 PUBLIC 链接 libb 则会发生错误！（两份链接），必须用 PRIVATE!**
+- **`libb` 是静态库**：`libb` 的**代码会被直接打包**进 `liba` 的动态库内部，对外完全不可见；**如果`liba` 再`PUBLIC` 链接静态库`libb` 则会传递依赖关系让`a`再次打包`libb`发生错误！（两份链接）动态库链接静态库必须用 `PRIVATE`!**
 
-当下游 a 链接 liba 时：
+当下游 `a` 链接 `liba` 时：
 
-- 编译链接阶段：a 只需要解析 liba 对外暴露的符号，**完全不需要知道 libb 的存在，也不需要 libb 的库文件**。
--  运行阶段：操作系统加载器会顺着 liba 的依赖链自动加载 libb，但这是运行时行为，和 a 的编译链接无关。共享库的 `PRIVATE` 依赖是真正的**封装**：下游 a 感知不到 libb，也不需要做任何额外操作，符合「a 不用链接 libb」的描述。
+- 编译链接阶段：`a` 只需要解析 `liba` 对外暴露的符号，**完全不需要知道 `libb` 的存在，也不需要 `libb` 的库文件**。
+-  运行阶段：操作系统加载器会顺着 liba 的依赖链自动加载 libb，但这是**运行时行为**，和 a 的编译链接无关。共享库的 `PRIVATE` 依赖是真正的**封装**：下游 a 感知不到 libb，也不需要做任何额外操作，符合「a 不用链接 libb」的描述。
 
 ---
 
-静态库（STATIC）：**静态库的构建不调用链接器**。 静态库（`.a`/`.lib`）只是一堆目标文件（`.o`/`.obj`）的压缩归档包，它**没有真正的链接步骤**。你对静态库写 `target_link_libraries`，本质只是在 CMake 的目标属性里记录「这个静态库在使用时需要这些依赖」，并不会真的把 libb 的代码打包进 liba 里。
+静态库（STATIC）：**静态库的构建不调用链接器**。 静态库（`.a`/`.lib`）只是一堆目标文件（`.o`/`.obj`）的压缩归档包，它**没有链接步骤**。对静态库写 `target_link_libraries`，本质只是在 CMake 的目标属性里记录「这个静态库在使用时需要这些依赖」，并不会真的把 `libb` 的代码打包进 `liba` 里，**打包替换是链接做的事情**。
 
 > 如果 `a.cpp` 调用了 libb 的函数，`a.o` 里只会留下一个「未定义的符号占位符」；`liba.a` 里完完全全只有 liba 自己的代码，libb 的半行代码都不会出现在里面；
 >
 > 静态库自己是 “半成品”，不能合并任何依赖。
 
-如果 liba 是静态库，且用 `PRIVATE` 链接了 libb：CMake 只会保证：liba 自己编译源码时，能找到 libb 的头文件；CMake **不会**把 libb 的目标文件合并进 liba.a；CMake **不会**告诉下游 a：「你链接 liba 的时候，还要顺便链 libb」。 最终结果就是：a 只写 `target_link_libraries(a PRIVATE liba)` 的话，链接器会直接报 `undefined reference`（未定义的引用）——因为 liba 调用了 libb 的函数，但 libb 的代码根本没被链进最终的可执行文件里。 
+如果 `liba` 是静态库，且用 `PRIVATE` 链接了 `libb`：CMake 只会保证`liba` 编译时能找到 `libb` 的头文件；但 CMake **不会执行链接**把 `libb` 的目标文件合并进 `liba.a`；CMake 不会在`a`链接 `liba` 的时候，再链接 `libb`。 
 
-两种解决方案 1. **改成 `PUBLIC` 链接**：CMake 会自动把 libb 追加到 a 的链接列表里，a 不用手动写，这是最常用的做法； 2. **保持 `PRIVATE`，a 手动补链**：相当于你知道 liba 的内部依赖，自己手动补上 `target_link_libraries(a PRIVATE libb)`。
+最终结果是：`target_link_libraries(a XXX liba)` 让`a`链接`liba`链接器会直接报 `undefined reference`（未定义的引用）——因为 `liba` 调用了 `libb` 的函数，但 `libb` 的代码根本没被链接进最终的可执行文件里，**如果`liba`是`PRIVATE`链接的`libb`库**。 
+
+两种解决方案：
+
+1. **改成 `PUBLIC` 链接**：CMake 会自动把 libb 追加到 a 的链接列表里，a 不用手动写，这是最常用的做法；
+2. **保持 `PRIVATE`，a 手动补链**：相当于你知道 liba 的内部依赖，自己手动补上 `target_link_libraries(a PRIVATE libb)`。
 
 | liba 类型     | liba 对 libb 的链接方式 | 下游 a 是否需要手动链接 libb | 核心原因                                                     |
 | ------------- | ----------------------- | ---------------------------- | ------------------------------------------------------------ |
@@ -548,7 +555,7 @@ CV 类型限定符 (CV-Qualifiers)
 
 ## `typename`
 
-在模板定义体内部，当你想使用某个**依赖于模板参数的东西**作为类型使用时，必须用 `typename` 告诉编译器：“这是一个类型”。
+在模板定义体内部，当你想使用某个**依赖于模板参数的东西**作为类型使用时，必须用 `typename` 告诉编译器：“这是一个类型”；`typename`默认后面必须使用`::`才是声明为一个类型。
 比如 `std::set` 内部可能会有这样的代码：
 
 ```c++
@@ -1734,34 +1741,11 @@ public:
 
 ## `<chrono>`
 
-`<chrono>` 是 C++11 引入的标准库头文件，提供了**类型安全、高精度**的时间处理功能，核心围绕 “时长”“时间点”“时钟” 三个概念设计，解决了传统 C 风格时间函数（如 `time()`、`clock()`）精度低、类型不安全的问题。
-
-### `duration`
-
-表示 “一段时间间隔”，如 3 秒、50 毫秒。定义为：
-
-``` c++
-template <class Rep, class Period = ratio<1>>
-class duration;
-
-// Rep：数值类型（如 int、double），存储时长的 “数量”。
-// Period：时间单位，用 std::ratio 表示（如 ratio<1> 是秒，ratio<1, 1000> 是毫秒）。
-```
-
-**预定义时长**（为方便使用，标准库定义了常用类型）：
-
-``` c++
-using nanoseconds  = duration<long long, nano>;   // 纳秒
-using microseconds = duration<long long, micro>;  // 微秒
-using milliseconds = duration<long long, milli>;  // 毫秒
-using seconds      = duration<long long>;          // 秒
-using minutes      = duration<int, ratio<60>>;     // 分钟
-using hours        = duration<int, ratio<3600>>;   // 小时
-```
+`<chrono>` 是 C++11 引入的标准库头文件，提供了**类型安全、高精度**的时间处理功能，核心围绕、“时钟”、“时间点”、 “时长” 三个概念设计，解决了传统 C 风格时间函数（如 `time()`、`clock()`）精度低、类型不安全的问题。
 
 ### `time_point`
 
-表示 “某个时钟下的具体时刻”，定义为：
+表示 “某个时钟下的具体时刻”，即时间点。定义为：
 
 ``` c++
 template <class Clock, class Duration = typename Clock::duration>
@@ -1810,7 +1794,28 @@ int main() {
     return 0;
 }
 ```
+### `duration`
 
+表示 “一段时间间隔”，如 3 秒、50 毫秒。定义为：
+
+``` c++
+template <class Rep, class Period = ratio<1>>
+class duration;
+
+// Rep：数值类型（如 int、double），存储时长的 “数量”。
+// Period：时间单位，用 std::ratio 表示（如 ratio<1> 是秒，ratio<1, 1000> 是毫秒）。
+```
+
+**预定义时长**（为方便使用，标准库定义了常用类型）：
+
+``` c++
+using nanoseconds  = duration<long long, nano>;   // 纳秒
+using microseconds = duration<long long, micro>;  // 微秒
+using milliseconds = duration<long long, milli>;  // 毫秒
+using seconds      = duration<long long>;          // 秒
+using minutes      = duration<int, ratio<60>>;     // 分钟
+using hours        = duration<int, ratio<3600>>;   // 小时
+```
 
 
 # 命名空间
@@ -3403,7 +3408,7 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
   }
   ```
 
-- **实例化 (Instantiation) 是模板特有的概念**，是**编译器**根据你写的模板**生成具体代码**的过程。模板是**编译期代码生成器**。你写的模板代码不是任何具体的函数或类，只是一个 "生成代码的配方"。编译器不会为模板本身生成任何机器码，只有当你**使用**模板时，编译器才会根据模板生成对应的具体代码，这个过程就叫做**实例化**。
+- 实例化 (Instantiation) 是模板特有的概念，是**编译器**根据你写的模板**生成具体代码**的过程。模板是**编译期**代码生成器，**因此模板函数的定义需要放在头文件中**。模板代码不是任何具体的函数或类，只是一个 "生成代码的配方"。编译器不会为模板本身生成任何机器码，只有当你**使用**模板时，编译器才会根据模板生成对应的具体代码，这个过程就叫做**实例化**。
 
   ``` c++
   MyClass<int> obj; // 触发实例化，编译器根据蓝图生成了 MyClass<int> 这个具体的类
@@ -3478,7 +3483,7 @@ bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
 
 对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
 
-#### 作为对象
+#### 作为（仿）对象类型
 
 作为普通对象没什么好说的。
 
@@ -3488,7 +3493,7 @@ bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
 
 这又分两种情况：
 
-- **通过构造函数传入对象**：标准库算法（如 `std::sort`）是函数模板，通常接受仿函数对象作为对象。如果不想把仿函数类型写死在模板参数里，我们完全可以设计一个类模板，**通过模板构造函数来接收外部的仿函数对象**。
+- **通过构造函数传入对象（模板参数还是起修饰类型作用）**：标准库算法（如 `std::sort`）是函数模板，通常接受仿函数对象作为对象。如果不想把仿函数类型写死在模板参数里，完全可以设计一个类模板，**通过模板构造函数来接收外部的仿函数对象**。
 
   ``` c++
   template <typename T>
@@ -3548,7 +3553,7 @@ bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
 
 对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
 
-#### 作为对象
+#### 作为（仿）对象类型
 
 在这个例子里，`std::greater<int>()` 创建了一个实实在在的**对象**，然后把它传给了 `std::sort`。对于 `sort` 来说，`comp` 就是一个**函数参数**。因为 `sort` 本身就是一个函数，所以它接收参数是再自然不过的事，不需要“在内部创建实例”。
 
@@ -3573,6 +3578,22 @@ void sort(RandomIt first, RandomIt last, Compare comp) {
 ## 使用场景
 
 ### 模板函数
+
+**模板函数的实现必须放在头文件中！和编译链接的原理相关。**
+
+---
+
+如果子类定义了一个与父类**同名、模板参数列表相同、函数参数列表也相同**的函数模板，那么结果是：
+
+> 子类的函数模板会**隐藏**父类的同名函数模板，而不是重写（override）它。
+>
+> 通过父类引用调用时，调用父类版本；函数模板不是虚函数，调用哪个版本取决于表达式的**静态类型**。
+>
+> 通过子类对象，也可以使用作用域限定符调用父类函数。
+
+原因是：**函数模板不能是虚函数**，所以不存在基于运行时动态类型的虚函数重写。
+
+---
 
 可以指定类型，也**可以让编译器进行参数推导（类模板必须指定）**：
 
@@ -3601,11 +3622,86 @@ printPair(10, "Hello");  // T1=int, T2=const char*
 printPair(3.14, true);   // T1=double, T2=bool
 ```
 
+#### 编写函数：传入容器类型与元素类型，构成容器
+
+**核心思路：传入的只能是变量，而不能传入类型；就算需要类型也只能传入变量然后在内部使用`decltype()`获取**。
+
+---
+
+``` c++
+template<typename Container, typename T>
+void test_moveable(Container cntr, T elem){
+    typename Container<T> c;
+    
+    for(int i = 0; i < SIZE; ++i){
+        c.insert(c.end(), T());
+    }
+    
+    Container<T> c1(c);
+    Container<T> c2(std::move(c));
+    c1.swap(c2);
+}
+
+test_moveable(list(), MyString());  // 此处也有错误，声明一个list必须指定<>类型。
+```
+
+`error:'Container is not a template'`，即使加上`typename`也不行：`typename`默认后面需要使用`::`才是声明为一个类型。
+
+这种写法本质是忽略了`Container`推导需要`<value_type, Alloc>`这两个模板参数。
+
+---
+
+因此正确实现为：
+
+``` c++
+template<typename Container>
+void test_moveable(Container c){
+    typedef typename iterator_traits<typename Container::iterator>::value_type valtype;  // 利用迭代器萃取器获得 value_type
+    
+    for(int i = 0; i < SIZE; ++i){
+        c.insert(c.end(), valtype());
+    }
+    
+    Container<T> c1(c);
+    Container<T> c2(std::move(c));
+    c1.swap(c2);
+}
+
+test_moveable(list<MyString>()); 
+```
+
+---
+
+为了让编译器能够只推导容器类型，而不推导容器的`value_type`和`alloc`，需要使用**模板模板参数**。
+
+``` c++
+template<typename T,
+		 template<class>
+         class Container
+    >
+class {
+private:
+    Container<T> c;  // 此处 Container 就可以被推导为只有容器类型
+	/* ... */
+}
+```
+
+但是这种只能通过编译，真实使用的时候还是有问题。（**模板只能算是半成品，因此会有 SFINAE 机制**）
+
+---
+
+最终版的写法为配合别名模板：
+
+``` c++
+```
+
+
+
 ### 模板类
 
 类模板是 C++ 中实现**泛型编程**的核心机制。它允许定义一个 “通用的类”，这个类不绑定具体的数据类型（比如 int、float、string 等），而是用一个**类型参数**（比如 T）来占位。
 
-**如果要指定类型的话在使用模板类创建`object`的时候就要指定类型**，在 C++17 及以后如果你提供了构造函数，编译器可以从初始化数据中推导 `T`。。
+**如果要指定类型的话在使用模板类创建`object`的时候就要指定类型**，在 C++17 及以后如果你提供了构造函数，编译器可以从初始化数据中推导 `T`。
 
 ``` c++
 // 定义一个简单的栈类模板
@@ -3842,7 +3938,7 @@ public:
 
 > 详细使用可见STL部分的万用哈希函数、tuple的实现。（模板递归）
 
-`variadic templates`（since C++11）。把调用者传入的参数分为一个（和`argc`和`argv`不一样：可变模板第一个参数不用是参数的数量，可以随便做任何事情）和一包。
+`variadic templates`（since C++11）。通过`typename T, typename... Types`把调用者传入的参数分为一个（和`argc`和`argv`不一样：可变模板第一个参数不用是参数的数量，可以随便做任何事情）和一包（`typename... Types`中的`Types`代表了着一包参数，它自身没有拆分功能，可以看作就是**替换**）。
 
 如果想要知道一包有几个参数，使用`sizeof...(args);`。
 
@@ -3860,17 +3956,17 @@ void print(const T &FirstArg, const Types&... args){
 
 在 C++ 中，省略号 `...` 在可变参数模板中有三种完全不同的用法和位置，这种设计不是随意的，而是为了**在语法上严格区分“声明一个包”和“展开一个包”**。
 
- 1. `typename... Args` （声明模板参数包）
+ 1. `typename... Types` （声明模板参数包）
 
-- **位置：** `...` 在类型名 (`typename` 或 `class`) 的**右边**，包名 (`Args`) 的**左边**。
-- **含义：** 告诉编译器：“`Args` 不是一个单一的类型，而是一个**类型的集合（包）**，它可能包含 0 个或多个任意类型。”
-- **示例：** `template <typename... Args>`
+- **位置：** `...` 在类型名 (`typename` 或 `class`) 的**右边**，包名 (`Types`) 的**左边**。
+- **含义：** 告诉编译器：“`Types` 不是一个单一的类型，而是一个**类型的集合（包）**，它可能包含 0 个或多个任意类型。”
+- **示例：** `template <typename... Types>`
 
- 2. `Args... args` （声明函数参数包）
+ 2. `Types... args` （声明函数参数包）
 
-- **位置：** `...` 在类型包 (`Args`) 的**右边**，变量名 (`args`) 的**左边**。
-- **含义：** 告诉编译器：“用刚才那个类型包 `Args`，实例化出一堆对应的**变量**，并将这些变量打包命名为 `args`。”
-- **示例：** `void printAll(Args... args)`
+- **位置：** `...` 在类型包 (`Types`) 的**右边**，变量名 (`args`) 的**左边**。
+- **含义：** 告诉编译器：“用刚才那个类型包 `Types`，实例化出一堆对应的**变量**，并将这些变量打包命名为 `args`。”
+- **示例：** `void printAll(Types... args)`
 
  3. `args...` （包展开 Pack Expansion）
 
@@ -3992,6 +4088,40 @@ checkSensorValid(T value) {
     return value == value && value > -40.0f && value < 125.0f;
 }
 ```
+
+## 别名模板
+
+不可以对别名模板进行偏特化或者特化。
+
+### 如何使用
+
+更加方便的使用模板，**最不可替代的是配合模板模板参数进行使用**。
+
+``` c++
+template<typename T>
+using vec = std::vector<T, MyAlloc<T>>;
+
+// then
+
+vec<int> coll;
+// is equal to
+std::vector<int, MyAlloc<int>> coll;
+```
+
+### 为什么macro不行
+
+``` c++
+#define vec<T> template<typename T> std::vector<T, MyAlloc<T>>;
+
+vec<int> coll;
+// is equal to
+template<typename int>
+std::vector<int, MyAlloc<int>> coll;
+
+// 使用 typedef 也无法达到同样效果，因为 typedef 不接收参数。
+```
+
+
 
 # 字符串类
 
@@ -4270,7 +4400,7 @@ string sub2 = s.substr(6);     // 从下标6到末尾："World"
 | `replace(pos, len, str)` | 替换指定位置的字符     |
 | `clear()`                | 清空字符串（变为空串） |
 
-### 与C风格字符串互转
+### C风格互转
 
 C++ 兼容 C 语言，`string` 提供函数转换为 `const char*`（C 风格字符串）：
 
@@ -5548,7 +5678,7 @@ public:
 
 编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接 pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；然后`#include <thread>`。
 
-### 常用API
+### 线程 API
 
 #### 创建线程
 
@@ -5956,7 +6086,7 @@ void flexible_increment() {
 
 ### 读写锁
 
-核心特性：**读共享、写独占**。多个线程可同时持有读锁，写锁持有期间所有其他线程都被阻塞。**读写锁仅用于读多写少场景**：读操作频率至少是写操作的 10 倍以上时，读写锁才能体现出性能优势
+核心特性：**读共享、写独占**。多个线程可同时持有读锁，写锁持有期间所有其他线程都被阻塞。**读写锁仅用于读多写少场景**：读操作频率至少是写操作的 10 倍以上时，读写锁才能体现出性能优势。
 
 #### 与原子读写锁的区别
 
@@ -5979,14 +6109,10 @@ void flexible_increment() {
   - **机制：自旋死等（罚站）。** 如果线程 A 发现有写者占用，它绝不主动睡觉（在它拥有的时间片内），而是在一个 `while` 循环里不断地使用 CPU 检查锁的状态：“好了没？好了没？好了没？”
   - **结果：** 线程 A 一直霸占着 CPU 核心不放，直到锁被释放它立刻冲进去。
 
----
-
 **2.底层依赖不同：**
 
 - **标准读写锁：** 深度依赖**操作系统内核的调度机制**。在 Linux 中，它底层通常调用 `futex`（快速用户态互斥锁）。加锁解锁操作可能涉及用户态到内核态的切换。
 - **原子读写锁：** 完全剥离操作系统，纯粹依赖 **CPU 硬件级别的原子指令**（如 x86 的 `LOCK CMPXCHG`，即 CAS 操作）。它在纯用户态运行，系统调度器甚至不知道这个锁的存在。
-
----
 
 **3.性能代价不同：**
 
@@ -6011,7 +6137,7 @@ public:
     bool try_lock();    // 尝试获取写锁（非阻塞）
     void unlock();      // 释放写锁
 
-    // 读锁操作
+    // 读锁操作（注意：API 不同！）
     void lock_shared();        // 获取读锁（阻塞）
     bool try_lock_shared();    // 尝试获取读锁（非阻塞）
     void unlock_shared();      // 释放读锁
@@ -6020,13 +6146,146 @@ public:
 
 #### 注意事项
 
-- 读锁和写锁使用**同一个`pthread_rwlock_unlock`函数**释放
+- 读锁和写锁使用**同一个`pthread_rwlock_unlock`函数**释放；
 
-- 默认实现通常是**读者优先**，可能导致**写者饥饿**（大量读者持续持有锁时，写者永远无法获取锁）
+- 默认实现通常是**读者优先**，可能导致**写者饥饿**（大量读者持续持有锁时，写者永远无法获取锁）；
 
-- 如需写者优先，可通过设置`pthread_rwlockattr_t`属性实现（不同系统支持程度不同）
+- 如需写者优先，可通过设置`pthread_rwlockattr_t`属性实现（不同系统支持程度不同）；
 
-- 仅在**读多写少**场景下性能优于互斥锁，写操作频繁时性能可能更差
+- 仅在**读多写少**场景下性能优于互斥锁，写操作频繁时性能可能更差；
+
+### `lock_guard`（锁的 RAII）
+
+#### 手动解锁的风险
+
+手动解锁存在风险：如果临界区内抛出异常、提前`return`，`unlock()`就不会执行，导致锁永远无法释放，造成**死锁**。
+
+#### 本质作用
+
+`lock_guard` **不是锁**，它是一个基于 RAII（资源获取即初始化）的**锁包装器**：
+
+- 构造函数中自动调用锁的`lock()`；
+- 析构函数中自动调用锁的`unlock()`；
+- 作用域结束时自动释放锁，完全避免忘记解锁或异常导致的死锁。
+
+零额外开销，性能和手动加解锁几乎一致,功能极简：不能手动提前解锁、不能转移锁的所有权。
+
+#### `lock_guard<M>`
+
+管理**独占加锁**模式：`std::lock_guard<M>`，**永远走独占加锁**。
+
+``` c++
+#include <mutex>
+#include <thread>
+
+std::mutex mtx;
+int shared_data = 0;
+
+void safe_writer() {
+    // 构造时自动加锁，函数结束析构时自动解锁
+    std::lock_guard<std::mutex> guard(mtx);
+    
+    shared_data++;  // 临界区
+    // 即使这里抛异常，guard的析构函数仍会执行，保证锁被释放
+}
+```
+
+#### `shared_lock<M>`
+
+读操作使用`std::shared_lock<M>`，**专门负责读的共享加锁**:
+
+``` c++
+#include <shared_mutex>
+#include <thread>
+
+std::shared_mutex rw_mtx;
+int shared_data = 0;
+
+// 读线程：共享锁，多个读线程可同时进入临界区
+void reader(int& out) {
+    std::shared_lock<std::shared_mutex> guard(rw_mtx);
+    out = shared_data; // 读操作
+}
+
+```
+
+
+#### `unique_lock<M>`
+
+`std::unique_lock` 同样是**独占模式的 RAII 锁守卫**，和 `lock_guard` 目标一致（自动管理独占锁的加解锁），但它是功能增强版。
+
+- **`lock_guard`**：设计哲学是「最小化、零开销」。只有构造加锁、析构解锁两个动作，没有任何额外功能，不能中途解锁、不能转移所有权、不能延迟加锁。适合绝大多数 “进入作用域加锁，离开作用域解锁” 的简单场景。
+
+- **`unique_lock`**：设计哲学是「灵活性优先」。在保证 RAII 自动解锁的基础上，提供了非常多的手动控制能力，应对复杂的同步场景。
+
+写操作使用`std::unique_lock<M>`，默认走独占加锁：
+
+``` c++
+// 写线程：独占锁，同一时间仅一个写线程
+void writer(int value) {
+    // 独占加锁，也可用 lock_guard<std::shared_mutex> guard(rw_mtx);
+    std::unique_lock<std::shared_mutex> guard(rw_mtx);
+    shared_data = value; // 写操作
+}
+```
+
+---
+
+**核心能力**：
+
+**1.延迟加锁：**
+
+构造时可以选择不立即加锁，等准备工作做完后再手动加锁，常用于多锁同时加锁、条件变量等场景。
+
+```cpp
+std::unique_lock<std::mutex> lock(mtx, std::defer_lock); // 构造时不加锁
+// ... 执行不需要锁的准备工作
+lock.lock(); // 手动加锁，进入临界区
+```
+
+**2.手动控制加解锁：**
+
+可以在生命周期内多次调用 `lock()` / `unlock()`，不用等到析构才释放锁。比如临界区中间有一段耗时的非共享操作，可以提前释放锁提高并发度。
+
+```cpp
+std::unique_lock<std::mutex> lock(mtx);
+// 临界区操作1
+lock.unlock(); // 提前释放锁，后面的操作不影响并发
+// 耗时的非共享计算
+lock.lock(); // 需要时再重新加锁
+// 临界区操作2
+```
+
+**3.支持锁的所有权转移（移动语义）：**
+
+`unique_lock` 支持移动，可以把锁的所有权转移给另一个 `unique_lock`，甚至作为函数返回值；而 `lock_guard` 既不能移动也不能拷贝。
+
+```cpp
+std::unique_lock<std::mutex> get_guard() {
+    std::unique_lock<std::mutex> lock(mtx);
+    // 初始化逻辑
+    return lock; // 移动返回，锁的所有权转移到调用方
+}
+```
+
+**4.配合条件变量使用：**
+
+这是 `unique_lock` 最经典的使用场景。`std::condition_variable` 的 `wait()` 方法内部会自动执行「释放锁 → 进入等待 → 被唤醒后重新加锁」的流程，这个过程要求锁支持手动 `unlock/lock`，`lock_guard` 做不到，因此标准库条件变量只接受 `unique_lock`。
+
+```cpp
+std::condition_variable cv;
+std::mutex mtx;
+bool ready = false;
+
+void worker_thread() {
+    std::unique_lock<std::mutex> lock(mtx);
+    // wait 内部会自动解锁、等待、唤醒后重新加锁
+    cv.wait(lock, []{ return ready; });
+    // 拿到锁后处理任务
+}
+```
+
+
 
 ### 一次执行
 
