@@ -69,7 +69,1618 @@ sudo apt install bear
 bear make  # 会在当前目录生成compile_commands.json
 ```
 
+# Shell
 
+​								$\boxed{\text{Shell = 你和 Linux 内核/程序之间的命令解释器}}$   
+
+**Shell 本身也是一个进程**。例如输入：
+
+``` shell
+ip link set eth0 up
+```
+
+Shell 负责把这一行解析成：
+
+```
+程序：ip
+参数1：link
+参数2：set
+参数3：eth0
+参数4：up
+```
+
+然后启动 `ip` 这个程序。以后写 `.sh` 脚本，本质上就是把很多这样的 Shell 命令和一些控制逻辑放在一起执行。结合现在 Debian / RK3588 的环境，优先学 Bash 就够了。
+
+## 命令结构
+
+最常见形式是：$\boxed{command \ option \ argument}$，例如：
+
+```shell
+ls -l /home
+
+ls       命令
+-l       option / 选项
+/home    argument / 参数
+```
+
+再比如：
+
+```shell
+ip addr show eth0
+
+ip
+ └── addr
+      └── show
+           └── eth0
+```
+
+Shell 本身并不知道 `addr show eth0` 是什么意思。它只是把参数传给`ip`，真正解释这些参数的是 `ip` 程序自己。
+
+## 空格非常重要
+
+Shell 默认使用空格分隔不同参数。例如：
+
+```shell
+mkdir test
+```
+
+相当于：
+
+```shell
+程序：mkdir
+参数：test
+```
+
+而：
+
+```shell
+mkdir my test
+```
+
+会被理解为：
+
+```shell
+mkdir
+参数1：my
+参数2：test
+```
+
+也就是创建两个目录。如果目录叫：
+
+```shell
+my test
+```
+
+必须写：
+
+```shell
+mkdir "my test"
+```
+
+或者：
+
+```shell
+mkdir my\ test
+```
+
+所以要建立一个非常重要的概念：$\boxed{\text{Shell 首先做字符串解析，然后才执行命令}}$。
+
+## 单引号、双引号、不加引号
+
+这个是 Shell 最重要的基础之一。假设：
+
+```shell
+name=world
+```
+
+那么：
+
+```shell
+echo hello $name
+
+# 输出
+hello world
+```
+
+---
+
+双引号：
+
+```shell
+echo "hello $name"
+```
+
+也输出：
+
+```
+hello world
+```
+
+因为**双引号里面 `$name` 仍然会进行变量展开**。
+
+---
+
+单引号：
+
+```shell
+echo 'hello $name'
+
+# 输出
+hello $name
+```
+
+所以可以记成：
+
+| 写法      | 变量 `$name` 是否展开 | 空格是否保持 |
+| --------- | --------------------- | ------------ |
+| `$name`   | 是                    | 不一定安全   |
+| `"$name"` | 是                    | 是           |
+| `'$name'` | 否                    | 是           |
+
+实际写 Shell 时非常推荐：
+
+```shell
+echo "$name"
+cd "$dir"
+rm "$file"
+```
+
+而不是裸写：
+
+```shell
+echo $name
+cd $dir
+rm $file
+```
+
+因为变量里面一旦有空格，裸变量很容易出问题。
+
+## Shell 变量
+
+### 定义变量
+
+#### 直接定义
+
+Shell 中可以直接定义变量，例如：
+
+```shell
+name="Xiang"
+cpu=7
+iface="eth0"
+```
+
+读取变量时，在变量名前面加 `$`：
+
+```shell
+echo "$name"
+echo "$cpu"
+echo "$iface"
+```
+
+输出：
+
+```
+Xiang
+7
+eth0
+```
+
+需要特别注意，Shell 中变量赋值时：
+
+```shell
+#正确
+name="Xiang"
+
+#错误！！！这是会尝试执行一个名叫 name 的程序
+name = "Xiang"
+```
+
+因为 Shell 会把空格当成参数分隔符。所以：$\boxed{\text{变量赋值时 } = \text{ 两边不能有空格}}$
+
+#### 命令输出定义
+
+Shell 可以先执行一个命令，然后把这个命令的输出放到某个地方。例如：
+
+```shell
+kernel=$(uname -r)
+
+#相当于 kernel="6.1.99-rt"
+
+echo "$kernel"
+#输出
+6.1.99-rt
+```
+
+再例如：
+
+```shell
+current_time=$(date)
+
+echo "$current_time"
+```
+
+也可以直接：
+
+```shell
+echo "Current kernel: $(uname -r)"
+```
+
+因此：$\boxed{ \$(command) = \text{执行 command，并使用它的标准输出} }$。这个语法称为：**Command Substitution / 命令替换**。
+
+### 读取变量
+
+读取变量有两种常见写法：
+
+```shell
+$name
+```
+
+以及：
+
+```shell
+${name}
+```
+
+例如：
+
+```shell
+name="Xiang"
+
+echo "$name"
+echo "${name}"
+```
+
+二者都输出：
+
+```
+Xiang
+```
+
+**但是 `${}` 可以明确告诉 Shell：变量名到这里结束**。例如：
+
+```shell
+name="eth"
+
+echo "${name}0"
+# 输出
+eth0
+
+echo "$name0"
+# Shell 会认为你访问的是变量：name0
+```
+
+所以**变量和其他字符串连接时**，推荐：
+
+```shell
+"${name}0"
+"${iface}_backup"
+"/sys/class/net/${iface}/operstate"
+```
+
+因此可以记住：$\boxed{ $\{var\} = 更明确、更安全的变量展开 }$。
+
+## 环境变量 `export`
+
+**普通 Shell 变量默认只属于当前 Shell 进程**。例如：
+
+```shell
+name="hello"
+```
+
+当前 Shell 进程可以：
+
+```shell
+echo "$name"
+
+#输出
+hello
+```
+
+但是当前 Shell 启动的其他进程程序，不一定能够看到这个变量。**如果希望子进程也能够访问它，需要**：
+
+```shell
+export name="hello"
+
+#或者先定义，再导出：
+name="hello"
+export name
+```
+
+这类变量称为：$\boxed{\text{环境变量（Environment Variable）}}$。意思不是：把变量存到系统里。而是：**把这个变量标记成环境变量，以后我启动子进程时，把它一起传给子进程**。而且**变量只能向下传递**。
+
+最常见的环境变量之一就是：
+
+```shell
+PATH
+
+echo "$PATH"
+#输出
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+这里**表示 Shell 查找程序时，会依次到这些目录寻找**。例如输入：
+
+```shell
+ls
+
+#Shell 不需要你写：
+/usr/bin/ls
+```
+
+可以使用：
+
+```
+which ls
+```
+
+查看实际执行哪个程序。所以：$\boxed{ PATH = Shell 查找可执行程序的目录列表 }$。
+
+## `source`
+
+假设有脚本`config.sh`，里面：
+
+```shell
+export CPU=7
+```
+
+如果`./config.sh`，Shell 通常会启动一个新的进程运行它。脚本结束后，里面设置的环境可能不会留在当前父 Shell 中，因为**当前 Shell 进程是父进程，环境变量无法向上传递**。如果：
+
+```
+source config.sh
+```
+
+或者：
+
+```
+. config.sh
+```
+
+则表示：$\boxed{\text{在当前的 Shell 中执行这个文件，不创建新的 Shell 子进程}}$​；而`~/.bashrc`本质上也只是一个 Shell 脚本文件，里面经常有：
+
+``` shell
+export PATH="$PATH:/opt/my_program/bin"
+
+export EDITOR=vim
+
+alias ll='ls -alF'
+```
+
+当 Bash 启动时，它会读取`~/.bashrc`；重新执行：
+
+```shell
+source ~/.bashrc
+```
+
+目的就是：
+
+> 不重新登录，直接让当前 Shell 重新读取配置。
+
+## 输入/输出源
+
+### 标准输入、标准输出和标准错误
+
+Linux 程序通常有三个非常重要的标准数据流：
+
+```shell
+0    stdin     Standard Input      标准输入
+1    stdout    Standard Output     标准输出
+2    stderr    Standard Error      标准错误
+```
+
+例如执行：
+
+```shell
+echo hello
+```
+
+程序把：
+
+```shell
+hello
+```
+
+写入：
+
+```shell
+stdout
+```
+
+默认情况下，stdout 连接到当前终端，所以你能看到：
+
+```
+hello
+```
+
+可以简单理解成：
+
+```
+程序
+ │
+ ├── stdin   ← 输入
+ │
+ ├── stdout  → 正常输出
+ │
+ └── stderr  → 错误输出
+```
+
+### 输出重定向 `>`
+
+正常情况下：
+
+```shell
+echo hello
+```
+
+输出到终端：
+
+```
+hello
+```
+
+如果写：
+
+```shell
+echo hello > test.txt
+```
+
+意思就是：
+
+> 不要把 stdout 输出到终端，而是写入 `test.txt`。
+
+于是：
+
+```
+stdout
+   ↓
+test.txt
+```
+
+需要注意：
+
+```
+>
+```
+
+会**覆盖原文件**。
+
+例如：
+
+```
+echo AAA > test.txt
+echo BBB > test.txt
+```
+
+最后文件中只有：
+
+```
+BBB
+```
+
+所以：$\boxed{ > = 覆盖写入 }$.
+
+### 追加重定向 `>>`
+
+如果不想覆盖，而是追加到文件末尾：
+
+```
+echo AAA >> test.txt
+echo BBB >> test.txt
+```
+
+文件内容就是：
+
+```
+AAA
+BBB
+```
+
+这是 Shell 脚本记录日志时非常常见的写法。
+
+### 错误输出重定向 `2>`
+
+前面提到：
+
+```
+1 = stdout
+2 = stderr
+```
+
+所以：
+
+```shell
+command 2> error.log
+```
+
+表示：
+
+> 把标准错误 stderr 写入 `error.log`。
+
+例如：
+
+```shell
+ls /not_exist 2> error.log
+```
+
+终端可能不会显示错误，但是：
+
+```
+cat error.log
+```
+
+会看到：
+
+```
+ls: cannot access '/not_exist': No such file or directory
+```
+
+### `2>&1`
+
+这是 Shell 中非常常见但初看很奇怪的一段：
+
+```
+command > output.log 2>&1
+```
+
+可以拆成两部分。首先：
+
+```
+> output.log
+```
+
+实际上相当于：
+
+```
+1> output.log
+```
+
+也就是：
+
+```
+stdout → output.log
+```
+
+然后：
+
+```
+2>&1
+```
+
+意思是：
+
+> 让文件描述符 2，也就是 stderr，指向文件描述符 1 当前指向的位置。
+
+因为 stdout 已经指向：
+
+```
+output.log
+```
+
+所以最终：
+
+```
+stdout ──┐
+         ├──→ output.log
+stderr ──┘
+```
+
+因此：
+
+```
+command > output.log 2>&1
+```
+
+表示：$\boxed{\text{正常输出和错误输出全部写入 output.log}}$
+
+### `/dev/null`
+
+你还经常会看到：
+
+```
+command > /dev/null
+```
+
+`/dev/null` 可以理解成：$\boxed{\text{Linux 的“黑洞”}}$，写进去的数据会直接被丢弃。
+
+例如：
+
+```shell
+echo hello > /dev/null
+```
+
+什么都不会显示。如果：
+
+```shell
+command > /dev/null 2>&1
+```
+
+表示：
+
+```
+stdout → 丢弃
+stderr → 丢弃
+```
+
+也就是：
+
+> 什么输出都不要。
+
+## 管道 `|`
+
+`|` 是 Linux Shell 最重要的语法之一。
+
+例如：
+
+```shell
+ps aux | grep policy
+```
+
+这里不是单纯“执行两个命令”。而是：
+
+```
+ps aux
+   │
+   │ stdout
+   ↓
+grep policy
+   │
+   ↓
+最终输出
+```
+
+也就是说：$\boxed{ A | B = A 的 stdout 作为 B 的 stdin }$。
+
+例如：
+
+```shell
+dmesg | grep EtherCAT
+```
+
+意思是：
+
+```shell
+dmesg
+ │
+ │ 输出所有内核日志
+ ↓
+grep EtherCAT
+ │
+ │ 只保留包含 EtherCAT 的行
+ ↓
+终端
+```
+
+再例如：
+
+```shell
+ip addr | grep eth0
+```
+
+所以 Linux Shell 的一个核心思想就是：$\boxed{ \text{让多个简单程序通过管道组合起来完成复杂任务} }$.
+
+## `grep`命令
+
+`grep` 是 Linux 中最常用的文本搜索工具之一。例如：
+
+```
+dmesg | grep EtherCAT
+```
+
+表示：
+
+> 从 `dmesg` 输出中寻找包含 `EtherCAT` 的行。
+
+```shell
+# 忽略大小写 -i = ignore case
+dmesg | grep -i ethercat
+
+
+# 显示行号
+grep -n "error" log.txt
+
+
+# 递归搜索目录 . 表示当前目录
+grep -R "policy_cmd" .
+# 从当前目录开始，递归寻找所有包含 `policy_cmd` 的文件内容。
+```
+
+## 命令的退出状态 `$?`
+
+那么 Shell 怎么知道一个命令：
+
+> 成功还是失败？
+
+Linux 程序结束时通常都会返回一个：**Exit Status / Exit Code / 退出状态**一般约定：
+
+```
+0       成功
+非 0    失败
+```
+
+执行：
+
+```shell
+ls /tmp
+```
+
+然后：
+
+```shell
+echo 
+```
+
+所以：
+
+```shell
+$?
+```
+
+表示：$\boxed{\text{上一条命令的退出状态}}$，因此：
+
+```
+A && B
+```
+
+本质上就是：
+
+```
+执行 A
+  ↓
+检查 A 的 exit status
+  ↓
+如果 exit status == 0
+  ↓
+执行 B
+```
+
+而：
+
+```
+A || B
+```
+
+就是：
+
+```
+如果 exit status != 0
+  ↓
+执行 B
+```
+
+## 后台执行 `&`
+
+正常执行：
+
+```
+./program
+```
+
+Shell 会等待`program`结束以后，才重新给你命令提示符。
+
+如果：
+
+```
+./program &
+```
+
+表示：
+
+> 把程序放到后台运行。Shell 会立即返回。
+
+可以查看当前 Shell 的后台任务：
+
+```shell
+jobs
+```
+
+## 通配符
+
+### 通配符 `*`
+
+Shell 可以**自动匹配文件名**。例如当前目录：
+
+```shell
+a.txt
+b.txt
+main.cpp
+test.cpp
+```
+
+执行：
+
+```shell
+ls *.txt
+```
+
+Shell 会先把`*.txt`展开成：`a.txt b.txt`，于是相当于：
+
+```shell
+ls a.txt b.txt
+```
+
+例如：
+
+```
+rm *.log
+```
+
+表示删除所有`.log`结尾的文件。因此涉及 `rm` 时，要对 `*` 特别谨慎。
+
+### 通配符 `?`
+
+`?` 表示：$\boxed{\text{任意一个字符}}$，例如：
+
+```shell
+file1.txt
+file2.txt
+fileA.txt
+file10.txt
+```
+
+执行：
+
+```shell
+ls file?.txt
+```
+
+会匹配：
+
+```
+file1.txt
+file2.txt
+fileA.txt
+```
+
+但是不会匹配：
+
+```
+file10.txt
+```
+
+因为`?`只能匹配一个字符。
+
+## Shell 脚本
+
+Shell 命令不一定只能一条一条在终端输入。可以把它们保存到一个文件中，例如：
+
+```shell
+#!/bin/bash
+# 上面选取bash执行器
+
+echo "Hello Linux"
+
+date
+
+uname -r
+```
+
+这就是一个简单的 Shell Script。
+
+### 修改执行权限
+
+可以：
+
+```shell
+chmod +x test.sh
+```
+
+> 增加 executable / 可执行权限。
+
+然后执行：
+
+```
+./test.sh
+```
+
+### 脚本目录
+
+`.`表示：$\boxed{\text{当前目录}}$，所以：
+
+```
+./test.sh
+```
+
+就是：
+
+> 当前目录中的 `test.sh`。
+
+而如果直接：
+
+```
+test.sh
+```
+
+Shell 会去：`$PATH`中的目录寻找，当前目录通常并不在 `$PATH` 中。
+
+因此：
+
+```
+./test.sh
+```
+
+是在明确告诉 Shell：
+
+> 不用去 PATH 找，就执行当前目录下的这个文件。
+
+### `if` 条件判断
+
+Shell 中最基本的条件结构：
+
+```shell
+if command; then
+    commands
+fi
+```
+
+例如：
+
+```shell
+if ping -c 1 192.168.1.1; then
+    echo "Network OK"
+else
+	 echo "Network BAD"
+fi
+```
+
+这里最重要的地方是：$\boxed{\text{Shell 的 if 本质上判断的是命令退出状态}}$，也就是：
+
+```shell
+ping 成功
+exit status = 0
+       ↓
+执行 then
+```
+
+如果失败：
+
+```shell
+exit status != 0
+       ↓
+不执行 then
+```
+
+### `[ ... ]`
+
+Shell 中经常看到：
+
+```shell
+if [ "$cpu" -eq 7 ]; then
+    echo "CPU7"
+fi
+```
+
+这里：
+
+```
+[ ... ]
+```
+
+不要把它简单理解为 C++ 的括号。实际上：
+
+```
+[
+```
+
+本质上可以看成一个 `test` 命令。例如：
+
+```shell
+[ "$cpu" -eq 7 ]
+```
+
+和：
+
+```shell
+test "$cpu" -eq 7
+```
+
+作用基本相同。所以必须注意空格：
+
+```shell
+#正确
+[ "$cpu" -eq 7 ]
+
+#错误
+["$cpu" -eq 7]
+```
+
+因为 Shell 依然要按照`命令 参数 参数 参数`来解析。
+
+### `[[ ... ]]`
+
+在 Bash 脚本中，还经常看到：
+
+```shell
+[[ ... ]]
+```
+
+例如：
+
+```shell
+if [[ "$iface" == "eth0" ]]; then
+    echo "This is eth0"
+fi
+```
+
+因为它比传统：
+
+```
+[ ... ]
+```
+
+在字符串判断、模式匹配等场景中更方便。可以先简单记：
+
+```
+[ ... ]      传统 test 语法
+[[ ... ]]    Bash 提供的增强条件语法
+```
+
+### 数字比较
+
+Shell 中整数比较不能直接照搬 C/C++。
+
+例如：
+
+```shell
+if [[ "$a" -eq "$b" ]]; then
+    echo "equal"
+fi
+```
+
+常见数字比较：
+
+| 写法  | 含义                       |
+| ----- | -------------------------- |
+| `-eq` | equal，等于                |
+| `-ne` | not equal，不等于          |
+| `-gt` | greater than，大于         |
+| `-lt` | less than，小于            |
+| `-ge` | greater or equal，大于等于 |
+| `-le` | less or equal，小于等于    |
+
+例如：
+
+```shell
+if [[ "$cpu" -gt 4 ]]; then
+    echo "Big core"
+fi
+```
+
+### 字符串比较
+
+例如：
+
+```shell
+iface="eth0"
+```
+
+判断：
+
+```shell
+if [[ "$iface" == "eth0" ]]; then
+    echo "Matched"
+fi
+```
+
+判断不相等：
+
+```shell
+if [[ "$iface" != "eth0" ]]; then
+    echo "Not eth0"
+fi
+```
+
+判断字符串为空：
+
+```shell
+if [[ -z "$iface" ]]; then
+    echo "Empty"
+fi
+```
+
+判断字符串非空：
+
+```shell
+if [[ -n "$iface" ]]; then
+    echo "Not empty"
+fi
+```
+
+其中：
+
+```shell
+-z    zero length
+-n    non-zero length
+```
+
+### 判断文件和目录
+
+Shell 特别适合判断文件是否存在。例如：
+
+```shell
+if [[ -f "/etc/ethercat.conf" ]]; then
+    echo "File exists"
+fi
+```
+
+常用判断：
+
+| 写法 | 含义         |
+| ---- | ------------ |
+| `-e` | 路径存在     |
+| `-f` | 普通文件存在 |
+| `-d` | 目录存在     |
+| `-r` | 可读         |
+| `-w` | 可写         |
+| `-x` | 可执行       |
+
+例如：
+
+```shell
+if [[ -d "/sys/class/net/eth0" ]]; then
+    echo "eth0 exists"
+fi
+```
+
+### `for` 循环
+
+基本结构：
+
+```shell
+for variable in values; do
+    commands
+done
+```
+
+例如：
+
+```shell
+for cpu in 0 1 2 3; do
+    echo "$cpu"
+done
+```
+
+执行过程相当于：
+
+```
+cpu=0 → echo 0
+cpu=1 → echo 1
+cpu=2 → echo 2
+cpu=3 → echo 3
+```
+
+例如处理文件：
+
+```shell
+for file in *.log; do
+    echo "$file"
+done
+```
+
+### `while` 循环
+
+基本结构：
+
+```shell
+while condition; do
+    commands
+done
+```
+
+例如：
+
+```shell
+count=0
+
+while [[ "$count" -lt 5 ]]; do
+    echo "$count"
+    ((count++))
+done
+```
+
+### 算术运算 `$((...))`
+
+Shell 中：
+
+```
+$((...))
+```
+
+用于整数算术运算。例如：
+
+```shell
+a=10
+b=2
+
+c=$((a + b))
+```
+
+还可以：
+
+```shell
+x=$((x + 1))
+```
+
+或者：
+
+```shell
+((x++))
+```
+
+特别注意：
+
+```shell
+$(...)
+```
+
+和：
+
+```shell
+$((...))
+```
+
+完全不是一个东西。前者：$\boxed{ \$(...) = 命令替换 }$；后者：$\boxed{ \$((...)) = 算术运算 }$
+
+例如：
+
+```shell
+a=$(date)
+```
+
+表示执行命令。而：
+
+```shell
+a=$((1 + 2))
+```
+
+表示计算。
+
+### 脚本参数
+
+执行：
+
+```shell
+./deploy.sh eth0 7
+```
+
+那么：
+
+```shell
+$0 = ./deploy.sh
+$1 = eth0
+$2 = 7
+```
+
+所以脚本：
+
+```shell
+#!/bin/bash
+
+echo "Script: $0"
+echo "Interface: $1"
+echo "CPU: $2"
+```
+
+---
+
+`$#` 表示：$\boxed{\text{脚本收到多少个参数}}$，
+
+例如：
+
+```shell
+./deploy.sh eth0 7
+```
+
+那么：
+
+```shell
+echo "$#"
+```
+
+因此可以**检查参数数量**：
+
+```shell
+if [[ "$#" -ne 2 ]]; then
+    echo "Usage: $0 <iface> <cpu>"
+    exit 1
+fi
+```
+
+---
+
+`$@` 表示：$\boxed{\text{所有传入的参数}}$，例如：
+
+```shell
+./test.sh A B C
+```
+
+那么：
+
+```shell
+echo "$@"
+```
+
+输出：
+
+```shell
+A B C
+```
+
+在脚本或函数中，通常推荐**来安全地保留每个参数**。
+
+### 默认参数 `${1:default}`
+
+经常看到：
+
+```shell
+iface="${1:-eth0}"
+```
+
+意思是：
+
+> 如果用户提供了 `$1`，就使用 `$1`；否则使用 `eth0`。
+
+所以：$\boxed{ \$\{var:default\} = \text{变量没有值时使用默认值} }$.
+
+### `exit`
+
+Shell 脚本可以主动结束：
+
+```shell
+exit
+```
+
+更常见：
+
+```shell
+exit 0
+```
+
+表示成功退出，而：
+
+```shell
+exit 1
+```
+
+表示失败退出。例如：
+
+```shell
+if [[ ! -f "$config" ]]; then
+    echo "Config missing"
+    exit 1
+fi
+```
+
+### 函数
+
+可以把一组命令封装成函数。例如：
+
+```shell
+check_cpu() {
+    echo "Checking CPU..."
+    lscpu
+}
+```
+
+调用：
+
+``` shell
+check_cpu
+```
+
+---
+
+函数也可以接收参数：
+
+```shell
+check_iface() {
+    echo "Checking interface: $1"
+    ip link show "$1"
+}
+```
+
+调用：
+
+```
+check_iface eth0
+```
+
+此时函数内部：
+
+```
+$1 = eth0
+```
+
+因此 Shell 函数和 Shell 脚本的位置参数使用方式非常类似。
+
+---
+
+函数中可以使用`return 0`或`return 1`.例如：
+
+```shell
+check_iface() {
+    if ip link show "$1" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+```
+
+然后：
+
+```shell
+if check_iface eth0; then
+    echo "eth0 exists"
+fi
+```
+
+注意`exit`是退出整个脚本或 Shell。而`return`主要是从函数返回。
+
+### `case`
+
+当一个变量有多个可能值时，`case` 比大量 `if` 更清楚。例如：
+
+```shell
+case "$1" in
+    start)
+        echo "Starting..."
+        ;;
+    stop)
+        echo "Stopping..."
+        ;;
+    check)
+        echo "Checking..."
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|check}"
+        exit 1
+        ;;
+esac
+```
+
+这里：
+
+```
+*)
+```
+
+表示：
+
+> 其他所有情况。
+
+`case` 特别适合写这种命令：
+
+```
+start
+stop
+restart
+check
+apply
+install
+```
+
+## 最常用语法总结
+
+目前最值得优先掌握的 Shell 语法可以按下面这个顺序：
+
+```shell
+command option argument
+        ↓
+空格与参数划分
+        ↓
+单引号 / 双引号
+        ↓
+变量
+$var
+${var}
+        ↓
+环境变量
+export
+        ↓
+命令替换
+$(...)
+        ↓
+标准输入输出
+stdin stdout stderr
+        ↓
+重定向
+>
+>>
+2>
+2>&1
+        ↓
+管道
+|
+        ↓
+退出状态
+$?
+        ↓
+命令连接
+;
+&&
+||
+        ↓
+后台执行
+&
+        ↓
+通配符
+*
+?
+        ↓
+Shell 脚本
+#!/bin/bash
+        ↓
+if
+[[ ]]
+        ↓
+for / while
+        ↓
+$0 $1 $2 $# $@
+        ↓
+函数
+        ↓
+case
+        ↓
+set -euo pipefail
+```
+
+学习 Shell 最重要的不是死记符号，而是看到一行命令以后，能够把它**按照 Shell 的解析顺序拆开**。例如：
+
+```shell
+pid=$(pgrep policy_test) && taskset -cp 7 "$pid" > /tmp/result.log 2>&1
+```
+
+不要整行看。
+
+先拆：
+
+```shell
+pid=$(pgrep policy_test)
+│
+├── pgrep policy_test
+│       ↓
+│   查找 policy_test 的 PID
+│
+└── $(...)
+        ↓
+    把输出赋值给 pid
+```
+
+然后：
+
+```
+&&
+ ↓
+前面的命令成功才继续
+```
+
+再：
+
+```
+taskset -cp 7 "$pid"
+│
+├── taskset       命令
+├── -cp           选项
+├── 7             CPU
+└── "$pid"        目标 PID
+```
+
+最后：
+
+```shell
+> /tmp/result.log
+        ↓
+stdout 写入文件
+
+2>&1
+        ↓
+stderr 也写到 stdout 当前指向的位置
+```
+
+最终整句话就是：
+
+$\boxed{ \text{找到 policy\_test 的 PID} \rightarrow \text{如果成功} \rightarrow \text{把它绑定到 CPU7} \rightarrow \text{把正常输出和错误输出都写入日志} }$
+
+这就是读 Shell 最核心的方法。
 
 # 常见问题及排查
 
@@ -859,53 +2470,6 @@ htop
 ```
 
 这些东西通常仍然存在。
-
-# shell脚本
-
-查看当前环境变量：
-
-``` bash
-echo $PATH
-```
-
-`$` 是 Shell 的**变量解引用符号**，用于告诉 Shell：**后面的字符串是一个变量名，需要替换为该变量的实际值**。
-
-`PATH` 是 Shell 的**环境变量**（由系统 / Shell 初始化，存储了系统查找可执行程序的路径列表，路径之间用冒号 `:` 分隔。控制台输入命令首先查找内置命令，如果没有找到内置命令就在`PATH`的路径中去查找是否有对应的可执行的程序。
-
-<img src="Linux应用开发/查看环境变量.png" alt="查看环境变量" style="zoom: 67%;" />
-
----
-
-目前最常用的解释shell命令的解释器就是`/bin/bash`解释器。
-
-编写`shell`脚本首先需要指定使用什么`shell`解释器：
-
-```shell
-#!/bin/bash
-```
-
----
-
-在shell中定义变量**不允许有空格**！
-
-单引号抑制**所有扩展**（包括变量扩展），直接把`$var`当成普通字符串传递给`echo`，如果使用`''`定义变量的话`$`和`$()`将不会被视为语法。
-
-变量是**存储字符串**的 “容器”（比如 `file_pattern="*.txt"`，变量里存的是字符串 `*.txt`）。
-
-在shell中也是使用`$`和`$()`来使用定义的变量。
-
-使用`unset 变量名`来删除变量。
-
-```shell
-$0 # 脚本的文件名
-$1 # 第一个参数
-$2 # 第二个参数
-...
-
-$#    # 传递给shell脚本的参数
-$@ $* # 传递给shell脚本的所有参数
-$$    # 当前shell脚本的所在的进程ID
-```
 
 # makefile
 
@@ -3442,8 +5006,7 @@ echo 1 > /sys/class/gpio/gpio52/value
 
 <img src="Linux开发/终端.png" alt="终端" style="zoom:50%;" />
 
-**物理终端：**最原始的终端形式，指的是 实际的硬件设备 ：早期：电传打字机 (Teletype, TTY)，后来：显示器 + 键盘组合的终端设备
-在现代个人电脑上，物理终端就是直接的显示器和键盘 ，没有经过软件虚拟化层。
+**物理终端：**最原始的终端形式，指的是 实际的硬件设备 ：早期：电传打字机 (Teletype, TTY)，后来：显示器 + 键盘组合的终端设备在现代个人电脑上，物理终端就是直接的显示器和键盘 ，没有经过软件虚拟化层。
 
 **虚拟终端：**Linux 内核提供的软件模拟的终端 ，可以在一个物理显示器上运行多个独立的命令行会话，Ctrl + Alt + F1 ~ F6 切换到虚拟终端 1-6 (纯文本模式)；Ctrl + Alt + F7 切换回图形界面 (X11/Wayland)；
 
@@ -3453,7 +5016,7 @@ echo 1 > /sys/class/gpio/gpio52/value
 
 - **从端（伪终端）**：关联`shell`，让`shell`以为自己在和真实的 TTY 设备交互，终端模拟器（图形应用）就能通过伪终端“伪装” 成`shell`能识别的 TTY 设备 。
 
-### shell
+### Shell
 
 `shell`进程需要通过 TTY 设备接收输入（比如键盘按键）、输出结果（比如命令执行反馈）；`shell`的交互规则（比如回车换行、控制字符解析）都是基于 TTY 子系统的约定。
 
@@ -3466,9 +5029,7 @@ echo 1 > /sys/class/gpio/gpio52/value
 a@cj:~$ tty # 显示当前用户当前正在使用的终端的名称
 /dev/pts/0  # pts：Pseudo Terminal Slave（伪终端从设备）
 ```
----
-
-同一个文件可以被同一个进程以不同权限打开多次，对应不同 fd：
+**同一个文件可以被同一个进程以不同权限打开多次**，对应不同 fd：
 
 - fd 0：以**只读**方式打开 `/dev/pts/0`：标准输入`stdin`，  从终端模拟器输入的。
 
