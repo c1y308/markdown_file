@@ -2023,7 +2023,7 @@ Complex operator+(const Complex &c) const{
 
 - 临时对象：`typename()`是创建临时对象，到下一行就死亡，没有变量名都无所谓。
 
-## 访问修饰符
+## 访问权限
 
 - **`class`** 默认访问权限是 `private`。
 - **`struct`** 默认访问权限是 `public`。
@@ -2050,6 +2050,15 @@ Complex operator+(const Complex &c) const{
 ### `friend`
 
 官方颁发的“VIP通行证”：友元（`friend`关键字）:这是 C++ 官方提供的、唯一合法的直接越权机制。如果你在一个类里将某个外部函数或另一个类声明为 `friend`（友元），那么这个“朋友”就可以无视 `public` 和 `private` 的界限，自由调用该类的私有函数或访问私有变量。
+
+### 和虚函数
+
+> c++中如果虚函数放在private中，派生类可以重写吗
+
+**可以重写**。在 C++ 中，虚函数的访问权限（`private/protected/public`）与能否重写是两个完全独立的机制：
+
+- 访问权限是**编译期**规则，只控制「能不能直接通过名字调用这个函数」；
+- 虚函数重写是**运行期**多态机制，只要函数签名匹配、基类函数带`virtual`关键字，派生类就可以重写，与访问权限无关。
 
 ## 成员函数
 
@@ -3441,7 +3450,7 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
   
   - 成员函数的实例化时机（生成函数的具体代码）:
   
-    - C++ 标准规定：，**类模板的成员函数，只有在被调用或取地址时，才会被实例化（生成定义），**类模板实例化时只对成员进行声明。
+    - C++ 标准规定：**类模板的成员函数，只有在被调用或取地址时，才会被实例化（生成定义），**类模板实例化时只对成员进行声明。
   
     ``` c++
     template <typename T>
@@ -3461,123 +3470,71 @@ Composite（组合）设计模式是一种**结构型设计模式**，它允许�
     
     ```
   
+## 模板分类
 
-## 模板参数
+### 类模板
 
-### 模板类
+类模板是 C++ 中实现**泛型编程**的核心机制。它允许定义一个 “通用的类”，这个类不绑定具体的数据类型（比如 int、float、string 等），而是用一个**类型参数**（比如 T）来占位。
 
-#### 作为类型
-
-在 C/C++ 里，**去掉变量名就是类型名**。比如：
+**如果要指定类型的话在使用模板类创建`object`的时候就要指定类型**，在 C++17 及以后如果你提供了构造函数，编译器可以从初始化数据中推导 `T`。
 
 ``` c++
-int x;                 // x 是变量，类型是 int
-int* p;                // p 是变量，类型是 int*
-bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
+// 定义一个简单的栈类模板
+template <typename T>
+class Stack {
+private:
+    vector<T> elements;
+    
+public:
+    void push(const T& element) {
+        elements.push_back(element);
+    }
+    
+    T pop() {
+        if (empty()) throw runtime_error("Stack is empty");
+        T element = elements.back();
+        elements.pop_back();
+        return element;
+    }
+    
+    bool empty() const {
+        return elements.empty();
+    }
+};
+
+// 使用
+int main() {
+    Stack<int> intStack;      // 创建int类型的栈
+    intStack.push(1);
+    intStack.push(2);
+    
+    Stack<string> strStack;   // 创建string类型的栈
+    strStack.push("Hello");
+    strStack.push("World");
+}
 ```
-
-因为 `std::set` 的第二个模板参数 `Compare` 要求一个**类型**，该类型必须满足“可调用，能比较两个 Key”的约束。
-
-- 可以传入**类类型**，比如 `std::less<int>`，它有一个 `operator()`。
-- 也可以传入**函数指针类型**，比如 `bool(*)(int, int)`，因为函数指针本身就可以被调用（`fp(a, b)`）。
-
-对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
-
-#### 作为（仿）对象类型
-
-作为普通对象没什么好说的。
 
 ---
 
-有些设计会直接从外部接收一个现成的仿函数对象，然后直接使用它，内部不再创建新实例。
-
-这又分两种情况：
-
-- **通过构造函数传入对象（模板参数还是起修饰类型作用）**：标准库算法（如 `std::sort`）是函数模板，通常接受仿函数对象作为对象。如果不想把仿函数类型写死在模板参数里，完全可以设计一个类模板，**通过模板构造函数来接收外部的仿函数对象**。
-
-  ``` c++
-  template <typename T>
-  class MyProcessor {
-      // 保存外部传入的仿函数对象的副本(函数指针)
-      std::function<void(T)> func; 
-      
-  public:
-      // 构造函数是一个函数模板，可以接收任意可调用对象
-      template<typename Callable>
-      MyProcessor(Callable f) : func(f) {}
-      
-      void run(T val) { func(val); }
-  };
-  ```
-
-  这里 `MyProcessor` 就没有“创建”仿函数实例，它只是存储了外部传入的一个。
-
-- **作为非类型模板参数传入对象（C++20）**：C++20 起，允许将任意类的对象作为非类型模板参数传入。
-
-  ``` c++
-  struct Double { 
-      int operator()(int x) const { return x * 2; } 
-  };
-  
-  
-  // 注意：Double 是类型，但作为非类型参数需要 constexpr 对象
-  template <auto FuncObj>  // FuncObj 是一个 Double 类型的对象
-  class MathOp {
-  public:
-      int apply(int x) {
-          // 直接使用传入的那个对象，没有创建新实例
-          return FuncObj(x);
-      }
-  };
-  
-  MathOp<Double()> op; // 传入一个 Double 的临时对象
-  ```
-
-
-### 模板函数
-
-#### 作为类型
-
-在 C/C++ 里，**去掉变量名就是类型名**。比如：
+**如果在类外定义模板类的成员函数：**
 
 ``` c++
-int x;                 // x 是变量，类型是 int
-int* p;                // p 是变量，类型是 int*
-bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
-```
-
-因为 `std::set` 的第二个模板参数 `Compare` 要求一个**类型**，该类型必须满足“可调用，能比较两个 Key”的约束。
-
-- 可以传入**类类型**，比如 `std::less<int>`，它有一个 `operator()`。
-- 也可以传入**函数指针类型**，比如 `bool(*)(int, int)`，因为函数指针本身就可以被调用（`fp(a, b)`）。
-
-对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
-
-#### 作为（仿）对象类型
-
-在这个例子里，`std::greater<int>()` 创建了一个实实在在的**对象**，然后把它传给了 `std::sort`。对于 `sort` 来说，`comp` 就是一个**函数参数**。因为 `sort` 本身就是一个函数，所以它接收参数是再自然不过的事，不需要“在内部创建实例”。
-
-> **传入普通函数名**`Compare` 会被推导为 `bool(*)(int, int)`，即**函数指针**。
->
->  **传入 Lambda 表达式**Lambda 表达式会生成一个独一无二的匿名类（闭包类型），`Compare` 会被推导为这个**具体的匿名类类型**。
-
-``` c++
-std::sort(vec.begin(), vec.end(), std::greater<int>());
-//                                ^^^^^^^^^^^^^^^^^^^ 这是一个临时的仿函数对象
-
-
-template<class RandomIt, class Compare>
-void sort(RandomIt first, RandomIt last, Compare comp) {
-    // ... 在排序比较的时候，直接使用参数 comp
-    if (comp(*a, *b)) { /* ... */ }
+template <typename T>
+BoundedQueue<T>::~BoundedQueue() {
+  if (wait_strategy_) {
+    BreakAllWait();
+  }
+  if (pool_) {
+    for (uint64_t i = 0; i < pool_size_; ++i) {
+      pool_[i].~T();
+    }
+    std::free(pool_);
+  }
 }
 ```
 
 
-
-## 使用场景
-
-### 模板函数
+### 函数模板
 
 **模板函数的实现必须放在头文件中！和编译链接的原理相关。**
 
@@ -3692,75 +3649,8 @@ private:
 
 最终版的写法为配合别名模板：
 
-``` c++
-```
 
-
-
-### 模板类
-
-类模板是 C++ 中实现**泛型编程**的核心机制。它允许定义一个 “通用的类”，这个类不绑定具体的数据类型（比如 int、float、string 等），而是用一个**类型参数**（比如 T）来占位。
-
-**如果要指定类型的话在使用模板类创建`object`的时候就要指定类型**，在 C++17 及以后如果你提供了构造函数，编译器可以从初始化数据中推导 `T`。
-
-``` c++
-// 定义一个简单的栈类模板
-template <typename T>
-class Stack {
-private:
-    vector<T> elements;
-    
-public:
-    void push(const T& element) {
-        elements.push_back(element);
-    }
-    
-    T pop() {
-        if (empty()) throw runtime_error("Stack is empty");
-        T element = elements.back();
-        elements.pop_back();
-        return element;
-    }
-    
-    bool empty() const {
-        return elements.empty();
-    }
-};
-
-// 使用
-int main() {
-    Stack<int> intStack;      // 创建int类型的栈
-    intStack.push(1);
-    intStack.push(2);
-    
-    Stack<string> strStack;   // 创建string类型的栈
-    strStack.push("Hello");
-    strStack.push("World");
-}
-```
-
----
-
-**如果在类外定义模板类的成员函数：**
-
-``` c++
-template <typename T>
-BoundedQueue<T>::~BoundedQueue() {
-  if (wait_strategy_) {
-    BreakAllWait();
-  }
-  if (pool_) {
-    for (uint64_t i = 0; i < pool_size_; ++i) {
-      pool_[i].~T();
-    }
-    std::free(pool_);
-  }
-}
-```
-
-
-
-### 模板成员函数
+### 成员函数模板
 
 在类内部定义的**模板成员**（函数或嵌套类），类本身**不一定**是模板。
 
@@ -3844,6 +3734,117 @@ int main() {
       // ...
   }
   ```
+
+## 模板的参数
+
+### 类模板
+
+#### 作为类型
+
+在 C/C++ 里，**去掉变量名就是类型名**。比如：
+
+``` c++
+int x;                 // x 是变量，类型是 int
+int* p;                // p 是变量，类型是 int*
+bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
+```
+
+因为 `std::set` 的第二个模板参数 `Compare` 要求一个**类型**，该类型必须满足“可调用，能比较两个 Key”的约束。
+
+- 可以传入**类类型**，比如 `std::less<int>`，它有一个 `operator()`。
+- 也可以传入**函数指针类型**，比如 `bool(*)(int, int)`，因为函数指针本身就可以被调用（`fp(a, b)`）。
+
+对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
+
+#### 作为（仿）对象类型
+
+作为普通对象没什么好说的。
+
+---
+
+有些设计会直接从外部接收一个现成的仿函数对象，然后直接使用它，内部不再创建新实例。
+
+这又分两种情况：
+
+- **通过构造函数传入对象（模板参数还是起修饰类型作用）**：标准库算法（如 `std::sort`）是函数模板，通常接受仿函数对象作为对象。如果不想把仿函数类型写死在模板参数里，完全可以设计一个类模板，**通过模板构造函数来接收外部的仿函数对象**。
+
+  ``` c++
+  template <typename T>
+  class MyProcessor {
+      // 保存外部传入的仿函数对象的副本(函数指针)
+      std::function<void(T)> func; 
+      
+  public:
+      // 构造函数是一个函数模板，可以接收任意可调用对象
+      template<typename Callable>
+      MyProcessor(Callable f) : func(f) {}
+      
+      void run(T val) { func(val); }
+  };
+  ```
+
+  这里 `MyProcessor` 就没有“创建”仿函数实例，它只是存储了外部传入的一个。
+
+- **作为非类型模板参数传入对象（C++20）**：C++20 起，允许将任意类的对象作为非类型模板参数传入。
+
+  ``` c++
+  struct Double { 
+      int operator()(int x) const { return x * 2; } 
+  };
+  
+  
+  // 注意：Double 是类型，但作为非类型参数需要 constexpr 对象
+  template <auto FuncObj>  // FuncObj 是一个 Double 类型的对象
+  class MathOp {
+  public:
+      int apply(int x) {
+          // 直接使用传入的那个对象，没有创建新实例
+          return FuncObj(x);
+      }
+  };
+  
+  MathOp<Double()> op; // 传入一个 Double 的临时对象
+  ```
+
+
+### 模板函数
+
+#### 作为类型
+
+在 C/C++ 里，**去掉变量名就是类型名**。比如：
+
+``` c++
+int x;                 // x 是变量，类型是 int
+int* p;                // p 是变量，类型是 int*
+bool (*fp)(int, int);  // fp 是变量，类型是 bool(*)(int, int)
+```
+
+因为 `std::set` 的第二个模板参数 `Compare` 要求一个**类型**，该类型必须满足“可调用，能比较两个 Key”的约束。
+
+- 可以传入**类类型**，比如 `std::less<int>`，它有一个 `operator()`。
+- 也可以传入**函数指针类型**，比如 `bool(*)(int, int)`，因为函数指针本身就可以被调用（`fp(a, b)`）。
+
+对模板来说，它只看你是不是类型，至于你是类、指针、数组、函数，它并不区分——只要后续代码能用 `Compare comp; comp(a, b);` 就行。
+
+#### 作为（仿）对象类型
+
+在这个例子里，`std::greater<int>()` 创建了一个实实在在的**对象**，然后把它传给了 `std::sort`。对于 `sort` 来说，`comp` 就是一个**函数参数**。因为 `sort` 本身就是一个函数，所以它接收参数是再自然不过的事，不需要“在内部创建实例”。
+
+> **传入普通函数名**`Compare` 会被推导为 `bool(*)(int, int)`，即**函数指针**。
+>
+>  **传入 Lambda 表达式**Lambda 表达式会生成一个独一无二的匿名类（闭包类型），`Compare` 会被推导为这个**具体的匿名类类型**。
+
+``` c++
+std::sort(vec.begin(), vec.end(), std::greater<int>());
+//                                ^^^^^^^^^^^^^^^^^^^ 这是一个临时的仿函数对象
+
+
+template<class RandomIt, class Compare>
+void sort(RandomIt first, RandomIt last, Compare comp) {
+    // ... 在排序比较的时候，直接使用参数 comp
+    if (comp(*a, *b)) { /* ... */ }
+}
+```
 
 
 ## 模板特化
@@ -5380,7 +5381,7 @@ for (int i = 0; i < 10; ++i)
 - **独占资源：** 应该禁止复制（`delete` 拷贝构造和拷贝赋值），但允许移动（Move Semantics）。现代C++通过 `std::unique_ptr` 实现了这一点。
 - **共享资源：** 应该使用引用计数，当最后一个使用者离开时才释放资源。现代C++通过 `std::shared_ptr` 实现了这一点。
 
-在 C++ 中，`std::unique_ptr`（定义在 `<memory>` 头文件中）是 C++11 引入的一种**智能指针**。它的核心任务是帮助开发者自动管理动态分配的内存（堆内存），从而彻底告别忘记手动 `delete` 导致的**内存泄漏**问题。它遵循一个极其严格的原则：**独占所有权（Exclusive Ownership）**。
+在 C++ 中，`std::unique_ptr`（定义在 `<memory>` 头文件中）是 C++11 引入的一种**智能指针**。它的核心任务是帮助开发者自动管理动态分配的内存（**堆内存**），从而彻底告别忘记手动 `delete` 导致的**内存泄漏**问题。它遵循一个极其严格的原则：**独占所有权（Exclusive Ownership）**。
 
 ### `unique_ptr`
 
@@ -5670,7 +5671,7 @@ public:
 
 # 多线程
 
-## C++11 标准线程库
+## 线程库
 
 **面向对象封装，类型安全，支持 RAII**，底层通常基于 pthread 实现。C++11 起引入了线程支持库，包括线程管理、互斥量、条件变量、原子操作和 future 异步模型等。
 
@@ -5678,7 +5679,7 @@ public:
 
 编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接 pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；然后`#include <thread>`。
 
-### 线程 API
+### 核心API
 
 #### 创建线程
 
@@ -5718,7 +5719,7 @@ int main() {
 
 ### 异步任务与结果传递
 
-#### 如果没有这套？
+#### 解决什么问题？
 
 在没有 `std::future` / `std::promise` 这类抽象之前（例如纯 C 的 FreeRTOS 或 Linux C 开发），异步任务间的结果传递都是基于**最基础的同步原语**手动构建的。本质上，我们需要解决三个问题：
 
@@ -6284,8 +6285,6 @@ void worker_thread() {
     // 拿到锁后处理任务
 }
 ```
-
-
 
 ### 一次执行
 

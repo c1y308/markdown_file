@@ -1,11 +1,9 @@
-```{
-    "http.proxy": "http://127.0.0.1:7900",
-    "http.proxyStrictSSL": false,
-    "github.copilot.advanced": {
-        "debug.overrideProxyServer": "http://127.0.0.1:7900"
-    }
+​    "http.proxy": "http://127.0.0.1:7900",
+​    "http.proxyStrictSSL": false,
+​    "github.copilot.advanced": {
+​        "debug.overrideProxyServer": "http://127.0.0.1:7900"
+​    }
 }
-```
 
 # 重构内核
 
@@ -260,8 +258,6 @@ sudo cp ec_master.ko ec_stmmac.ko /lib/modules/$(uname -r)/extra/ethercat/
 sudo depmod -a
 ```
 
----
-
 然后配置模块固定启动参数：
 
 **创建模块参数配置文件**，让系统每次加载 ec_master 时，自动带上指定的 MAC 地址参数：
@@ -294,8 +290,6 @@ sudo nano /etc/modules-load.d/ethercat.conf
 ec_master
 ec_stmmac
 ```
-
----
 
 验证配置有效性：
 
@@ -371,7 +365,7 @@ sudo make install
 首先需要请求并独占一个 `EtherCAT` 主站实例：
 
 ``` c++
-//参数： master_index 通常为 0（代表系统中的第一个主站 eth0 或配置的第一个网卡，绝大多数只有一张 EtherCAT 网卡）。
+//参数： master_index 通常为 0（代表申请系统中的第一个主站 eth0）。
 //返回： ec_master_t* 主站句柄。
 
 ec_master_t* ecrt_request_master(unsigned int master_index);
@@ -480,13 +474,60 @@ for (std::size_t i = 0; i < kNumSlaves; i++)
 }
 ```
 
-#### 配置从站PDO布局
+#### 配置从站（协议格式）
+
+**注意这里PDO还没有在domain的内存位置中完成分配！~**
+
+##### 从站对象字典
+
+从站对象字典（Object Dictionary，OD）可以理解成从站对外提供的一张**变量说明表和逻辑地址表**。一个电机的对象字典中可能有：
+
+``` c++
+索引:子索引     名称                        类型
+0x6040:00      Control Word               uint16
+0x6041:00      Status Word                uint16
+0x607A:00      Target Position            int32
+0x6064:00      Actual Position            int32
+0x60FF:00      Target Velocity            int32
+0x606C:00      Actual Velocity            int32
+0x6060:00      Mode of Operation          int8
+0x6061:00      Mode Display               int8
+0x1601         RxPDO Mapping Object
+0x1A00         TxPDO Mapping Object
+
+// 其中：0x6040:00 不是 Linux 内存地址，也不是网卡地址，而是这个变量在 CoE 对象字典中的逻辑编号。
+```
+
+从站的真实固件内部可能把这些对象存储在 RAM、寄存器或内部变量中，对象字典并不要求它们在物理内存中按照索引连续排列。**它是一个通信层面的逻辑访问模型**。IgH 的 PDO Entry 描述也明确使用对象字典的 Index、Subindex 和 Bit Length 来标识待映射变量。
+
+因此本例程的完整的从站对象字典结构相当于：
+
+``` c++
+// 0x1601 是“包”；
+// 0x6040 是“包里的字段”。
+
+0x1601：RxPDO Mapping Object
+├── Entry 1 → 0x6040:00
+├── Entry 2 → 0x607A:00
+├── ...
+└── Entry 8
+
+0x1A00：TxPDO Mapping Object
+├── Entry 1 → 0x6041:00
+├── Entry 2 → 0x6064:00
+├── ...
+└── Entry 7
+```
+
+**对象字典不是过程数据内存**，过程数据内存 = 从对象字典中选出少数实时变量，按顺序紧凑排列。
+
+---
 
 ##### `ecrt_slave_config_pdos()`
 
-PDO 映射的三层嵌套是 IgH 中最容易绕晕的部分。为了配置从站要交互什么数据，IgH 使用了三层嵌套的结构体，从微观到宏观依次是：`PDO Entry -> PDO -> Sync Manager`，最终将最顶层的 `ec_sync_info_t` 数组传给 `ecrt_slave_config_pdos()` 函数。
+为了配置从站要交互什么数据，IgH 使用了三层嵌套的结构体，从微观到宏观依次是：`PDO Entry -> PDO -> Sync Manager`，最终将最顶层的 `ec_sync_info_t` 数组传给 `ecrt_slave_config_pdos()` 函数。
 
-**注意到现在为止，PDO还没有和domain产生任何联系！~**
+- 这里**配置从站配置句柄**；
 
 ``` c++
 int ecrt_slave_config_pdos( ec_slave_config_t* sc,
@@ -495,20 +536,20 @@ int ecrt_slave_config_pdos( ec_slave_config_t* sc,
 );
 ```
 
-它的作用是：根据 `ec_sync_info_t` 中描述的 Sync Manager、PDO Assignment 和 PDO Mapping，为**这个从站**设置完整的 PDO 配置。该函数实际上是多个底层配置函数的便捷封装，包括：
+它的作用是：根据 `ec_sync_info_t` 中描述的 Sync Manager、PDO Assignment 和 PDO 映射，为**这个从站**设置完整的 PDO 配置。该函数实际上是多个底层配置函数的便捷封装，包括：
 
 - 配置 Sync Manager；
 - 清除和增加 PDO Assignment；
-- 清除和增加 PDO Mapping；
+- 清除和增加 PDO 映射；
 - 配置每个 PDO Entry 的索引、子索引和位长度。
+
+---
 
 ##### `ec_sync_info_t`
 
-这里定义：
+这里**配置`sync`通道**，定义：
 
-- 存储`ec_pdo_info_t`数组的位置；
-
-- PDO 分配给哪个 Sync Manager；
+- 从`ec_pdo_info_t`**数组哪里开始**的**多少个** PDO 分配给这个Sync Manager；
 - 数据方向；
 - Watchdog 模式。
 
@@ -520,14 +561,14 @@ int ecrt_slave_config_pdos( ec_slave_config_t* sc,
  */
 
 typedef struct {
-    uint8_t index; 		 /**< 同步管理器索引。有效值必须小于宏 #EC_MAX_SYNC_MANAGERS；
+    uint8_t index; 		 /* 同步管理器索引。有效值必须小于宏 #EC_MAX_SYNC_MANAGERS；
                      			 也可设置为 0xff 用于标记列表末尾。 */
-    ec_direction_t dir;  /**< 同步管理器数据方向。 */
+    ec_direction_t dir;  /* 同步管理器数据方向。 */
     
-    unsigned int n_pdos; /**< pdos 数组内PDO的数量。 */
-    ec_pdo_info_t *pdos; /**< 待分配PDO数组。数组内至少存放 n_pdos 个PDO信息。 */
+    unsigned int n_pdos; /* PDO 数组内 多少个 PDO 分配给这个 sync manager */
+    ec_pdo_info_t *pdos; /* 待分配 PDO 数组 */
     
-    ec_watchdog_mode_t watchdog_mode; /**< 看门狗工作模式。 */
+    ec_watchdog_mode_t watchdog_mode; /* 看门狗工作模式。 */
 } ec_sync_info_t;
 ```
 
@@ -545,9 +586,11 @@ ec_sync_info_t EthercatAdapterIGH::device_syncs[] = {
 
 ##### `ec_pdo_info_t`
 
-这里定义：
+这里**配置PDO的信息**，定义：
 
-- 从`ec_pdo_info_t`**数组哪里开始**的**多少个** Entry 属于哪个 PDO；
+- PDO的从站对象字典中的 **PDO索引**；
+
+- 从`ec_pdo_enry_info_t`**数组哪里开始**的**多少个** Entry 属于这个 PDO；
 
 ``` c++
 /** PDO 配置信息
@@ -557,12 +600,12 @@ ec_sync_info_t EthercatAdapterIGH::device_syncs[] = {
  * 参考函数 ecrt_slave_config_pdos()。
  */
 typedef struct {
-    uint16_t index; 		/**< PDO 索引。 */
+    uint16_t index; 		/* PDO 索引(帧索引) */
     
-    unsigned int n_entries; /**< 需要进行映射的 PDO 条目数量。数值为 0 代表使用从站默认映射配置
+    unsigned int n_entries; /* 需要进行映射的 PDO Entry数量。数值为 0 代表使用从站默认映射配置
                               （该方式仅在总线配置阶段从站在线时可用） */
     
-    ec_pdo_entry_info_t *entries; /**< 待映射的 PDO 条目数组。可以为空指针 NULL，
+    ec_pdo_entry_info_t *entries; /* 待映射的 PDO Entry数组。可以为空指针 NULL，
                                     若非空，则数组至少包含 n_entries 个条目信息。 */
 } ec_pdo_info_t;
 ```
@@ -582,7 +625,7 @@ ec_pdo_info_t EthercatAdapterIGH::device_pdos[] = {
 
 这里才真正定义：
 
-- Entry 的顺序；
+- Entry 的顺序，index 和 subindex；
 - 每个 Entry 有多少 bit；
 
 ``` c++
@@ -623,9 +666,58 @@ ec_pdo_entry_info_t EthercatAdapterIGH::device_pdo_entries[] = {
 };
 ```
 
+##### 什么时候告诉从站
+
+在完成配置并调用：
+
+```c
+int ecrt_master_activate(ec_master_t *master);
+```
+
+之后，IgH 主站会运行从站配置状态机。该状态机包含明确的：
+
+```
+PDO_CONF
+PDO_SYNC
+FMMU
+DC
+SAFEOP
+OP
+```
+
+等阶段，其中 `PDO_CONF` 负责 PDO 配置，`PDO_SYNC` 负责配置过程数据 Sync Manager，随后还会写入 FMMU 配置。
+
+IgH 内部还存在专门的 PDO 配置状态机：
+
+```
+ec_fsm_pdo
+```
+
+它使用 CoE 状态机和 SDO 请求与物理从站交互，并保存“期望 PDO 配置”与“从站实际出现的 PDO 配置”。
+
+所以完整过程是：
+
+```
+用户代码描述 PDO
+        ↓
+ecrt_slave_config_pdos()
+        ↓
+配置暂存在主站的 ec_slave_config_t
+        ↓
+Master 激活并开始配置从站
+        ↓
+通过 EtherCAT 邮箱 / CoE SDO 写入从站
+        ↓
+从站获得 PDO Mapping 和 PDO Assignment
+        ↓
+主站配置 Sync Manager 和 FMMU
+        ↓
+进入 SAFEOP / OP
+```
+
 #### 配置程序读写数据位置
 
-假设 `device_syncs` 已经告诉主站，从站 PDO 是：
+假设 `device_syncs` 已经配置好从站的 PDO 是：
 
 ```text
 RxPDO，主站写给电机
@@ -638,38 +730,18 @@ TxPDO，电机返回主站
 └── 0x6064:00 Actual Position    32 bit
 ```
 
-主站现在知道从站的 PDO 排列，但你的 C++ 程序仍然不知道：控制字在 domain 内存的第几个字节？目标位置在哪里等信息？
+主站现在知道从站的 PDO 排列，但 C++ 程序仍然不知道：控制字在 domain 内存的第几个字节？目标位置在哪里等信息？
 
 ##### `ecrt_domain_reg_pdo_entry_list()`
 
-就是解决这个问题。它会**把从站配置和某个 Domain 关联起来**：
+就是解决这个问题。它会**把配置好的需要与从站交互的信息和某个 Domain 关联起来**：
 
 1. 根据 `alias + position + VID + PID` 找到从站的`ec_slave_config_t`；
 2. 根据 `index + subindex` 找到指定 PDO Entry；
 3. 将该 Entry 注册到 `domain1`；
-4. 计算该 Entry 在 Domain 过程数据区中的字节偏移；
-5. 把偏移写入提供的 `slave_offsets[i]` 成员。官方将其定义为一次性向 Domain 批量注册 PDO Entry；`ec_pdo_entry_reg_t::offset` 正是用来接收 Entry 在过程数据区中的字节偏移。
+4. 计算该 Entry 在 Domain 过程数据区中的字节偏移；把偏移写入提供的 `slave_offsets[i]` 成员。官方将其定义为一次性向 Domain 批量注册 PDO Entry；`ec_pdo_entry_reg_t::offset` 正是用来接收 Entry 在过程数据区中的字节偏移。
 
 ``` c++
-/** PDO条目批量注册用列表记录类型
- *
- * 该结构体用作函数 ecrt_domain_reg_pdo_entry_list() 的数组入参
- */
-typedef struct {
-    uint16_t alias; 	/* 从站别名地址 */
-    uint16_t position; 	/* 从站物理地址（总线位置） */
-    uint32_t vendor_id; 	/* 从站厂商ID */
-    uint32_t product_code; 	/* 从站产品代码 */
-    
-    uint16_t index; 		/* PDO条目对象字典索引 */
-    uint8_t	 subindex; 		/* PDO条目对象字典子索引 */
-    
-    unsigned int *offset; 		/* 指针，用于存放该PDO条目在过程数据域内的字节偏移地址 */
-    unsigned int *bit_position; /* 指针，用于存放该数据在对应字节内的位偏移(0~7)。
-                                  可赋值为NULL；若设为NULL，当PDO条目无法按字节对齐时，将返回报错。 */
-} ec_pdo_entry_reg_t;
-
-
 int ecrt_domain_reg_pdo_entry_list( ec_domain_t *domain, 						/* Domain. */
         							const ec_pdo_entry_reg_t *pdo_entry_regs); 	/* Array of PDO */
 ```
@@ -678,7 +750,29 @@ int ecrt_domain_reg_pdo_entry_list( ec_domain_t *domain, 						/* Domain. */
 
 > 请在 `position` 位置的指定型号从站中，找到 `0x6040:00` 控制字，将它加入 `domain1`，然后把它在 Domain 过程数据内存中的字节偏移写入 `slave_offsets[i].off_ctrl_word`。
 
-`ec_pdo_entry_reg_t` 的字段正是：从站地址、厂商和产品身份、PDO Entry 的 Index/Subindex，以及用于接收字节偏移和位偏移的指针。
+##### `ec_pdo_entry_reg_t`
+
+``` c++
+/** PDO条目批量注册用列表记录类型
+ *
+ * 该结构体用作函数 ecrt_domain_reg_pdo_entry_list() 的数组入参
+ */
+typedef struct {
+    uint16_t alias; 		/* 从站别名地址 */
+    uint16_t position; 		/* 从站物理地址（总线位置） */
+    uint32_t vendor_id; 	/* 从站厂商ID */
+    uint32_t product_code; 	/* 从站产品代码 */
+    
+    uint16_t index; 		/* PDO entry字典索引 */
+    uint8_t	 subindex; 		/* PDO entry字典子索引 */
+    
+    unsigned int *offset; 		/* 指针，用于存放该PDO条目在过程数据域内的字节偏移地址 */
+    unsigned int *bit_position; /* 指针，用于存放该数据在对应字节内的位偏移(0~7)。
+                                  可赋值为NULL；若设为NULL，当PDO条目无法按字节对齐时，将返回报错。 */
+} ec_pdo_entry_reg_t;
+```
+
+`ec_pdo_entry_reg_t` 的字段正是：从站地址、厂商和产品身份、PDO Entry 的 `Index/Subindex`，以及用于接收字节偏移和位偏移的指针。
 
 具体应用示例：
 
@@ -922,7 +1016,7 @@ ecrt_master_application_time(master, TIMESPEC2NS(time));
 
 > **核心逻辑**： 控制器 (PC) 时间 → 参考从站 (Reference Clock) → 所有其他从站。
 
-## 电机
+## 电机代码
 
 ### 代码框架
 
@@ -967,22 +1061,13 @@ ecrt_master_application_time(master, TIMESPEC2NS(time));
 
 ```
 
-| 改进点     | 实现方式                                  | 效果                     |
-| ---------- | ----------------------------------------- | ------------------------ |
-| 实时性保证 | 独立线程 + SCHED_FIFO 调度 + 绝对时间睡眠 | 控制周期抖动 < 100μs     |
-| 解耦设计   | 生产者 - 消费者模式，线程安全队列         | 用户逻辑与控制完全分离   |
-| 异步指令   | send_command () 非阻塞调用                | 用户无需关心控制周期     |
-| 状态发布   | 状态快照 + 回调机制                       | 支持监控、日志等扩展功能 |
-
 #### 数据流图
 
 电机链路全在 CPU/IGH EtherCAT 用户态 API 内。动作路径大致是：
 
 `apply_action(rad vector) → 新建 target_deg vector → ControlCommand 入 mutex queue → _motors[i].desired → TxPDO → tx_shadow → tx_snapshot → domain1_pd → ecrt_master_send()`。
 
-Rx 路径则是 ：
-
-`domain1_pd → RxPDO → MotorState.rx → status_snapshot_ → 查询时再生成 q/dq/tau vector`。
+Rx 路径则是 ：`domain1_pd → RxPDO → MotorState.rx → status_snapshot_ → 查询时再生成 q/dq/tau vector`。
 
 ``` c
 用户线程                           实时控制线程
@@ -1053,90 +1138,6 @@ Rx 路径则是 ：
 - shutdown() -> running_=false + join，等待实时线程退出
 
 ```
-
-
-
-### 线程安全队列
-
-支持阻塞/非阻塞/超时三种模式，无锁设计不适用（指令需要可靠传递）
-
-``` c++
-#pragma once
-
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <chrono>
-
-namespace myactua {
-
-/* 线程安全队列 */
-template<typename T>
-class ThreadSafeQueue {
-public:
-    ThreadSafeQueue() = default;
-    ~ThreadSafeQueue() = default;
-
-    void push(const T& value) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(value);
-        cond_.notify_one();
-    }
-
-    void push(T&& value) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(std::move(value));
-        cond_.notify_one();
-    }
-
-    bool pop(T& value, int timeout_ms = -1) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (timeout_ms > 0) {
-            if (!cond_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                               [this] { return !queue_.empty(); })) {
-                return false;
-            }
-        } else if (timeout_ms == 0) {
-            if (queue_.empty()) {
-                return false;
-            }
-        } else {
-            cond_.wait(lock, [this] { return !queue_.empty(); });
-        }
-        value = std::move(queue_.front());
-        queue_.pop();
-        return true;
-    }
-
-    bool empty() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.empty();
-    }
-
-    size_t size() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::queue<T> empty;
-        std::swap(queue_, empty);
-    }
-
-private:
-    mutable std::queue<T> queue_;
-    mutable std::mutex mutex_;
-    std::condition_variable cond_;
-};
-
-} // namespace myactua
-
-```
-
-### 离散队列命令
-
-
 
 ### 运行模式切换
 
@@ -1304,100 +1305,9 @@ SET_SETPOINTS 在这套代码里**没有走事务状态机**，而是**只更新
 
 ## 调试记录
 
-### 模式匹配
+### 进入SAFEOP
 
-``` c++
-// 检查与驱动器当前的模式(6061h)是否与用户设定的目标模式一致
-if (motor.rx.op_mode != motor.target_mode) 
-{   
-    motor.step = MotorStep::MODE_SWITCHING; // 标记状态为切换中
-    motor.tx.control_word = CMD_SHUTDOWN;   // 先失能
-    motor.tx.op_mode = motor.target_mode;
-    motor.tx.target_pos = motor.rx.pos;     // 将当前实际位置设为目标位置
-    motor.tx.target_vel = 0;                // 速度清零
-    motor.tx.target_torque = 0;             // 力矩清零
-    return;
-}
-```
-
-电机上电后`6061h`中的模式并非和三种模式一致，导致直接进入错误判断。
-
----
-
-### 串行走线
-
-ethercat走线不能并行走线，只能串行走线，ethercat依据物理连接顺序确定ID；电机供电线断裂。
-
-### 通信波动
-
-如果`STOP`状态一直保持，应停在`STEP=STOPPED, MODE_SWITCH_STEP=IDLE`。 这次“小概率异常”主要是因为`STOP`不是锁存态，会被运行期状态覆盖。
-
-1.`motors_test`只做了初始化，然后监控，没有再发控制命令 ；初始化里是“启动线程后，异步入队一次STOP” ；`STOP`执行时会把每个电机设成`STOPPED/IDLE`。
-
-2.但在每个控制周期里，只要`isConfigured==false`，代码会直接把`step`改成`IDLE`：
-
- ```c++
-   /* 设置电机目标值 */
-   for (size_t i = 0; i < _motors.size(); i++)
-   {
-       if (!_adapter->isConfigured(_motors[i].slave_index)) {
-           _motors[i].step = MotorStep::IDLE;
-           continue;
-       }
-       double val = (i < setvalues.size()) ? setvalues[i] : _motors[i].setpoint;
-       process_single_motor(_motors[i], val);
-   }
- ```
-
-3.`isConfigured`来自`online && operational`的1ms刷新，存在瞬时抖动可能一旦`STOPPED`被覆盖成`IDLE`，后续重新`configured`时就会重新进入使能/运行/模式切换流程，不再保证停在`STOPPED/IDLE`。
-
-所以现象本质上是：运行期从站状态瞬时波动 + 当前状态机覆盖策略，导致看到“偶发不在STOPPED/IDLE”。
-
----
-
-| 方案                                                    | 改动范围              | 效果（保持STOPPED/IDLE） | 风险/代价                       | 复杂度 |
-| :------------------------------------------------------ | :-------------------- | :----------------------- | :------------------------------ | :----- |
-| STOP锁存（推荐）                                        | MYACTUA状态机         | 高，最直接               | 需定义“谁来解锁”（通常RESTART） | 中     |
-| isConfigured去抖（如连续N周期才判离线）                 | EtherCAT适配层        | 中高，能降“小概率抖动”   | 离线检测变慢一点                | 中     |
-| 控制状态与通信状态解耦（掉线不改step，单独标comm_lost） | MYACTUA快照与打印逻辑 | 高，语义最清晰           | 需要调整监控显示/诊断习惯       | 中高   |
-| 上层motors_test周期性重发STOP心跳                       | 仅测试程序            | 中，见效快               | 治标不治本，命令冗余            | 低     |
-| 只优化实时环境（调度、CPU隔离、IRQ绑定）                | 部署层                | 中，减少触发概率         | 运维成本高，不保证根治          | 中高   |
-
----
-
-**方案一：**通信波动通常不会导致“队列层面”的命令丢失，但会导致**执行层面的“等价丢失”**（尤其是轨迹点）。
-
-- 命令入队不会丢：`send_command -> ThreadSafeQueue::push` 是互斥队列，无主动丢弃逻辑。
-- 命令处理不依赖通信状态：实时线程每周期先`process_commands()`，把队列清空。
-- 但通信断时不下发PDO：`comm_ok=false`就跳过`process_single_motor`和`send`。
-
-按命令类型评估：
-
-- `STOP/RESTART/SET_MODE`：大多不会“永久丢失”，因为它们写入的是持久状态（`step/target_mode`），通信恢复后会继续生效。
-- `SET_SETPOINTS`：是“最后值覆盖”语义，断链期间的中间轨迹点会被后续值覆盖，恢复后只会执行最新 `setpoint`。
-
-高风险边界：
-
-- 若通信波动期间你执行`deinit`，`STOP`虽入队，但50ms后线程就停，可能来不及在链路恢复后发到从站。
-
-当前设计是**state-based / last-write-wins**，不是“每条命令必达且可确认”的transaction模型。对状态命令较稳，对高频轨迹命令会有时序丢点。
-
-**方案二**：`comm_ok`可以记录每个电机从站是否在线，如果此轮`update({})`中发现为离线状态，则进行不下发这`process_commands()`中的指令，在下轮周期再进行发送（**store-and-forward 重试**、语义上接近 **at-least-once（尽力不丢）**）。
-
-**优点**
-
-- 能吸收短时链路抖动，避免“一次离线就把这周期命令丢掉”。
-- 如果按FIFO延迟发送，可保持命令顺序。
-- 主站侧可实现，不一定要立刻改从站协议。
-
-**缺点**
-
-- 只能保证“最终发送”，不能保证“最终执行”，没有ACK就无法闭环确认。
-- 离线恢复后会积压回放，带来时延抖动和突发下发，并且长时间离线会导致队列增长，需要上限与丢弃策略。
-- 可能执行“过期命令”（比如轨迹点、旧姿态目标），有安全风险。
-- 若是全局门控，一个从站掉线会阻塞全部电机（头阻塞）。
-
-### SAFEOP错误
+#### 问题复现
 
 `ethercat slave`可以扫到从站，但是无法进入`OP(online && operational)`状态。
 
@@ -1452,56 +1362,9 @@ dmesg -T | grep -Ei "EtherCAT|SAFEOP|watchdog|AL"
 
 现在这组现象里，PDO 已匹配 + 0x001A，最可能就是 **DC 同步时序/实时性/物理链路质量** 这条线。 
 
-#### DC同步导致OP慢 & 关闭DC后通信异常的可能原因
+#### 潜在原因
 
----
-
-#### 关键代码和ESI配置回顾
-
-##### 代码中的DC配置
-
-```cpp
-ecrt_slave_config_dc(sc[i], 0x0300, 1000000, 4400000, 0, 0);
-```
-
-参数含义：
-| 参数              | 值                | 含义                         |
-| ----------------- | ----------------- | ---------------------------- |
-| `assign_activate` | `0x0300`          | DC-Synchron模式（与ESI一致） |
-| `sync0_cycle`     | `1000000` (1ms)   | Sync0周期 = 1ms              |
-| `sync0_shift`     | `4400000` (4.4ms) | **Sync0偏移时间 = 4.4ms**    |
-| `sync1_cycle`     | `0`               | 无Sync1                      |
-| `sync1_shift`     | `0`               | 无Sync1偏移                  |
-
-##### ESI文件中的DC定义
-
-```xml
-<Dc>
-  <OpMode>
-    <Name>Synchron</Name>
-    <Desc>SM-Synchron</Desc>
-    <AssignActivate>#x0</AssignActivate>       <!-- 无DC，仅SM同步 -->
-  </OpMode>
-  <OpMode>
-    <Name>DC</Name>
-    <Desc>DC-Synchron</Desc>
-    <AssignActivate>#x300</AssignActivate>      <!-- DC同步模式 -->
-    <CycleTimeSync0 Factor="1">0</CycleTimeSync0>  <!-- 默认周期=0，需主站配置 -->
-    <CycleTimeSync1 Factor="1">0</CycleTimeSync1>
-  </OpMode>
-</Dc>
-```
-
-ESI还定义了关键超时：
-```xml
-<SafeopOpTimeout>9000</SafeopOpTimeout>  <!-- Safe-OP → OP 超时 9秒 -->
-```
-
----
-
-#### 为什么开启DC后从站进入OP很慢？
-
-##### **Sync0 Shift Time (4.4ms) 严重偏大** — 最可能的核心原因
+##### **Sync0 Shift Time (4.4ms) 严重偏大**
 
 这是最可疑的参数。`sync0_shift = 4,400,000ns = 4.4ms`，而周期只有 `1ms`。
 
@@ -1521,7 +1384,7 @@ ESI还定义了关键超时：
 - 它的目的是给从站留出处理时间（从收到帧到Sync0触发之间的时间）
 - 对于1ms周期，Shift Time通常设为 `0` 或一个较小的值（如100~500μs），而不是4.4ms
 
-##### **ESI中CycleTimeSync0默认为0**
+##### **ESI中 CycleTimeSync0 默认为 0**
 
 ESI文件中 `<CycleTimeSync0 Factor="1">0</CycleTimeSync0>` 默认值为0，表示从站没有预设的DC周期期望。虽然代码中设置了1ms，但从站固件可能需要一定时间来"适应"主站配置的DC周期，特别是在首次同步时。
 
@@ -1535,9 +1398,9 @@ ESI定义了9秒的Safe-OP到OP超时。当DC同步困难时，从站可能在�
 
 ---
 
-#### 为什么关闭DC后秒进OP，但无法正常通信？
+#### 为什么需要DC时钟？
 
-##### 原因1：**伺服电机控制环路依赖DC同步**
+##### **伺服电机控制环路依赖DC同步**
 
 这是最根本的原因。伺服电机（特别是CSP/CSV/CST模式）的内部控制环路需要精确的时序参考：
 
@@ -1549,24 +1412,22 @@ ESI定义了9秒的Safe-OP到OP超时。当DC同步困难时，从站可能在�
 - 多轴协调运动需要所有轴在同一时刻更新
 - 没有DC同步，电机可能拒绝使能或无法正确执行位置命令
 
-##### 原因2：**从站内部控制环与PDO更新失步**
+##### **从站内部控制环与PDO更新失步**
 
 无DC时，从站的控制环以自身晶振频率自由运行，而PDO数据的更新时刻由主站帧到达时间决定（有抖动）。这导致：
 - 从站在控制环周期中间收到新命令 → 命令被延迟到下一个控制周期执行
 - 从站刚处理完一个周期，新数据又到达 → 数据被覆盖或丢失
 - 控制环和PDO更新之间的相位关系不确定 → 通信看似正常但数据无效
 
-##### 原因3：**Sync Error Counter触发保护**
+##### **Sync Error Counter触发保护**
 
 ESI中定义了 `Sync Error Counter Limit`（对象0x1C32:2 / 0x1C33:2），在无DC模式下，从站可能检测到同步错误（因为期望的同步机制不存在），累计超过阈值后进入错误状态，导致通信中断。
 
-##### 原因4：**Watchdog行为不同**
+##### **Watchdog行为不同**
 
 DC模式下，从站通过Sync0信号来重置看门狗；无DC模式下，从站通过SM事件重置看门狗。如果从站固件在无DC时对看门狗的处理不同，可能导致数据被认为无效。
 
----
-
-#### 总结与建议方向
+#### 总结
 
 | 现象             | 根因                                                | 优先级   |
 | ---------------- | --------------------------------------------------- | -------- |
@@ -1577,344 +1438,1177 @@ DC模式下，从站通过Sync0信号来重置看门狗；无DC模式下，从�
 
 **核心结论**：问题不是"要不要用DC"（电机必须用DC），而是**DC参数配置不当**。最关键的修改方向是将 `sync0_shift` 从 `4400000` 调整为一个合理值（如 `0` 或一个小于cycle_time的值），这样DC同步应该能快速完成，从站可以正常进入OP并通信。
 
-如果需要我进一步协助调整DC参数或排查其他细节，请告诉我。
+### EtherCAT启动死锁
 
-### 数据并发错误
+> 最终根因：NetworkManager 在冷启动时自动 bring-up EtherCAT 专用网口 `eth0`，进入 `ec_stmmac` 的 `stmmac_open()` 路径后触发 RTNL / RT-mutex 锁问题，随后演化为 `scheduling while atomic` 和 RCU stall，导致整机逐步失去响应。
 
-**问题闭环总结（嵌入式实时控制视角）**
+#### 问题复现
 
-**问题定义与影响**
+前一天在开发板上正常执行：
 
-1. 在 EtherCAT 实时控制中，应用层已计算出正确控制字（`0x07/0x0F`），但电机状态随机无法进入 `SW_ON/OP_EN`。
-
-2. 该问题表现为“偶发成功、偶发失败”，对启停一致性和安全性影响大，属于典型实时并发缺陷。
-
-**现场现象与关键证据**
-
-​	1.诊断显示 `wc_state=COMPLETE`，说明链路层基本健康，不是主因。
-
-​	2.关键矛盾是“应用想发”和“总线实际待发”不一致：
-`send_cw=0x000F`，但 `pd_pre_queue=0x0007`，状态停在 `0x1233`（未进入 OP_EN）。
-
-​	3.通过 `--tx-phase-us` 相位扫描后，结果对延时敏感，进一步指向时序竞争而非固定逻辑错误。  
-
-**分层排障思路**
-
-​	1.第一层（通信层）排除：WKC 多数完整，非典型掉线问题。
-
-​	2.第二层（状态机层）排除：控制字策略正确，但状态推进不稳定。
-
-​	3.第三层（并发时序层）定位：应用线程与 EtherCAT 线程同时访问 `domain1_pd`，存在竞态窗口。
-
-**根因建模**
-
-原结构中，`send()` 在应用线程直接写 `domain1_pd`。
-
-同时 EtherCAT 线程在 `receive/process/queue/send` 周期内也读写同一域内存。
-
-在特定相位下，应用写入会错过“有效发送窗口”或被后续周期内容覆盖，导致“写了但本周期没发出去”。
-
-**修复策略（架构级）**
-
-采用“单写者原则”：应用线程不再直接写域内存。
-
-引入 `tx_shadow` 作为线程间缓冲，应用线程仅写缓冲。
-
-仅 EtherCAT 线程在 `ecrt_domain_process()` 后、`ecrt_domain_queue()` 前，将 `tx_shadow` 统一落盘到 `domain1_pd`。
-
-该策略把“控制决策时机”和“总线发送时机”解耦，消除跨线程竞态。
-
-**实现要点**
-
-缓冲与同步新增于 [EthercatAdapterIGH.hpp](/home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.hpp)。
-
-周期内统一落盘与发送路径在 [EthercatAdapterIGH.cpp](/home/cat/Myactua_Ethercat/src/motors/src/protocol/ethercat/EthercatAdapterIGH.cpp)。
-
-`send()` 改为仅写 `tx_shadow`，不再直接写 `domain1_pd`。
-
-**验证与验收标准**
-
-编译通过并可运行：`stop_read_status`。
-
-验收核心指标从“随机”转为“确定性”：
-   `send_cw == pd_pre_queue` 应稳定成立。
-
-状态机推进应稳定复现：
-   `0x07 -> SW_ON`，`0x0F -> OP_EN`。
-
-相位扫描下成功率不再对微小延时高度敏感，说明竞态被消除。
-
-**工程化结论**
-
-此次缺陷本质是“实时系统中共享过程映像的多线程写冲突”。
-
-解决关键不在微调控制字，而在重构写入责任边界（Single Writer + Shadow Buffer）。
-
-该修复具备可迁移性，可作为后续 EtherCAT/现场总线驱动并发访问的标准范式。
-
-## ControlCommand 重构复盘
-
-记录日期：2026-06-01
-
-### 修改背景与现象
-
-原来的 `ControlCommand` 使用一个 `CommandType` 枚举配合多个可选字段表达所有控制命令：
-
-```cpp
-/* 控制命令 */
-struct ControlCommand {
-    CommandType type;            // 控制命令类型
-    int slave_index;             // 电机索引
-    std::vector<double> values;  // 目标值 (仅在 SET_SETPOINTS 命令中有效)
-    std::vector<MitSetpoint> mit_setpoints;  // MIT/PVT目标值
-    ControlMode mode;            // 电机模式（仅在 SET_MODE 命令中有效）
-
-    ControlCommand() : type(CommandType::STOP), slave_index(-1), mode(ControlMode::NONE) {}
-
-    ControlCommand( CommandType t,
-                    int idx = -1,
-                    const std::vector<double>& vals = {},
-                    ControlMode m = ControlMode::NONE)
-                    : type(t), slave_index(idx), values(vals), mode(m) {}
-	
-    
-    /* 针对 MIT 控制模式 */
-    ControlCommand(CommandType t,
-                   int idx,
-                   const std::vector<MitSetpoint>& mit_vals,
-        		   ControlMode m = ControlMode::NONE)
-        			: type(t), slave_index(idx), mit_setpoints(mit_vals), mode(m) {}
-};
+```bash
+sudo poweroff
 ```
 
-这种设计简单直接，但在项目继续扩展到 CSP 标量目标、MIT/PVT 目标、STOP、RESTART、SET_MODE 等多类命令后，逐渐暴露出几个问题：
+系统关机后再物理断电。第二天重新上电后，VS Code Remote-SSH 无法连接：
 
-- 同一个结构体同时承载“连续目标值命令”和“离散状态命令”，语义混在一起。
-
-- 哪些字段有效完全依赖 `type` 的约定，编译器无法阻止非法组合。如：
-
-  ``` c++
-  ControlCommand(CommandType::STOP, -1, values, ControlMode::PVT);
-  ControlCommand(CommandType::SET_MODE, -1, mit_setpoints);
-  ```
-
-  这类代码不会在编译期报错，只能依赖运行时分支忽略无效字段，长期维护风险较高。
-
-- `STOP/RESTART/SET_MODE` 使用 `slave_index < 0` 表示全部电机，而 setpoint 命令的 `slave_index` 语义不统一。
-
-- `process_commands()` 中需要对所有 `CommandType` 分支做人工分发，离散命令状态机里还会出现 setpoint 相关的无意义 case。
-
-- 调用点可读性不够好，例如 `ControlCommand(CommandType::SET_MODE, i, {}, mode)` 需要读构造函数参数顺序才能理解含义。
-
----
-
-这次修改的目标是把“命令的合法状态”前移到接口层：
-
-- 用类型区分命令大类，降低误用概率；让离散命令队列只处理真正需要闭环确认的命令。
-- 用工厂函数表达意图，让调用点更接近业务语言。
-- 保持 `send_command(const ControlCommand&)` 不变，减少对控制器外层 API 的冲击。
-- 不引入 `std::variant`，控制改动规模，属于“中改”而不是大规模架构替换。
-
-从控制系统角度看，这个改动也更符合真实语义：
-
-- `STOP`、`RESTART`、`SET_MODE` 是离散状态命令，需要进入离散命令队列，等待状态字或模式回读确认。
-- `SetScalarSetpoints` 和 `SetMitSetpoints` 是连续目标值更新，主要写入 `DesiredState`，不应该混入离散状态机。
-
-### 核心设计变化
-
-新增三个枚举：
-
-```cpp
-enum class ControlCommandKind {
-    DISCRETE,
-    SETPOINT
-};
-
-enum class DiscreteCommandType {
-    STOP,
-    RESTART,
-    SET_MODE
-};
-
-enum class SetpointCommandType {
-    SCALAR_SETPOINTS,
-    MIT_SETPOINTS
-};
+```text
+ssh: connect to host 192.168.5.237 port 22: Connection timed out
 ```
 
-`ControlCommand` 不再暴露旧构造方式，只允许通过静态工厂函数创建：
+Windows 上执行：
 
-```cpp
-ControlCommand::Stop();
-ControlCommand::Restart();
-ControlCommand::SetMode(ControlMode::CSP, i);
-ControlCommand::SetScalarSetpoints(target_deg);
-ControlCommand::SetScalarSetpoint(i, target);
-ControlCommand::SetMitSetpoints(mit_setpoints);
-ControlCommand::SetMitSetpoint(i, mit_setpoint);
+```cmd
+ping 192.168.5.237
 ```
 
-同时保留 `ControlCommand::kAllSlaves = -1`，统一表达“全部电机”的含义。
+原始结果：
 
-### 主要实现点
-
-#### ControlTypes.hpp
-
-- 删除旧的 `CommandType`。
-- 删除 `ControlCommand(CommandType, ...)` 系列构造函数。
-- 新增 `ControlCommandKind`、`DiscreteCommandType`、`SetpointCommandType`。
-- 新增工厂函数，强制调用者使用语义明确的新接口。
-- 将 `DiscreteCommand::type` 从旧 `CommandType` 改为 `DiscreteCommandType`。
-
-#### motor_control.cpp
-
-`process_commands()` 从原来的单层 `switch (cmd.type)` 改为两段式处理：
-
-```cpp
-if (cmd.kind == ControlCommandKind::DISCRETE) {
-    enqueue_discrete_command(cmd);
-    continue;
-}
-
-switch (cmd.setpoint_type) {
-    case SetpointCommandType::SCALAR_SETPOINTS:
-        ...
-    case SetpointCommandType::MIT_SETPOINTS:
-        ...
-}
+```text
+正在 Ping 192.168.5.237 具有 32 字节的数据:
+来自 192.168.5.179 的回复: 无法访问目标主机。
+来自 192.168.5.179 的回复: 无法访问目标主机。
+来自 192.168.5.179 的回复: 无法访问目标主机。
+来自 192.168.5.179 的回复: 无法访问目标主机。
 ```
 
-这样以后读代码时可以直接看到：
+随后：
 
-- 离散命令进入 `enqueue_discrete_command()`。
-- 连续目标值命令只更新对应的 desired setpoint。
-
-离散状态机中的 `apply_discrete_command_to_motor()` 和 `is_discrete_command_satisfied()` 也只处理：
-
-- `DiscreteCommandType::STOP`
-- `DiscreteCommandType::RESTART`
-- `DiscreteCommandType::SET_MODE`
-
-不再出现 setpoint 相关的空分支。
-
-#### 调用点迁移
-
-旧写法：
-
-```cpp
-controller.send_command(
-    ControlCommand(CommandType::SET_MODE, i, {}, ControlMode::CSP));
+```cmd
+arp -a
 ```
 
-新写法：
+在 `192.168.5.179` 对应的局域网接口下没有发现：
 
-```c++
-controller.send_command(
-    ControlCommand::SetMode(ControlMode::CSP, i));
+```text
+192.168.5.237
 ```
 
----
+这里第一反应不能是“检查 sshd”或“重装 VS Code Remote-SSH”。因为 SSH 的数据路径至少是：
 
-旧写法：
-
-```cpp
-controller.send_command(
-    ControlCommand(CommandType::SET_SETPOINTS, -1, target_deg));
+```text
+SSH
+↓
+TCP/22
+↓
+IP
+↓
+ARP / 邻居发现
+↓
+Ethernet / Wi-Fi
 ```
 
-新写法：
+当本机连 `192.168.5.237` 的 MAC 地址都解析不到时，TCP 22 根本还没有机会建立。因此：
 
-```cpp
-controller.send_command(
-    ControlCommand::SetScalarSetpoints(target_deg));
+```text
+SSH timeout 是症状，
+故障一定发生在 SSH 之前。
 ```
 
----
-
-旧写法：
-
-```cpp
-controller.send_command(
-    ControlCommand(CommandType::SET_MIT_SETPOINTS, -1, sp));
+``` text
+SSH timeout
+→ 判断是否是网络层
+→ 串口确认系统启动状态
+→ 从大量 kernel log 中找到“第一条破坏性异常”
+→ 顺着 call trace 定位到 NetworkManager / ec_stmmac
+→ U-Boot + initramfs 无损救援
+→ A/B 验证
+→ sysfs 映射物理网口
+→ 将 EtherCAT NIC 永久设为 NetworkManager unmanaged
 ```
 
-新写法：
+#### 串口日志：追到内核死锁
 
-```cpp
-controller.send_command(
-    ControlCommand::SetMitSetpoints(sp));
+开发板 HDMI 没有任何输出，SYS LED 先慢速双闪，之后常亮。于是接入 Debug UART。最初看到的原始串口信息是：
+
+``` text
+Debian GNU/Linux 12 lubancat ttyFIQ0
+
+[username:password] root:root cat:temppwd
+
+Modify information : /etc/issue
+
+lubancat login: [    7.345331] rk_pcie_establish_link: 371 callbacks suppressed
+[    7.345347] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.365555] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.386605] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.407644] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.428699] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.449730] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.470776] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.491818] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.512863] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.533899] rk-pcie fe170000.pcie: PCIe Linking... LTSSM is 0x3
+[    7.744232] rk-pcie fe170000.pcie: PCIe Link Fail, LTSSM is 0x3, hw_retries=1
+[    8.772430] rk-pcie fe170000.pcie: failed to initialize host
+[   15.109993] platform mtd_vendor_storage: deferred probe pending
 ```
 
-### 修改后的收益
+只要 `login:` 已经出现，就说明系统至少已经经过：
 
-#### 类型安全更好
+```text
+BootROM
+→ U-Boot
+→ Linux kernel
+→ rootfs
+→ systemd/getty
+```
 
-旧接口允许把任意字段组合到一起，新接口通过工厂函数收敛创建路径，调用者不能再直接写 `ControlCommand(CommandType, ...)`。
+所以此时不能下结论说“板子卡死在 PCIe 初始化”或“系统没有启动”。这也是嵌入式 Linux 调试中非常重要的一点：
 
-#### 可读性更强
+```text
+某个 driver probe fail
+≠ 整个系统 boot fail
+```
 
-调用点从“看参数猜语义”变成“函数名表达语义”：
+PCIe 的这些报错可能来自某一路没有连接有效设备。真正要做的是继续向前寻找**第一条会破坏系统调度或锁状态的异常**。
 
-- `Stop()`
-- `Restart()`
-- `SetMode(...)`
-- `SetScalarSetpoints(...)`
-- `SetMitSetpoints(...)`
+##### 出现`deadlock`
 
-这对控制代码很重要，因为读代码的人需要快速判断当前命令是否会改变电机状态、是否会下发连续目标值。
+继续分析完整串口日志后，看到在 `NetworkManager` 启动、EtherCAT 网口开始初始化附近出现：
 
-#### 状态机职责更清晰
+```text
+Starting NetworkManager-di…nager Script Dispatcher Service...
+[    5.592335] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: Register MEM_TYPE_PAGE_POOL RxQ-0
+[    5.592820] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: Register MEM_TYPE_PAGE_POOL RxQ-1
 
-离散命令队列只处理需要确认完成的命令，不再承载 setpoint 分支。这样后续要扩展重试、超时、状态监控时，边界更明确。
+[  OK  ] Started NetworkManager-dis…Manager Script Dispatcher Service.
 
-#### 兼容控制器外层调用形式
+[    5.670196] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: PHY [stmmac-1:00] driver [RTL8211F Gigabit Ethernet] (irq=POLL)
+[    5.670736] dwmac4: Master AXI performs any burst length
+[    5.670757] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: No Safety Features support found
+[    5.670774] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: IEEE 1588-2008 Advanced Timestamp supported
+[    5.671016] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: registered PTP clock
+[    5.682334] rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0: FPE workqueue start
+[    5.682344] ------------[ cut here ]------------
 
-`MYACTUA::send_command(const ControlCommand&)` 没有改变，因此线程安全队列和实时控制线程的整体结构没有大改。
+[    5.682345] rtmutex deadlock detected
 
-### 风险与取舍
+[    5.682351] WARNING: CPU: 2 PID: 1110 at kernel/locking/rtmutex.c:1642 __rt_mutex_slowlock_locked.constprop.0+0x128/0x160
+[    5.682395] CPU: 2 PID: 1110 Comm: NetworkManager Tainted: G           O       6.1.99-rt36-rk3588 #6
+```
 
-这次选择的是“强制新接口”，没有保留旧构造函数兼容层。收益是旧错误写法会直接编译失败，风险是所有调用点必须同步迁移。
+这里已经出现了本次故障的第一条强证据：
 
-没有使用 `std::variant`，原因是：
+```text
+Comm: NetworkManager
+rtmutex deadlock detected
+```
 
-- 当前目标是中等规模重构，不希望一次性引入更大的模板/访问器改造。
-- 现有 `ThreadSafeQueue<ControlCommand>` 和 `send_command()` 路径可以复用。
-- 工厂函数已经能解决主要的误用问题。
+也就是说，发生死锁检测时当前进程就是 `NetworkManager`，并且时间点正好位于：
 
-setpoint 的单位语义保持不变：
+```text
+EtherCAT eth0 被打开
+```
 
-- `SetScalarSetpoints` 的单位仍由当前 `ControlMode` 决定。
-- `SetMitSetpoints` 使用 `MitSetpoint` 字段中的单位定义。
+的过程中。
 
-这是为了避免在同一次重构中混入“单位系统重构”，控制改动风险。
+##### 查看`call trace`
 
+**接着看 call trace**：
 
-### 面试复盘表达
+```text
+Call trace:
+ __rt_mutex_slowlock_locked.constprop.0+0x128/0x160
+ mutex_lock+0x78/0x90
+ rtnl_lock+0x18/0x20
+ __stmmac_open+0x1c0/0x4c0 [ec_stmmac]
+ stmmac_open+0x40/0xd0 [ec_stmmac]
+ __dev_open+0xe4/0x1e0
+ __dev_change_flags+0x198/0x220
+ dev_change_flags+0x20/0x60
+ do_setlink+0x5fc/0xdd0
+ __rtnl_newlink+0x500/0x880
+ rtnl_newlink+0x4c/0x74
+ rtnetlink_rcv_msg+0x11c/0x384
+ netlink_rcv_skb+0x58/0x124
+ rtnetlink_rcv+0x14/0x20
+ netlink_unicast+0x268/0x334
+ netlink_sendmsg+0x198/0x3ec
+ ____sys_sendmsg+0x214/0x27c
+ ___sys_sendmsg+0x7c/0xd4
+ __sys_sendmsg+0x64/0xc0
+```
 
-可以按下面这段组织语言：
+调用栈应该**从下往上理解调用方向**：
 
-> 我在电机控制接口里发现 `ControlCommand` 是一个典型的手写 tagged union：一个 `CommandType` 配多个可选字段。短期看很方便，但随着命令类型变多，它会允许很多非法组合，比如 STOP 命令携带 setpoint、SET_MODE 命令携带 MIT 参数。编译器无法约束这些状态，后续维护时容易把错误藏到运行时分支里。
->
-> 所以我把命令拆成两类：离散命令和连续 setpoint 命令。离散命令包括 STOP、RESTART、SET_MODE，需要进入状态机并等待状态确认；setpoint 命令只负责更新 desired target。然后我移除了旧构造函数，改成 `ControlCommand::Stop()`、`SetMode()`、`SetScalarSetpoints()`、`SetMitSetpoints()` 这类静态工厂函数，让调用点直接表达意图。
->
-> 这个方案没有大改 `send_command()` 和线程安全队列，因此对实时控制框架影响较小，但显著提升了类型安全和可读性。最后我同步迁移了所有示例和 inference 层调用，并通过 motors、inference 两套 CMake build 和旧接口残留检查验证。
+```text
+用户态 NetworkManager
+↓
+通过 netlink 请求修改网卡状态
+↓
+rtnetlink_rcv_msg
+↓
+do_setlink / dev_change_flags
+↓
+__dev_open
+↓
+stmmac_open [ec_stmmac]
+↓
+__stmmac_open [ec_stmmac]
+↓
+rtnl_lock
+↓
+RT-mutex slow path
+↓
+deadlock detected
+```
 
-如果被追问“为什么不用 `std::variant`”，可以回答：
+这里最值得关注的是：
 
-> `std::variant` 确实可以进一步增强类型表达力，但这次定位是中等规模重构。项目里已经有稳定的 `ThreadSafeQueue<ControlCommand>` 和 `send_command()` 路径，我优先选择工厂函数加命令分类，既解决主要误用问题，又避免引入过大的改造面。后续如果命令数量继续扩展，再考虑把 payload 改成 variant。
+```text
+__dev_open
+→ stmmac_open
+→ __stmmac_open
+→ rtnl_lock
+```
 
-如果被追问“这次改动有没有风险”，可以回答：
+Linux 网络设备的 open/状态修改本身就是在 RTNL 体系下进行的。如果驱动的 open 路径中又不恰当地获取 RTNL，就存在递归锁获取或错误锁上下文的可能。因此问题从“NetworkManager 网络配置错误”进一步缩小成：
 
-> 最大风险是强制新接口会破坏旧调用，所以我没有保留兼容构造函数，而是一次性迁移仓库内所有调用点，并用编译和 grep 做闭环检查。这样能保证旧接口不会继续被使用。
+```text
+NetworkManager 是触发者；
+ec_stmmac 的 open / locking path 是真正值得审查的底层代码。
+```
 
-###  后续可继续优化
+几毫秒后，串口继续输出：
 
-- 给 `SetScalarSetpoints` 进一步拆出 `SetPositionDeg`、`SetVelocityRpm`、`SetTorqueRaw`，把单位也放进类型或函数名。
-- 给命令增加轻量校验函数，例如指定单轴时要求 payload 至少有一个元素。
-- 如果命令 payload 继续复杂化，可以考虑 `std::variant` 版本，彻底避免无效字段常驻结构体。
-- 为 `process_commands()` 增加单元测试或仿真测试，覆盖批量 setpoint、单轴 setpoint、STOP/RESTART/SET_MODE 入队逻辑。
+```text
+[    5.689088] BUG: scheduling while atomic: NetworkManager/1110/0x00000002
+[    5.689092] Modules linked in: ... stmmac ec_stmmac(O) ... ec_master(O)
+[    5.689122] CPU: 2 PID: 1110 Comm: NetworkManager Tainted: G        W  O       6.1.99-rt36-rk3588 #6
+[    5.689130] Call trace:
+[    5.689159]  __schedule_bug+0x50/0x64
+[    5.689166]  __schedule+0x470/0x64c
+[    5.689173]  schedule+0x58/0xd0
+[    5.689179]  __rt_mutex_slowlock_locked.constprop.0+0x13c/0x160
+[    5.689187]  mutex_lock+0x78/0x90
+[    5.689191]  rtnl_lock+0x18/0x20
+[    5.689196]  __stmmac_open+0x1c0/0x4c0 [ec_stmmac]
+[    5.689236]  stmmac_open+0x40/0xd0 [ec_stmmac]
+[    5.689261]  __dev_open+0xe4/0x1e0
+[    5.689266]  __dev_change_flags+0x198/0x220
+[    5.689272]  dev_change_flags+0x20/0x60
+[    5.689277]  do_setlink+0x5fc/0xdd0
+```
 
+这条信息的含义比普通 warning 严重得多：
 
+```text
+scheduling while atomic
+```
+
+表示当前执行上下文处于“不应该睡眠/调度”的状态，但代码却进入了会调度的路径。
+
+结合前面的：
+
+```text
+rtnl_lock
+→ mutex_lock
+→ __rt_mutex_slowlock_locked
+```
+
+可以理解为：
+
+```text
+错误锁上下文
+→ RT-mutex 进入慢路径
+→ 尝试调度等待
+→ 当前上下文又不允许这样调度
+→ scheduling while atomic
+```
+
+此时系统虽然还能继续打印日志，但内核状态已经不健康了。大约 60 秒后，串口出现：
+
+```text
+[   66.413914] rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:
+[   66.413941] rcu:     4-...!: (1 GPs behind) idle=b84c/1/0x4000000000000000 softirq=0/0 fqs=0 rcuc=60003 jiffies(starved)
+[   66.413972]  (detected by 0, t=60002 jiffies, g=3213, q=103617 ncpus=8)
+...
+[   66.414383] rcu: rcu_preempt kthread starved for 60002 jiffies! g3213 f0x2 RCU_GP_WAIT_FQS(5) ->state=0x0 ->cpu=4
+[   66.414404] rcu:     Unless rcu_preempt kthread gets sufficient CPU time, OOM is now expected behavior.
+```
+
+##### 分析 RCU stall
+
+这里不能把 RCU stall 当成一个独立的新问题。RCU 需要 CPU 和 task 定期推进 grace period。如果内核因为前面的锁问题导致 CPU/task 长时间不能正常调度，就会出现：
+
+```text
+RCU grace period 无法推进
+→ rcu_preempt kthread 长期得不到 CPU
+→ RCU stall
+```
+
+因此因果顺序应该理解成：
+
+```text
+rtmutex deadlock
+→ scheduling while atomic
+→ 调度 / 锁状态恶化
+→ RCU stall
+```
+
+而不是：
+
+```text
+RCU 配置错误
+→ 导致前面的 NetworkManager 死锁
+```
+
+这也帮助排除了当时正在调试的：
+
+```text
+isolcpus
+rcu_nocbs
+irqaffinity
+```
+
+作为第一根因的可能性。
+
+更晚，在约 205 秒时串口又出现：
+
+```text
+[  205.439575] rockchip-spi feb20000.spi: RK SPI transfer timed out
+[  205.439591] rk806 spi2.0: SPI transfer failed: -110
+[  205.439607] rockchip-spi feb20000.spi: state=0
+[  205.439619] rockchip-spi feb20000.spi: tx_left=0
+[  205.439630] rockchip-spi feb20000.spi: rx_left=3
+...
+[  205.439725] spi_master spi2: failed to transfer one message from queue
+[  205.439735] spi_master spi2: noqueue transfer failed
+[  205.439754] cpu cpu0: mem: failed to set voltage (850000 850000 950000 uV): -110
+
+Error reading from serial device
+```
+
+看到：
+
+```text
+rk806
+failed to set voltage
+SPI transfer timed out
+```
+
+很容易怀疑供电、PMIC 或 RK806 硬件损坏。
+
+但时间轴告诉我们：
+
+```text
+5.68 s   rtmutex deadlock
+5.69 s   scheduling while atomic
+66.41 s  RCU stall
+205.44 s SPI / RK806 timeout
+```
+
+所以更加合理的判断是：
+
+```text
+RK806 timeout 是系统长时间失稳后的 secondary failure，
+而不是整件事的第一根因。
+```
+
+这次排查中非常重要的一条经验就是：
+
+> **内核日志不要看“哪一条报错最吓人”，而要看“哪一条最早改变了系统的正常控制流”。**
+
+#### 用 U-Boot / initramfs 修复
+
+##### 进入 U-Boot并查看分区
+
+因为正常启动后很快进入内核异常，无法可靠地在完整系统里修改配置，于是进入 U-Boot。上电时按 `Ctrl+C` 停止 autoboot，进入：
+
+```text
+=>
+```
+
+执行：
+
+```text
+ext4ls mmc 0:2 /
+```
+
+确认 boot 分区中存在：
+
+```text
+System.map-6.1.99-rt36-rk3588
+boot.cmd
+boot.scr
+config-6.1.99-rt36-rk3588
+dtb/
+extlinux/
+initrd-6.1
+uEnv/
+Image-6.1.99-rt36-rk3588
+```
+
+继续：
+
+```text
+ext4ls mmc 0:2 /dtb/
+```
+
+看到：
+
+```text
+rk3588-lubancat-5.dtb
+rk3588-lubancat-5io.dtb
+rk3588-lubancat-5-v2.dtb
+...
+```
+
+##### 阻止NetworkManager
+
+为了做最小变量 A/B，思路是：
+
+```text
+保留 kernel
+保留 PREEMPT_RT
+保留 ec_stmmac
+保留 EtherCAT
+只阻止 NetworkManager
+```
+
+也就是尝试在这一次启动中加入：
+
+```text
+systemd.mask=NetworkManager.service
+```
+
+第一次手工启动没有进入正常 rootfs，而是出现：
+
+```text
+[  212.673179] mmcblk0: mmc0:0001 EG1061 117 GiB
+[  212.678818]  mmcblk0: p1 p2 p3
+...
+Begin: Waiting for root file system ...
+Gave up waiting for root file system device.  Common problems:
+ - Boot args (cat /proc/cmdline)
+   - Check rootdelay= (did the system wait long enough?)
+ - Missing modules (cat /proc/modules; ls /dev)
+ALERT!  PARTUUID=614e0000-0000 does not exist.  Dropping to a shell!
+
+BusyBox v1.30.1 ...
+(initramfs)
+```
+
+这里首先看到：
+
+```text
+mmcblk0: p1 p2 p3
+```
+
+证明：
+
+```text
+eMMC 已经被内核识别
+分区表也正常
+```
+
+但：
+
+```text
+PARTUUID=614e0000-0000 does not exist
+```
+
+说明问题是：
+
+```text
+kernel cmdline 指定了一个错误 / 不完整的 root PARTUUID
+```
+
+而不是 eMMC 坏了。在 `(initramfs)` 中执行：
+
+```sh
+cat /proc/cmdline
+```
+
+实际看到：
+
+```text
+storagemedia=emmc androidboot.storagemedia=emmc androidboot.mode=normal root=PARTUUID=614e0000-0000 boot_part=2 earlyprintk console=ttyFIQ0 consoleblank=0 loglevel=7 rootwait rw rootfstype=ext4 isolcpus=7 rcu_nocbs=7 irqaffinity=0-5 systemd.mask=NetworkManager.service ...
+```
+
+继续：
+
+```sh
+ls -l /dev/mmcblk*
+```
+
+看到：
+
+```text
+/dev/mmcblk0
+/dev/mmcblk0p1
+/dev/mmcblk0p2
+/dev/mmcblk0p3
+/dev/mmcblk0boot0
+/dev/mmcblk0boot1
+/dev/mmcblk0rpmb
+```
+
+然后：
+
+```sh
+blkid /dev/mmcblk0p3
+```
+
+得到：
+
+```text
+/dev/mmcblk0p3: UUID="c97af8b3-8f31-46cf-9839-e857d41119aa" BLOCK_SIZE="4096" TYPE="ext4" PARTLABEL="rootfs" PARTUUID="614e0000-0000-4b53-8000-1d28000054a9"
+```
+
+这一步把问题彻底分开了：
+
+```text
+真实 rootfs:
+    /dev/mmcblk0p3
+    PARTUUID=614e0000-0000-4b53-8000-1d28000054a9
+
+手工启动使用:
+    root=PARTUUID=614e0000-0000
+```
+
+所以：
+
+```text
+rootfs 没坏
+eMMC 没坏
+只是手工 bootarg 不正确
+```
+
+此时没有继续重刷系统，而是利用 initramfs 直接挂载真实 rootfs：
+
+```sh
+mkdir -p /mnt/root
+mount -t ext4 /dev/mmcblk0p3 /mnt/root
+ls /mnt/root
+```
+
+确认真实 Debian 根目录存在后，在 rootfs 上直接创建 systemd mask：
+
+```sh
+ln -s /dev/null /mnt/root/etc/systemd/system/NetworkManager.service
+sync
+umount /mnt/root
+reboot -f
+```
+
+这等价于正常系统中的：
+
+```bash
+systemctl mask NetworkManager.service
+```
+
+**`mask` 的本质就是**：
+
+```text
+/etc/systemd/system/NetworkManager.service -> /dev/null
+```
+
+比 `disable` 更强，因为 systemd 即使被其他 unit 依赖，也无法再启动这个 service。
+
+##### 进行A/B验证
+
+重新按照原来的正常 U-Boot / `boot.scr` / `uEnv.txt` 路径启动，只保留 NetworkManager 被 mask 这一项变化。
+
+这次串口出现：
+
+```text
+[  OK  ] Reached target network.target - Network.
+[  OK  ] Reached target network-online.target - Network is Online.
+...
+Starting ssh.service - OpenBSD Secure Shell server...
+...
+[  OK  ] Started ssh.service - OpenBSD Secure Shell server.
+[  OK  ] Started gdm.service - GNOME Display Manager.
+...
+[  OK  ] Reached target multi-user.target - Multi-User System.
+[  OK  ] Reached target graphical.target - Graphical Interface.
+
+Debian GNU/Linux 12 lubancat ttyFIQ0
+
+[username:password] root:root cat:temppwd
+
+lubancat login:
+```
+
+最关键的不是“看到 login”，而是这一次**完整日志中没有再出现**：
+
+```text
+rtmutex deadlock detected
+BUG: scheduling while atomic
+rcu_preempt detected stalls
+```
+
+而 EtherCAT 相关模块仍然正常加载。于是得到一个很强的 A/B 结论：
+
+```text
+原始状态：
+NetworkManager + ec_stmmac
+→ deadlock
+
+实验状态：
+保留 ec_stmmac / EtherCAT / PREEMPT_RT
+只禁止 NetworkManager
+→ 系统稳定
+```
+
+因此可以高置信度判断：
+
+```text
+NetworkManager 自动操作 EtherCAT NIC
+是死锁的触发条件。
+```
+
+然后需要进一步确认：
+
+```text
+到底 eth0 / eth1 哪个物理口是 EtherCAT？
+```
+
+执行：
+
+```bash
+for i in eth0 eth1; do
+    echo "===== $i ====="
+    ethtool -i $i
+    readlink -f /sys/class/net/$i/device
+    cat /sys/class/net/$i/address
+done
+```
+
+原始输出：
+
+```text
+===== eth0 =====
+Cannot get driver information: Device or resource busy
+/sys/devices/platform/fe1c0000.ethernet
+fa:fd:53:a0:a5:55
+
+===== eth1 =====
+Cannot get driver information: Device or resource busy
+/sys/devices/platform/fe1b0000.ethernet
+f6:fd:53:a0:a5:55
+```
+
+`ethtool -i` 虽然因为设备 busy 没拿到 driver name，但：
+
+```text
+/sys/class/net/eth0/device
+→ fe1c0000.ethernet
+```
+
+已经足够建立 Linux netdev 与 SoC GMAC 的映射。再结合启动日志：
+
+```text
+rk_gmac-dwmac-ethercat fe1c0000.ethernet
+rk_gmac-dwmac fe1b0000.ethernet
+```
+
+可以确定：
+
+```text
+eth0 → fe1c0000 → EtherCAT 专用 GMAC
+eth1 → fe1b0000 → 普通 Linux GMAC
+```
+
+于是永久配置 NetworkManager：
+
+```bash
+sudo mkdir -p /etc/NetworkManager/conf.d
+sudo nano /etc/NetworkManager/conf.d/99-ethercat-unmanaged.conf
+```
+
+写入：
+
+```ini
+[keyfile]
+unmanaged-devices=mac:fa:fd:53:a0:a5:55
+```
+
+这里使用 MAC，而不是：
+
+```ini
+interface-name:eth0
+```
+
+是为了避免未来驱动 probe 顺序变化导致 `eth0/eth1` 编号交换。MAC 更稳定地代表这一块 EtherCAT 物理 NIC。恢复 NetworkManager 后执行：
+
+```bash
+nmcli device status
+ip -br link
+ip -br addr
+```
+
+最终原始状态为：
+
+```text
+DEVICE          TYPE      STATE        CONNECTION
+wlan0           wifi      已连接       JuShenShiYanShi_5G
+lo              loopback  连接（外部） lo
+p2p-dev-wlan0   wifi-p2p  已断开       --
+eth1            ethernet  不可用       --
+usb0            ethernet  不可用       --
+can0            can       未托管       --
+dummy0          dummy     未托管       --
+eth0            ethernet  未托管       --
+```
+
+以及：
+
+```text
+lo      UNKNOWN  127.0.0.1/8 ::1/128
+wlan0   UP       192.168.5.237/24 fe80::1036:5103:d359:a72f/64
+eth0    DOWN
+eth1    DOWN
+usb0    DOWN
+```
+
+这里最终确认：
+
+```text
+192.168.5.237 = 开发板 wlan0
+```
+
+而：
+
+```text
+eth0 = EtherCAT，NetworkManager 未托管
+```
+
+这正是希望得到的最终架构：
+
+```text
+Management Plane
+├── wlan0 → Wi-Fi / SSH / VS Code
+└── eth1  → 普通 Ethernet
+
+Real-Time Fieldbus Plane
+└── eth0  → IgH EtherCAT / ec_stmmac
+             NetworkManager unmanaged
+```
+
+所以最终修复并不是：
+
+```text
+永远关闭 NetworkManager
+```
+
+而是：
+
+```text
+让 NetworkManager 正常管理管理网络，
+但永远不要触碰 EtherCAT 专用网口。
+```
+
+#### 问题原因
+
+##### 安装脚本错误地把“逻辑接口名 eth0”当成“EtherCAT 物理网口”
+
+上次安装脚本直接执行了：
+
+```bash
+mac="$(cat /sys/class/net/eth0/address)"
+```
+
+然后把这个 MAC 写入：
+
+```text
+ec_master main_devices
+```
+
+问题在于：
+
+```text
+eth0 / eth1
+```
+
+只是 Linux 动态分配的逻辑接口名，并不能永久代表某一块物理 GMAC。实际物理映射已经确认是：
+
+```text
+fe1c0000.ethernet
+→ EtherCAT 专用 GMAC
+→ 当前 netdev: eth0
+→ MAC: fa:fd:53:a0:a5:55
+
+fe1b0000.ethernet
+→ 普通 Linux GMAC
+→ 当前 netdev: eth1
+→ MAC: f6:fd:53:a0:a5:55
+```
+
+而安装脚本运行时曾经读到：
+
+```text
+eth0 = f6:fd:53:a0:a5:55
+```
+
+于是把原本正确的：
+
+```text
+main_devices=fa:fd:53:a0:a5:55
+```
+
+错误改成：
+
+```text
+main_devices=f6:fd:53:a0:a5:55
+```
+
+这就是这次事故中最明确的配置错误。
+
+------
+
+##### 为什么“修改后当时还能正常”，直到后一次启动才彻底出问题
+
+`/etc/modprobe.d/ethercat.conf` 被修改后，并不会自动改变已经加载到内核中的 `ec_master` 模块参数。也就是说可能发生：
+
+```text
+当前已经运行的 ec_master
+仍然使用旧的正确 MAC fa:...
+```
+
+但磁盘上的：
+
+```text
+/etc/modprobe.d/ethercat.conf
+```
+
+已经被写成：
+
+```text
+main_devices=f6:...
+```
+
+因此脚本修改完成以后，当前系统仍可能继续正常运行。直到后续 reboot / cold boot：
+
+```text
+重新加载 ec_master
+↓
+重新读取 /etc/modprobe.d/ethercat.conf
+↓
+错误的 f6:... 第一次真正生效
+```
+
+所以用户体验会非常像：
+
+```text
+之前一直正常
+→ 某次改完也没马上出问题
+→ 关机以后第二天突然起不来
+→ 此后每次启动都复现
+```
+
+这也能解释为什么过去做过很多次 cold boot 都没有问题：**以前磁盘上的 `main_devices` 还是正确的；真正改变的是后来的持久化配置。**
+
+#####  `main_devices` 写错后，EtherCAT Master 没有正确匹配 EtherCAT 物理口
+
+正确的 EtherCAT 口是：
+
+```text
+fa:fd:53:a0:a5:55
+```
+
+但 `ec_master` 被配置成寻找：
+
+```text
+f6:fd:53:a0:a5:55
+```
+
+因此 EtherCAT Master 无法按预期匹配：
+
+```text
+fe1c0000.ethernet
+```
+
+对应的 EtherCAT 物理接口。这里需要注意，严谨地说：
+
+```text
+main_devices 写错
+```
+
+和：
+
+```text
+NetworkManager 会去打开 EtherCAT NIC
+```
+
+不是完全等价的一步因果。更准确的是两个条件同时存在：
+
+```text
+EtherCAT Master 配置错误
++
+EtherCAT NIC 没有提前设置为 NetworkManager unmanaged
+```
+
+于是这个实时专用网口仍有机会被普通 Linux 网络管理器操作。
+
+------
+
+##### NetworkManager 是直接触发死锁的条件
+
+NetworkManager 启动后，把 EtherCAT `eth0` 当作普通 Ethernet 接口尝试 bring-up。串口日志的关键时序是：
+
+```text
+NetworkManager 启动
+↓
+rk_gmac-dwmac-ethercat fe1c0000.ethernet eth0 初始化
+↓
+PHY / PTP / FPE 初始化
+↓
+rtmutex deadlock detected
+```
+
+并且内核明确显示：
+
+```text
+PID: 1110
+Comm: NetworkManager
+```
+
+调用链进一步给出：
+
+```text
+NetworkManager
+→ netlink
+→ rtnetlink
+→ do_setlink
+→ dev_change_flags
+→ __dev_open
+→ stmmac_open [ec_stmmac]
+→ __stmmac_open [ec_stmmac]
+→ rtnl_lock
+→ RT-mutex slow path
+```
+
+因此可以确定：
+
+```text
+NetworkManager bring-up EtherCAT NIC
+```
+
+是这次内核死锁的**直接触发动作**。
+
+------
+
+##### `ec_stmmac` 本身还存在潜在的锁设计缺陷
+
+即使 EtherCAT 专用网口原则上不应该由 NetworkManager 管理，一个健壮的网络驱动也不应该因为：
+
+```bash
+ip link set eth0 up
+```
+
+或者类似的 netlink 操作，就把整台 Linux 主机拖死。实际调用链中出现：
+
+```text
+__dev_open
+→ stmmac_open
+→ __stmmac_open
+→ rtnl_lock
+```
+
+而网络设备 open 本身已经处于 RTNL 相关调用路径中，因此 `ec_stmmac` 内部再次获取 RTNL 很可疑。最终表现为：
+
+```text
+rtmutex deadlock detected
+↓
+BUG: scheduling while atomic
+↓
+RCU stall
+↓
+系统逐步失去响应
+```
+
+所以这次事故不能只归结为“MAC 配错了”。更完整的定义是：
+
+```text
+安装脚本设备识别错误
++
+缺少 NetworkManager 隔离保护
++
+ec_stmmac 潜在 locking bug
+```
+
+三者叠加。日志时间顺序非常重要：
+
+```text
+约 5.68 s
+rtmutex deadlock detected
+
+约 5.69 s
+scheduling while atomic
+
+约 66 s
+rcu_preempt detected stalls
+
+约 205 s
+RK SPI transfer timed out
+rk806 SPI transfer failed
+failed to set voltage
+```
+
+因此合理的因果顺序是：
+
+```text
+网络驱动锁死
+↓
+调度状态异常
+↓
+RCU grace period 无法推进
+↓
+系统整体越来越失去响应
+↓
+其他驱动访问也开始 timeout
+```
+
+##### 为什么现在的 `NetworkManager unmanaged` 配置非常重要
+
+现在增加：
+
+```ini
+[keyfile]
+unmanaged-devices=mac:fa:fd:53:a0:a5:55
+```
+
+相当于给系统加了一道独立的安全防线。
+
+以后即使：
+
+```text
+main_devices
+```
+
+再次被错误写坏，NetworkManager 也不会主动操作 EtherCAT 物理口。这样错误最多退化为：
+
+```text
+/dev/EtherCAT0 不出现
+EtherCAT Master 启动失败
+机器人程序 fail-fast
+```
+
+而不是：
+
+```text
+NetworkManager 打开 EtherCAT NIC
+→ kernel deadlock
+→ SSH 丢失
+→ 整机失联
+```
+
+这体现了一个很重要的系统设计原则：配置错误应该让功能启动失败，而不应该让整台主机崩溃\boxed{ \text{配置错误应该让功能启动失败，而不应该让整台主机崩溃} }
+
+##### 原因总体概括
+
+```text
+安装脚本假设 eth0 永远等于 EtherCAT 口
+↓
+某次运行时 eth0 实际对应普通 GMAC
+↓
+把 main_devices 从正确的 fa:... 错写成 f6:...
+↓
+配置文件被永久保存
+↓
+下一次重新加载 ec_master 时错误参数生效
+↓
+EtherCAT Master 没有正确匹配 fe1c0000
+↓
+EtherCAT NIC 又没有提前配置为 NetworkManager unmanaged
+↓
+NetworkManager 自动 bring-up EtherCAT eth0
+↓
+进入 ec_stmmac::stmmac_open()
+↓
+错误/重复的 RTNL / RT-mutex 锁路径
+↓
+rtmutex deadlock detected
+↓
+scheduling while atomic
+↓
+RCU stall
+↓
+整机逐步失去响应
+```
+
+所以一句话总结就是：
+
+> **根本事故源头是安装脚本用动态接口名 `eth0` 识别 EtherCAT 物理设备，导致 `ec_master main_devices` 被持久化写错；同时系统没有预先隔离 EtherCAT NIC 与 NetworkManager，而 `ec_stmmac` 又存在潜在的 RTNL 锁缺陷，最终在下一次模块重新加载后由 NetworkManager bring-up 该网口触发整机死锁。**
+
+#### 总结
+
+这次问题可以压缩成s一个非常实用的故障分析框架：
+
+```text
+执行一个最小诊断命令
+→ 看原始现象
+→ 判断问题属于哪一层
+→ 根据日志时间顺序找第一条破坏性异常
+→ 顺着 call trace 找调用者和 driver
+→ 做最小变量 A/B
+→ 先恢复系统可维护性
+→ 再做永久修复
+```
+
+几个关键知识点尤其值得记住。
+
+**第一，SSH timeout 不等于 SSH 出错。**  
+先用 `ping`、`arp` 判断 L2/L3 是否成立。如果 ARP 都不成立，就不要浪费时间检查 SSH key 和 VS Code。
+
+**第二，Debug UART 是嵌入式 Linux 的生命线。**  
+HDMI 没画面并不能说明 kernel 没启动，而 UART 可以判断系统到底在 BootROM、U-Boot、kernel、rootfs 还是 systemd 哪一层。
+
+**第三，读 kernel log 时要看时间顺序。**  
+这次最吓人的 `RK806 SPI transfer failed` 并不是根因。真正第一条破坏系统状态的是 5.68 秒的 `rtmutex deadlock detected`。
+
+**第四，要学会读 call trace。**  
+这次调用链不是抽象信息，而是直接告诉了问题路径：
+
+```text
+NetworkManager
+→ netlink
+→ rtnetlink
+→ __dev_open
+→ stmmac_open [ec_stmmac]
+→ rtnl_lock
+→ rtmutex deadlock
+```
+
+**第五，RCU stall 很多时候是“系统已经被前面的问题拖死”的表现。**  
+不能看到 RCU stall 就立即归因于 `rcu_nocbs` 或 CPU isolation。
+
+**第六，复杂问题最有效的方法是 A/B，不是同时改十个东西。**  
+这次只改变 NetworkManager 一个变量，保留 EtherCAT、PREEMPT_RT、kernel、CPU isolation，从而建立了很强的因果证据。
+
+**第七，U-Boot / initramfs 是恢复手段，而不是只用于刷机。**  
+即使完整系统无法稳定进入 shell，只要 kernel 和 rootfs 还在，就可以从 initramfs 挂载真实 rootfs 修 systemd 配置，避免重刷系统。
+
+简历中可以写成：
+
+```text
+RK3588 PREEMPT_RT / EtherCAT 系统级故障定位与恢复
+
+- 在 RK3588 + Debian 12 + Linux PREEMPT_RT + IgH EtherCAT 平台上，
+  定位冷启动后 SSH 失联及整机 stall 问题。
+- 基于 ARP、Debug UART 与 kernel call trace，
+  将问题从网络不可达下钻至
+  NetworkManager → ec_stmmac → rtnl_lock 的 RT-mutex 锁异常，
+  并分析 scheduling while atomic 与后续 RCU stall 的因果链。
+- 使用 U-Boot / initramfs 挂载 eMMC rootfs 完成无重刷救援，
+  通过最小变量 A/B 启动验证确认 NetworkManager 为 EtherCAT NIC 死锁触发条件。
+- 基于 sysfs 建立 Linux netdev 与 RK3588 GMAC 映射，
+  按 MAC 将 EtherCAT NIC 配置为 NetworkManager unmanaged，
+  实现管理网络与实时 EtherCAT 数据平面隔离并恢复 Wi-Fi / SSH。
+```
+
+面试时最值得讲的不是“我会哪些 Linux 命令”，而是这一句话：
+
+```text
+我不是从 SSH 配置开始试，而是先判断故障层级；
+不是看到最后一个 error 就猜根因，而是按时间轴找到第一条破坏性异常；
+最后通过单变量 A/B 验证，把系统级现象收敛到了一个具体 driver locking path。
+```
+
+这才是这次排障最有价值的部分。
 
 # IMU
 
@@ -2600,5 +3294,7 @@ ls -l /dev/event*
 sudo evtest
 ```
 
+# 实时处理
 
+## 
 
