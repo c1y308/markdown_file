@@ -307,6 +307,8 @@ echo "Current kernel: $(uname -r)"
 
 因此：$\boxed{ \$(command) = \text{执行 command，并使用它的标准输出} }$。这个语法称为：**Command Substitution / 命令替换**。
 
+**注意：`read`命令是输出到后面的`argument`，使用`IFS= read -r value < "${path}" || true`**；而`cat`命令则为命令输出定义。
+
 ### 读取变量
 
 读取变量有两种常见写法：
@@ -558,6 +560,42 @@ BBB
 
 所以：$\boxed{ > = 覆盖写入 }$.
 
+### 输入重定向`<`
+
+``` shell
+IFS= read -r value < "${path}" || true
+```
+
+正常`read -r value`会等从键盘输入。
+
+但是这里`<` 是**输入重定向**：$\boxed{\text{把文件作为命令的标准输入}}$；
+
+假设：
+
+```shell
+path="/sys/class/net/eth0/address"
+```
+
+那么：
+
+```shell
+read -r value < "${path}"
+```
+
+实际上就是：
+
+```
+/sys/class/net/eth0/address
+            │
+            │ 文件内容
+            ↓
+          stdin
+            ↓
+           read
+            ↓
+          value
+```
+
 ### 追加重定向 `>>`
 
 如果不想覆盖，而是追加到文件末尾：
@@ -757,6 +795,10 @@ ip addr | grep eth0
 
 所以 Linux Shell 的一个核心思想就是：$\boxed{ \text{让多个简单程序通过管道组合起来完成复杂任务} }$.
 
+## `||`
+
+**注意这是 A 执行失败再执行 B**。
+
 ## `grep`命令
 
 `grep` 是 Linux 中最常用的文本搜索工具之一。例如：
@@ -782,6 +824,96 @@ grep -n "error" log.txt
 grep -R "policy_cmd" .
 # 从当前目录开始，递归寻找所有包含 `policy_cmd` 的文件内容。
 ```
+
+## `awk`命令
+
+### 命令参数
+
+把它理解成一个专门处理文本表格的小程序就行：$\boxed{\texttt{awk}=\text{逐行读取文本}\rightarrow\text{按字段拆分}\rightarrow\text{按列判断}\rightarrow\text{处理/输出}}$.
+
+最常见的输入就是这种：
+
+```
+Alice 20 Beijing
+Bob   25 Shanghai
+Tom   30 Shenzhen
+```
+
+`awk` **默认按空格或 Tab 分列**，所以第一行里：
+
+```shell
+$1 = Alice
+$2 = 20
+$3 = Beijing
+$0 = Alice 20 Beijing
+```
+
+其中最重要的规律是：
+
+```shell
+$0   整行
+$1   第1列
+$2   第2列
+$3   第3列
+...
+```
+
+### 命令结构
+
+最常见结构：
+
+```shell
+awk '条件 { 动作 }' 文件
+
+# 条件(没有则对每一行都处理)
+# → 哪些行要处理
+
+
+# 动作
+# → 对这些行做什么
+
+
+# 每一行都打印第 1 列。
+awk '{ print $1 }' file.txt
+
+# 每一行都打印第 1, 3 列。
+# 加入逗号会在输出的 1, 3 列中间插入空格。
+awk '{ print $1, $3 }' file.txt
+```
+
+### `NF`/`NR`
+
+`NF` 是：$\boxed{\text{Number of Fields}}$，也就是**这一行有多少列**。例如：
+
+```shell
+awk '{ print NF }' file.txt
+```
+
+可以打印最后一列：
+
+```shell
+awk '{ print $NF }' file.txt
+```
+
+---
+
+`NR`是：$\boxed{\text{Number of Records}}$；也就是**当前处理到第几行**。例如：
+
+```shell
+awk '{ print NR, $0 }' file.txt
+```
+
+输出：
+
+```
+1 Alice 20 Beijing
+2 Bob 25 Shanghai
+3 Tom 30 Shenzhen
+```
+
+### 正则表达式
+
+
 
 ## 命令的退出状态 `$?`
 
@@ -1406,7 +1538,7 @@ A B C
 
 在脚本或函数中，通常推荐**来安全地保留每个参数**。
 
-### 默认参数 `${1:default}`
+### 默认参数 `${1:-default}`
 
 经常看到：
 
@@ -1418,7 +1550,7 @@ iface="${1:-eth0}"
 
 > 如果用户提供了 `$1`，就使用 `$1`；否则使用 `eth0`。
 
-所以：$\boxed{ \$\{var:default\} = \text{变量没有值时使用默认值} }$.
+所以：$\boxed{ \$\{var:-default\} = \text{变量没有值时使用默认值} }$.
 
 ### `exit`
 
@@ -1472,6 +1604,9 @@ check_cpu
 
 ```shell
 check_iface() {
+
+	local path value # 使用 local 关键词创建函数的局部变量
+	
     echo "Checking interface: $1"
     ip link show "$1"
 }

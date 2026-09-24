@@ -256,7 +256,7 @@ sudo apt search git
 设置当前机器Git的标识：
 
 ``` bash
-git config --global user.name "cjysdl"
+git config --global user.name "c1y308"
 git config --global user.email "2021111679@my.swjtu.edu.cn"
 ```
 
