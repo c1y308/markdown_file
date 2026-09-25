@@ -1272,7 +1272,7 @@ RISC-V        ARM64
 
 wfi       =   wfi
 ```
-## CSR寄存器
+## CSR 寄存器
 
 > Control and Status Register
 
@@ -1303,7 +1303,7 @@ wfi       =   wfi
 当前时间/周期数是多少？
 ```
 
-### 常用寄存器
+### 寄存器
 
 #### `mhartid`（CPU的 id）
 
@@ -1547,6 +1547,31 @@ mip = 哪些中断已经来了
 - 地址翻译；
 
 Linux 启动以后会大量涉及这个 CSR。
+
+#### `m(s)scratch`（指向每个 hart 的`sbi_scratch`）
+
+`mscratch` 是每个 hart 独有的一个 Machine-mode CSR；OpenSBI 把“指向该 hart 的 `sbi_scratch` 内存区域的指针”放进 `mscratch`。
+
+``` assembly
+hart0 的 mscratch
+┌──────────────────┐
+│ 0x81234000       │──────────┐
+└──────────────────┘          │
+                              ▼
+                       hart0 scratch
+                      ┌──────────────┐
+                      │ fw_start     │
+                      │ fw_size      │
+                      │ next_arg1    │
+                      │ next_addr    │
+                      │ next_mode    │
+                      │ warmboot_addr│
+                      │ platform     │
+                      │ ...          │
+                      └──────────────┘
+```
+
+
 
 #### CSR 与特权级
 
@@ -1806,11 +1831,26 @@ a0：
 csrs mstatus, a0
 ```
 
-得到：
+得到：`00101000`。
 
+#### `csrrw`：原子读 - 写
+
+> Atomic Read/Write CSR。
+
+一句话概括：`csrrw rd, csr, rs1`：把 CSR 的旧值读入 `rd`，同时把 `rs1` 的值写入 CSR，整个过程原子完成。
+
+##### 原子交换
+
+``` assembly
+csrrw tp, mscratch, tp
 ```
-00101000
-```
+
+含义：
+
+- 把 `mscratch` 的旧值读到 `tp`
+- 把 `tp` **原来的值**写到 `mscratch`
+
+**一条指令完成“读取旧值并写入新值”**，中间不会被中断打断。这在 trap handler 保存上下文时非常有用。
 
 #### `csrc`：清除某些位
 
@@ -1940,6 +1980,60 @@ li sp, 0x80100000
 #### ARM64：`sp`
 
 ARM架构中同样叫做 `sp` 寄存器。
+
+### `gp(x3)`：全局指针
+
+> `gp` = Global Pointer，全局指针。
+
+### `tp(x4)`：线程指针
+
+> `tp` = Thread Pointer，中文一般叫“线程指针”。
+
+硬件上 `tp` 只是一个普通通用寄存器；软件/ABI 约定它保存“当前线程的线程指针”，通常指向 `TCB`，用来访问线程局部存储 TLS（**Thread-Local Storage**）。多线程程序里，每个线程可以有自己独立的 `thread_local` / `__thread` 变量。
+
+> 解决的核心问题是：**多线程程序里，有些数据不能所有线程共享，必须每个线程一份。**普通全局变量和静态变量是所有线程共享的：
+>
+> ```c
+> int counter;   // 所有线程共用同一个 counter
+> ```
+>
+> 如果两个线程同时改 `counter`，就需要加锁，否则会有数据竞争。但有些场景天然就是“每线程一份”：
+>
+> - `errno`：每个线程的错误码应该独立；
+> - 线程 ID、线程名；
+> - 线程私有的随机数种子；
+> - 线程私有的缓存、连接池、日志上下文；
+> - 某些库函数内部的状态。
+>
+> 这些数据如果做成全局变量，就会互相干扰；如果每次手动传结构体指针，又很麻烦。TLS 就是让编译器/运行时自动帮你做到“每线程一份”。
+
+---
+
+典型关系：
+
+- `tp` 指向当前线程的 **TCB**，Thread Control Block；
+- TCB 附近存放该线程的 TLS 数据；
+- 访问 TLS 变量时，用 `tp + 偏移` 或 `tp - 偏移` 来寻址；
+- 偏移由链接器或动态加载器确定。
+
+---
+
+线程切换时，必须切换 `tp`：
+
+- 保存当前线程的 `tp` 到它的上下文/TCB；
+- 恢复下一个线程的 `tp`；
+- 这样新线程才能访问自己的 TLS。
+
+---
+
+在 Linux/RISC-V 中：
+
+- 用户态 `tp` 通常指向用户线程的 TCB/TLS；
+- 进入内核时，内核会保存用户态 `tp`；
+- 内核态中，Linux/RISC-V 常用 `tp` 保存当前 `task_struct` 指针，也就是 `current`；
+- 返回用户态前，再恢复用户态 `tp`。
+
+这是操作系统实现细节，不是 RISC-V 硬件强制规定。
 
 ### `a0 ~ a7(x10 ~ x17)`：函数参数寄存器
 
@@ -4201,6 +4295,8 @@ boot hart
 
 ##### 选取 Boot Hart
 
+> hart = 硬件线程（Hardware Thread），可以理解为一个能独立取指、译码、执行的 CPU 核/硬件线程；每个 hart 有自己私有的寄存器状态，但和别的 hart 共享内存、总线和外设。
+
 注意这里区分**两种等待方式**：
 
 - PIC：PIC 位置无关没有代码复制(relocate copy)，无需等待代码重定位完毕，可以直接进入等待 boot_hart 。
@@ -4431,7 +4527,7 @@ REG_S t1,0(t0)
    add	a1, t0, zero
    ```
 
-7. **读取 HART 数量和栈大小**：从 `platform` 结构体读 `s7=hart_count`、`s8=stack_size`。
+7. **从 `platform` 结构体读取板子的Hart数量以及`scratch`的大小：** `s7 = hart_count`、`s8 = scratch_size`。
 
    ``` assembly
    lla	a4, platform
@@ -4444,89 +4540,87 @@ REG_S t1,0(t0)
    #endif
    ```
 
-8. **为每个 HART 建立 `scratch space`，（`_scratch_init`循环）**：这是核心。对每个核计算它的 scratch 地址（`tp`），并相较于`tp`的偏移填入：
+8. **为每个 Hart 建立 `scratch space`，调用`_scratch_init`循环**。
+
+   > 什么是 scratch space？
+   >
+   > OpenSBI 是多 Hart 运行环境，每个 Hart 都需要保存自己的运行状态，例如：
+   >
+   > - 当前 Hart 对应的 OpenSBI 信息；
+   > - 下一阶段软件入口；
+   > - trap 处理信息；
+   > - platform 信息；
+   > - warm boot 信息等。
+   >
+   > 每个 Hart 最终：`mscratch` → 自己的 `sbi_scratch`。
+
+   通过`tp = firmware_end + Hart总数 × 每个 Hart 的 scratch_size`计算得到`scratch_top`，对每个 Hart 相较于`tp`的偏移填入每个 Hart 的：
 
    - 固件起始/大小；
 
    - 下一级 arg1（`fw_next_arg1`，Linux一般DTB地址）、下一阶段入口地址（`fw_next_addr`）、下一阶段模式（`fw_next_mode`，S-mode 还是 M-mode）；
    - warm boot 入口 `_start_warm`、平台指针 `platform`、`_hartid_to_scratch`、trap 出口 `_trap_exit`、固件选项等；
 
-> 这里的 `next_addr`/`next_mode`/`next_arg1` 就是 OpenSBI 完成初始化后要跳转去的**下一级软件**（在 quard-star 里就是你的 `os.bin`）的入口信息。
-
 ``` assembly
-hart0
- |
- +-- scratch
-       |
-       +-- firmware信息
-       +-- 下一阶段地址
-       +-- 下一阶段模式
-       +-- platform信息
-       +-- trap退出地址
-
-
-hart1
- |
- +-- scratch
-	
-/**************************************************************************************************/	
-
-	/* 给每个 Hart 创建 scratch */
-	lla	tp, _fw_end
-	mul	a5, s7, s8
+	/* 给每个 Hart 创建 scratch，tp 以 _fw_end 开始 */
+	lla	tp, _fw_end  # openSBI 固件的结束地址 
+	mul	a5, s7, s8   # s7 = hart_count, s8 = stack_size
 	add	tp, tp, a5
 	/* Keep a copy of tp */
 	add	t3, tp, zero
-	/* Counter */
+	/* 用于 + 1 */
 	li	t2, 1
-	/* hartid 0 is mandated by ISA */
+	/* 正在分配的 hart_id */
 	li	t1, 0
 _scratch_init:
 	/*
-	 * The following registers hold values that are computed before
-	 * entering this block, and should remain unchanged.
-	 *
-	 * t3 -> the firmware end address
+	 * t1 -> 正在分配的 hart_id 
+	 * t2 -> 用于 + 1
+	 * t3 -> scratch_top 地址
 	 * s7 -> HART count
 	 * s8 -> HART stack size
 	 */
-	add	tp, t3, zero
-	mul	a5, s8, t1
-	sub	tp, tp, a5
-	li	a5, SBI_SCRATCH_SIZE
-	sub	tp, tp, a5
+	add	tp, t3, zero			# tp = scratch_top
+	
+	mul	a5, s8, t1				# tp = tp - hart_index(从 0 开始) × stack_size (得到当前 hart 的 scratch_top)
+	sub	tp, tp, a5				
+	
+	li	a5, SBI_SCRATCH_SIZE	# tp = tp - SBI_SCRATCH_SIZE (tp = 当前 hart_index 的 scratch space 起始地址)
+	sub	tp, tp, a5				
 
-	/* Initialize scratch space */
-	/* Store fw_start and fw_size in scratch space */
-	lla	a4, _fw_start
+
+	/* 初始化 scratch space */
+	
+	/* 存储 fw_start 和 fw_size */
+	lla	a4, _fw_start	# openSBI 固件的起始地址
 	sub	a5, t3, a4
 	REG_S	a4, SBI_SCRATCH_FW_START_OFFSET(tp)
 	REG_S	a5, SBI_SCRATCH_FW_SIZE_OFFSET(tp)
-	/* Store next arg1 in scratch space */
+	/* 保存下一阶段的启动参数(a1 参数) */
 	MOV_3R	s0, a0, s1, a1, s2, a2
 	call	fw_next_arg1
 	REG_S	a0, SBI_SCRATCH_NEXT_ARG1_OFFSET(tp)
 	MOV_3R	a0, s0, a1, s1, a2, s2
-	/* Store next address in scratch space */
+	/* 保存下一阶段的跳转地址 */
 	MOV_3R	s0, a0, s1, a1, s2, a2
 	call	fw_next_addr
 	REG_S	a0, SBI_SCRATCH_NEXT_ADDR_OFFSET(tp)
 	MOV_3R	a0, s0, a1, s1, a2, s2
-	/* Store next mode in scratch space */
+	/* 保存下一阶段的启动模式 */
 	MOV_3R	s0, a0, s1, a1, s2, a2
 	call	fw_next_mode
 	REG_S	a0, SBI_SCRATCH_NEXT_MODE_OFFSET(tp)
 	MOV_3R	a0, s0, a1, s1, a2, s2
-	/* Store warm_boot address in scratch space */
+	/* 保存 _start_warm 的地址 */
 	lla	a4, _start_warm
 	REG_S	a4, SBI_SCRATCH_WARMBOOT_ADDR_OFFSET(tp)
-	/* Store platform address in scratch space */
+	/* 保存 platform 的地址 */
 	lla	a4, platform
 	REG_S	a4, SBI_SCRATCH_PLATFORM_ADDR_OFFSET(tp)
-	/* Store hartid-to-scratch function address in scratch space */
+	/* 保存 hartid-to-scratch 函数地址 */
 	lla	a4, _hartid_to_scratch
 	REG_S	a4, SBI_SCRATCH_HARTID_TO_SCRATCH_OFFSET(tp)
-	/* Store trap-exit function address in scratch space */
+	/* 保存 trap-exit 函数地址 */
 	lla	a4, _trap_exit
 	REG_S	a4, SBI_SCRATCH_TRAP_EXIT_OFFSET(tp)
 	/* Clear tmp0 in scratch space */
@@ -4547,7 +4641,7 @@ _scratch_init:
 	blt	t1, s7, _scratch_init
 ```
 
-##### FDT 重定位 & 进入`_start_warm`
+##### FDT 重定位 & 通知其他 Hart
 
 如果上一启动阶段传了设备树地址（a1 ≠ 0），且**平台指定了新的 FDT 存放地址，就把设备树从源地址拷到目标地址**。核心流程：
 
@@ -4615,117 +4709,72 @@ _fdt_reloc_done:
 
 这是**每个 hart 都要走**的路径：
 
-1. 重置寄存器、**关中断并清 pending**：`csrw CSR_MIE, zero` / `CSR_MIP, zero`。
+- 重置寄存器、**关中断并清 pending**：`csrw CSR_MIE, zero` / `CSR_MIP, zero`：
 
-   ``` assembly
-   _start_warm:
-   	/* Reset all registers for non-boot HARTs */
-   	li	ra, 0
-   	call	_reset_regs
-   
-   	/* Disable and clear all interrupts */
-   	csrw	CSR_MIE, zero
-   	csrw	CSR_MIP, zero
-   ```
+  ``` assembly
+  _start_warm:
+  	/* Reset all registers for non-boot HARTs */
+  	li	ra, 0
+  	call	_reset_regs
+  
+  	/* Disable and clear all interrupts */
+  	csrw	CSR_MIE, zero
+  	csrw	CSR_MIP, zero
+  ```
 
-2. 重新读 hart_count/stack_size，并读 `hart_index2id` 映射表。
 
-3. **通过 `mhartid` 找到自己的 HART index**：如果有 index→id 映射表就查表，否则直接用 hartid；index 越界则挂死。
+- 然后**找 Hart 数量和 scratch 大小**，并**找到自己的 Hart ID**：
 
-4. 计算本核 scratch 地址，并：
+  ``` assembly
+  /* Find HART count and HART stack size */
+  lla	a4, platform  									# a4 = platform结构体地址
+  
+  #if __riscv_xlen == 64
+  lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)			# s7 = hart数量
+  lwu	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)		# s8 = 每个 hart 的空间大小
+  #else
+  lw	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
+  lw	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
+  #endif
+  
+  csrr s6, CSR_MHARTID # s6 = hart_id(index)
+  REG_L	s9, SBI_PLATFORM_HART_INDEX2ID_OFFSET(a4) 		# 硬件hart_id不一定连续，openSBI需要连续；需要转换表得到 hart_index
+  ```
 
-   - `csrw CSR_MSCRATCH, tp`：把 scratch 存入 `mscratch`（trap 时用它换回 tp）
-   - `add sp, tp, zero`：设置正式栈指针
+- **找到并设置本核 `scratch` 指针 和 `sp` 指针（此时`scratch、sp、tp`都指向`scratch space`）**：
 
-5. **安装正式 trap 处理器**（第 475-485 行）：`mtvec` 指向 `_trap_handler`（RV32 且带 H 扩展时用 `_trap_handler_rv32_hyp`）。
+  ``` assembly
+  lla tp,_fw_end 	# tp = firmware结束地址
+  
+  mul a5,s7,s8   	# tp =_fw_end + hart数量 × 每hart空间大小 (scratch_top)
+  add tp,tp,a5
+  
+  mul a5,s8,s6   			# tp = tp - hart_index × scratch_size (current_scratch_top_address)
+  sub tp,tp,a5
+  
+  li a5,SBI_SCRATCH_SIZE	# tp = scratch_start_address
+  sub tp,tp,a5
+  
+  csrw CSR_MSCRATCH,tp	# 设置 mscratch 寄存器
+  add sp,tp,zero			# 设置 sp 寄存器（创建栈）
+  ```
 
-6. 进入 C 世界：
+- **设置`mtvec`寄存器**：`mtvec` 指向 `_trap_handler`（RV32 且带 H 扩展时用 `_trap_handler_rv32_hyp`）：
 
-   ```assembly
-   csrr	a0, CSR_MSCRATCH     # a0 = 本核scratch指针
-   call	sbi_init             # OpenSBI C语言主初始化
-   ```
+  ``` assembly
+  lla a4,_trap_handler
+  
+  csrw CSR_MTVEC,a4
+  ```
 
-   `sbi_init`正常不会返回，返回了就`j _start_hang`挂死。
+- 进入 C 世界：
 
-``` assembly
-	/* Find HART count and HART stack size */
-	lla	a4, platform
-#if __riscv_xlen == 64
-	lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
-	lwu	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
-#else
-	lw	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
-	lw	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
-#endif
-	REG_L	s9, SBI_PLATFORM_HART_INDEX2ID_OFFSET(a4)
+  ``` assembly
+  csrr	a0, CSR_MSCRATCH     # a0 = 本核scratch指针
+  call	sbi_init             # OpenSBI C语言主初始化
+  ```
 
-	/* Find HART id */
-	csrr	s6, CSR_MHARTID
-
-	/* Find HART index */
-	beqz	s9, 3f
-	li	a4, 0
-1:
-#if __riscv_xlen == 64
-	lwu	a5, (s9)
-#else
-	lw	a5, (s9)
-#endif
-	beq	a5, s6, 2f
-	add	s9, s9, 4
-	add	a4, a4, 1
-	blt	a4, s7, 1b
-	li	a4, -1
-2:	add	s6, a4, zero
-3:	bge	s6, s7, _start_hang
-
-	/* Find the scratch space based on HART index */
-	lla	tp, _fw_end
-	mul	a5, s7, s8
-	add	tp, tp, a5
-	mul	a5, s8, s6
-	sub	tp, tp, a5
-	li	a5, SBI_SCRATCH_SIZE
-	sub	tp, tp, a5
-
-	/* update the mscratch */
-	csrw	CSR_MSCRATCH, tp
-
-	/* Setup stack */
-	add	sp, tp, zero
-
-	/* Setup trap handler */
-	lla	a4, _trap_handler
-#if __riscv_xlen == 32
-	csrr	a5, CSR_MISA
-	srli	a5, a5, ('H' - 'A')
-	andi	a5, a5, 0x1
-	beq	a5, zero, _skip_trap_handler_rv32_hyp
-	lla	a4, _trap_handler_rv32_hyp
-_skip_trap_handler_rv32_hyp:
-#endif
-	csrw	CSR_MTVEC, a4
-
-#if __riscv_xlen == 32
-	/* Override trap exit for H-extension */
-	csrr	a5, CSR_MISA
-	srli	a5, a5, ('H' - 'A')
-	andi	a5, a5, 0x1
-	beq	a5, zero, _skip_trap_exit_rv32_hyp
-	lla	a4, _trap_exit_rv32_hyp
-	csrr	a5, CSR_MSCRATCH
-	REG_S	a4, SBI_SCRATCH_TRAP_EXIT_OFFSET(a5)
-_skip_trap_exit_rv32_hyp:
-#endif
-
-	/* Initialize SBI runtime */
-	csrr	a0, CSR_MSCRATCH
-	call	sbi_init
-
-	/* We don't expect to reach here hence just hang */
-	j	_start_hang
-```
+​	`sbi_init`正常不会返回，返回了就`j _start_hang`挂死。
 
 ##### Trap 处理框架
 
@@ -4995,17 +5044,699 @@ sbi_console.c
 ...
 ```
 
-看到这些名字，不要害怕。你已经能猜出来很多。例如：`sbi_init.c`就是：
-
-> OpenSBI runtime 初始化。
-
-当前源码中：
+看到这些名字，不要害怕。你已经能猜出来很多。例如：`sbi_init.c`就是：OpenSBI runtime 初始化。当前源码中：
 
 ```c
 void __noreturn sbi_init(struct sbi_scratch *scratch)
 ```
 
 就是核心初始化入口之一。
+
+#### `sbi_init.c`
+
+##### 总览
+
+`fw_base.S` 的 boot hart 和 `sbi_init.c` 的 coldboot hart不是同一个概念。
+
+coldboot 做全局一次性初始化，warm startup 做 per-hart 初始化。
+
+warmboot 不一定是“第一次启动的从核”，还可能是 suspended hart 的 resume。
+
+`coldboot_done + acquire/release + IPI + WFI` 构成了 C 层多 hart 初始化同步机制。
+
+                                               sbi_init(scratch)
+                                                      │
+                                                      ▼
+                                             检查当前 hart 合法
+                                                      │
+                                                      ▼
+                                          检查 next_mode 是否支持
+                                                      │
+                                                      ▼
+                                              coldboot lottery
+                                                      │
+                                                      ▼
+                                           platform nascent init
+                                                      │
+                                         ┌────────────┴────────────┐
+                                         │                         │
+                                         ▼                         ▼
+                                        coldboot hart              warmboot hart
+                                         │                         │
+                                         ▼                         ▼
+                                        init_coldboot             wait_for_coldboot
+                                         │                         │
+                                         │                         ▼
+                                        scratch/domain               HSM state
+                                         │                      /       \
+                                         │                     /         \
+                                         │                startup       resume
+                                         │                   │            │
+                                         │                   ▼            ▼
+                                         │             per-hart init   re-init
+                                         │                   │            │
+                                         └──────────────┬────┴────────────┘
+                                                        │
+                                                        ▼
+                                             sbi_hart_switch_mode
+                                                        │
+                                                        ▼
+                                              next_addr / next_mode
+                                                        │
+                                                        ▼
+                                                 Linux / U-Boot
+
+##### 前置条件检查
+
+先看最核心入口：
+
+```c
+void __noreturn sbi_init(struct sbi_scratch *scratch)
+{
+    bool next_mode_supported = FALSE;
+    bool coldboot = FALSE;
+    u32 hartid = current_hartid();
+    const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+
+    ...
+}
+```
+
+源码明确要求进入这里之前已经满足四个条件：
+
+1. `mscratch` → 当前 hart 的 `sbi_scratch`；
+2. `sp` 已经为当前 hart 设置好；
+3. `mstatus` 中中断关闭；
+4. `mie` 中所有中断关闭；
+
+这正是我们上一阶段 `_start_warm` 做好的事情。  
+
+---
+
+首先**确认“我这个 hart 合不合法”**，进入 `sbi_init()` 后：
+
+```c
+u32 hartid = current_hartid();
+```
+
+得到当前 hart ID。然后：
+
+```c
+if ((SBI_HARTMASK_MAX_BITS <= hartid) ||
+    sbi_platform_hart_invalid(plat, hartid))
+    sbi_hart_hang();
+```
+
+意思很简单：如果这个 hart 根本不在 OpenSBI 能管理的 hart 范围内，或者平台认为它无效，就直接挂起。所以这时 OpenSBI 已经从：“CPU 启动”进入：“这个具体 hart 能不能加入 OpenSBI runtime”这个层面了。
+
+---
+
+**第二步：检查这个 hart 能不能运行下一阶段**：
+
+```c
+switch (scratch->next_mode) {
+case PRV_M:
+    next_mode_supported = TRUE;
+    break;
+
+case PRV_S:
+    if (misa_extension('S'))
+        next_mode_supported = TRUE;
+    break;
+
+case PRV_U:
+    if (misa_extension('U'))
+        next_mode_supported = TRUE;
+    break;
+
+default:
+    sbi_hart_hang();
+}
+```
+
+这里的`scratch->next_mode`前面在 `fw_base.S` 已经见过。它表示：
+
+> OpenSBI 初始化完成以后，下一个软件要运行在哪个 privilege mode。
+
+例如典型 Linux：
+
+```c
+OpenSBI：M-mode
+       ↓
+Linux：S-mode
+```
+
+那么：`scratch->next_mode = PRV_S`，OpenSBI 就必须检查：
+
+```c
+misa_extension('S')
+```
+
+也就是：当前这个 hart 支不支持 S-mode？如果这个 hart 不支持 S-mode，它就不能成为最终负责跳入 Linux 的那个 coldboot hart。
+
+##### 再次抽奖
+
+前面 `fw_base.S` 中有一个 hart 胜出。它负责的事情大致是：
+
+```
+fw_base.S
+    │
+    ├── 选一个 hart
+    │
+    ├── relocation
+    ├── BSS
+    ├── platform 初步准备
+    ├── 给所有 hart 建 scratch
+    ├── FDT relocation
+    │
+    └── BOOT_HART_DONE
+```
+
+这个 hart 我们暂时叫`firmware boot hart`，其他 hart 等它：
+
+```
+_wait_for_boot_hart:
+    ...
+```
+
+等完成之后，**所有 hart 最终都会进入 `_start_warm`**。你的源码明确是 boot hart 设置 `BOOT_HART_DONE` 后自己跳 `_start_warm`，其他 hart 等到状态满足后也落入 `_start_warm`。然后每个 hart 都执行：
+
+```assembly
+csrr a0, CSR_MSCRATCH
+call sbi_init
+```
+
+所以此时：
+
+```
+hart0 ─┐
+hart1 ─┤
+hart2 ─┼──→ sbi_init()
+hart3 ─┘
+```
+
+问题来了：**`sbi_init()` 里面很多全局结构仍然只能初始化一次，谁来做？**于是出现**第二次 lottery**。
+
+```c
+// 初始：coldboot_lottery = 0
+    static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
+
+    if (next_mode_supported && atomic_xchg(&coldboot_lottery, 1) == 0)
+    	coldboot = TRUE;	// 一个 bool，标志当前hart是否为 coldboot
+
+	if (sbi_platform_nascent_init(plat))  // 每个 hart 都要做 nascent_init
+		sbi_hart_hang();
+	
+	// 当前 hart 是coldboot，执行初始化
+	if (coldboot)
+		init_coldboot(scratch, hartid);
+	else
+		init_warmboot(scratch, hartid);
+}
+```
+
+假设 hart0、hart1、hart2 同时过来。hart1 最先`atomic_xchg(&coldboot_lottery, 1)`，读旧值 0 同时写入 1，于是：
+
+```
+返回 0
+coldboot = TRUE
+```
+
+hart1 胜出。hart0 后来：
+
+```
+读旧值 1
+写 1
+```
+
+所以走 warmboot。这就是：
+
+```
+hart0 ─┐
+hart1 ─┼──→ coldboot_lottery
+hart2 ─┘
+
+       ↓
+
+       hart1
+        │
+        └── init_coldboot()
+
+hart0 / hart2
+        │
+        └── init_warmboot()
+```
+
+源码自己也写得非常明确：
+
+> use a lottery mechanism to select coldboot HART。
+
+##### 执行`init_coldboot(*scratch, hartid)`
+
+这个函数很长，但你千万不要逐行死记，分成 4 个阶段。
+
+- **首先建立OpenSBI 基础管理结构**：最前面两件事源码甚至特别强调：
+
+  ```c
+  static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
+  {
+  	int rc;
+  	unsigned long *init_count;
+  	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+  
+  	/* Note: This has to be first thing in coldboot init sequence */
+  	rc = sbi_scratch_init(scratch);
+  	if (rc)
+  		sbi_hart_hang();
+  
+  	/* Note: This has to be second thing in coldboot init sequence */
+  	rc = sbi_domain_init(scratch, hartid);
+  	if (rc)
+  		sbi_hart_hang();
+  ```
+
+  后面几乎所有 OpenSBI 子系统都依赖这两个基础设施。可以理解：
+
+  ```c
+  int sbi_scratch_init(struct sbi_scratch *scratch)
+          ↓
+  建立 OpenSBI per-hart 动态数据基础
+  
+  int sbi_domain_init(struct sbi_scratch *scratch, u32 hartid)
+          ↓
+  建立“哪些 hart / 内存 / 资源属于哪个 domain”
+  ```
+
+- 然后**在每个 hart 的 `sbi_scratch` 扩展区域里申请一个统一 offset**：
+
+  ``` c
+  // 全局静态变量
+  static unsigned long init_count_offset;
+  
+  init_count_offset = sbi_scratch_alloc_offset(__SIZEOF_POINTER__);
+  ```
+  
+  这又和我们上一节 `sbi_scratch` 联系起来了。它不是再创建一个新的 scratch，而是**在每个 hart 的 `sbi_scratch` 扩展区域里申请一个统一 offset：**
+  
+  ``` c
+  scratch0 + offset → hart0 init_count
+  scratch1 + offset → hart1 init_count
+  scratch2 + offset → hart2 init_count
+  ```
+  后面就会看到：
+  
+  ```c
+  // 局部指针
+  unsigned long *init_count;
+  
+  init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
+  
+  (*init_count)++;
+  ```
+
+- 然后**初始化各个 OpenSBI 子系统**：coldboot hart 要把整个 OpenSBI runtime 的公共基础设施搭起来。
+
+  ``` c
+  // 管 hart 的启动 / 停止 / suspend
+  rc = sbi_hsm_init(scratch, hartid, TRUE);
+      
+  rc = sbi_platform_early_init(plat, TRUE);
+  
+  // 当前 hart 本身的 CSR / ISA / delegation 等
+  rc = sbi_hart_init(scratch, TRUE);
+      
+  rc = sbi_console_init(scratch);
+  
+  // 性能计数器
+  rc = sbi_pmu_init(scratch, TRUE);
+  
+  // 中断控制器
+  rc = sbi_irqchip_init(scratch, TRUE);
+  
+  // hart 之间发中断
+  rc = sbi_ipi_init(scratch, TRUE);
+      
+  // 多 hart TLB shootdown
+  rc = sbi_tlb_init(scratch, TRUE);
+      
+  // 时钟
+  rc = sbi_timer_init(scratch, TRUE);
+      
+  // SBI ecall 接口
+  rc = sbi_ecall_init();
+  ```
+
+  > 为什么很多函数都有 `TRUE/FALSE`？
+
+  coldboot 中`TRUE`，warmboot 中`FALSE`。例如 `warm startup`：
+
+  ```c
+  sbi_hsm_init(scratch, hartid, FALSE);
+  
+  sbi_platform_early_init(plat, FALSE);
+  
+  sbi_hart_init(scratch, FALSE);
+  
+  sbi_pmu_init(scratch, FALSE);
+  ```
+
+  这个参数你现在可以直接理解成：
+
+  ```c
+  cold_boot = TRUE
+      ↓
+  这是全系统第一次初始化，
+  必要时做 global init + 当前 hart init
+  
+  
+  cold_boot = FALSE
+      ↓
+  全局东西已经有了，
+  只做当前 hart 所需的初始化
+  ```
+
+  这是理解整个 OpenSBI 架构非常重要的一个模式。以后你读：
+
+  ```c
+  xxx_init(..., bool cold_boot)
+  ```
+
+  第一反应就应该是：
+
+  > 里面大概率会有“全局一次”和“per-hart 每次”两套逻辑。
+
+- **然后是 Domain 与 PMP**：
+
+  coldboot 中接下来：
+
+  ```c
+  /*
+   * Note: Finalize domains after HSM initialization so that we
+   * can startup non-root domains.
+   * Note: Finalize domains before HART PMP configuration so
+   * that we use correct domain for configuring PMP.
+   */
+  
+  rc = sbi_domain_finalize(scratch, hartid);
+  if (rc) {
+      sbi_printf("%s: domain finalize failed (error %d)\n",
+             __func__, rc);
+      sbi_hart_hang();
+  }
+  
+  
+  rc = sbi_hart_pmp_configure(scratch);
+  if (rc) {
+      sbi_printf("%s: PMP configure failed (error %d)\n",
+             __func__, rc);
+      sbi_hart_hang();
+  }
+  ```
+
+  源码特意解释了顺序：
+
+  ```
+  先 finalize domains
+          ↓
+  再配置 PMP
+  ```
+
+  因为 PMP 的配置需要知道：
+
+  > 当前 hart 属于哪个 domain、它允许访问哪些物理内存。
+
+  你现在先记：
+
+  ```
+  Domain
+      ↓
+  决定资源归属/访问范围
+  
+  PMP
+      ↓
+  把这种权限真正配置进 hart 硬件
+  ```
+
+  所以顺序不能反。
+
+- **最后 `platform final init`**：
+
+  ``` c
+  /*
+   * Note: Platform final initialization should be last so that
+   * it sees correct domain assignment and PMP configuration.
+   */
+  rc = sbi_platform_final_init(plat, TRUE);
+  if (rc) {
+      sbi_printf("%s: platform final init failed (error %d)\n",
+             __func__, rc);
+      sbi_hart_hang();
+  }
+  ```
+
+  源码也明确说：platform final initialization should be last。因为到这里：
+
+  ```c
+  domain 已确定
+  PMP 已配置
+  OpenSBI 子系统基本完成
+  ```
+
+  平台代码这时看到的是一个已经完整建立起来的系统。
+
+- **最后`wake_coldboot_harts()`，唤醒其他执行`wait_for_coldboot`的 warmboot**，这一步极其重要：
+
+  ```
+  wake_coldboot_harts(scratch, hartid);
+  ```
+
+  `init_warmboot(scratch, hartid)`首先执行`wait_for_coldboot()`，`warmboot hart` 会：
+
+  ```c
+  static void wait_for_coldboot(struct sbi_scratch *scratch, u32 hartid)
+      
+      unsigned long saved_mie, cmip;
+  	/* Save MIE CSR */
+  	saved_mie = csr_read(CSR_MIE);
+  	/* Set MSIE and MEIE bits to receive IPI */
+  	csr_set(CSR_MIE, MIP_MSIP | MIP_MEIP);
+      
+  	/* Mark current HART as waiting */
+  	spin_lock(&coldboot_lock);
+  	sbi_hartmask_set_hart(hartid, &coldboot_wait_hmask);
+  	spin_unlock(&coldboot_lock);
+  
+      while (!__smp_load_acquire(&coldboot_done)) {
+          do {
+              wfi();
+              cmip = csr_read(CSR_MIP);
+          } while (!(cmip & (MIP_MSIP | MIP_MEIP)));
+      }
+  	
+  	/* Unmark current HART as waiting */
+  	spin_lock(&coldboot_lock);
+  	sbi_hartmask_clear_hart(hartid, &coldboot_wait_hmask);
+  	spin_unlock(&coldboot_lock);
+  
+  	/* Restore MIE CSR */
+  	csr_write(CSR_MIE, saved_mie);
+  }
+  ```
+
+  这意味着 warm hart 不会一直疯狂`while (!coldboot_done)`占总线。而是：
+
+  ```c
+  hart1
+    ↓
+  把自己放进 coldboot_wait_hmask
+    ↓
+  wfi()
+    ↓
+  睡眠等待 IPI
+  ```
+
+  coldboot hart 完成后`__smp_store_release(&coldboot_done, 1)`，然后遍历`coldboot_wait_hmask`给所有正在等的 hart：
+
+  ```c
+  sbi_ipi_raw_send(i);
+  ```
+
+  把它们唤醒。所以整个同步过程：
+
+  ```
+                   coldboot hart
+  
+                  初始化 OpenSBI
+                        │
+                        │
+                coldboot_done = 1
+                        │
+                release memory order
+                        │
+                        ▼
+                 IPI 唤醒其他 hart
+  
+  hart1                 hart2                 hart3
+   │                     │                     │
+   ▼                     ▼                     ▼
+  wait                  wait                  wait
+   │                     │                     │
+   WFI                   WFI                   WFI
+   │                     │                     │
+   └──────────── IPI 唤醒 ────────────────────┘
+  ```
+
+  这里源码不用显式`fence rw,rw`，而使用：
+
+  ```c
+  __smp_store_release(&coldboot_done, 1);
+  ```
+
+  另一边：
+
+  ```c
+  __smp_load_acquire(&coldboot_done)
+  ```
+
+  本质上都在解决：
+
+  > **不能只看到 `coldboot_done=1`，却看不到 coldboot hart 之前完成的初始化写操作。**
+
+  你可以先把它理解成：
+
+  ```
+  coldboot hart：
+  
+  初始化 A
+  初始化 B
+  初始化 C
+      ↓
+  release
+  coldboot_done = 1
+  ```
+
+  warm hart：
+
+  ```
+  看到 coldboot_done == 1
+      ↓
+  acquire
+      ↓
+  保证之后可以安全看到 A/B/C
+  ```
+
+  这就是比单纯`coldboot_done = 1;`更严格的同步语义。
+
+##### 两种 `warmboot`
+
+`init_warmboot()`先：
+
+``` c
+wait_for_coldboot(scratch, hartid);
+
+// 看 HSM state 来区分进入哪一种 warmboot
+hstate = sbi_hsm_hart_get_state(sbi_domain_thishart_ptr(), hartid);
+	if (hstate < 0)
+		sbi_hart_hang();
+
+	if (hstate == SBI_HSM_STATE_SUSPENDED)  // SUSPENDED
+		init_warm_resume(scratch);
+	else
+		init_warm_startup(scratch, hartid);
+```
+
+- `warm_startup`：这个 hart 是**第一次正常加入** OpenSBI runtime。所以它需要做：
+
+  ```
+  sbi_hsm_init
+  sbi_platform_early_init
+  ...
+  ```
+
+  注意没有：
+
+  ```
+  sbi_scratch_init
+  sbi_domain_init
+  sbi_ecall_init
+  ```
+
+  因为这些全局结构已经由 coldboot hart 完成了。
+
+- `warm_resume`：这个 hart 则不同。它之前已经初始化过，只是：
+
+  ``` c
+  running
+     ↓
+  suspend
+     ↓
+  resume
+  ```
+
+  所以不需要重新初始化整套东西。它只做：
+
+  ```c
+  sbi_hsm_hart_resume_start(scratch);
+  
+  sbi_hart_reinit(scratch);
+  
+  sbi_hart_pmp_configure(scratch);
+  
+  sbi_hsm_hart_resume_finish(scratch);
+  ```
+
+  所以：
+
+  ```
+  warm startup
+      =
+  第一次启动这个 hart
+  
+  warm resume
+      =
+  这个 hart 以前已经起来过，
+  现在只是从 suspend 恢复
+  ```
+
+  这是 HSM 后面非常关键的基础。
+
+##### 最后汇合到`sbi_hart_switch_mode()`
+
+`coldboot hart` 最后：
+
+```c
+sbi_hsm_prepare_next_jump(scratch, hartid);
+
+sbi_hart_switch_mode(
+    hartid,
+    scratch->next_arg1,
+    scratch->next_addr,
+    scratch->next_mode,
+    FALSE
+)
+```
+
+`warmboot hart` 最后也是：
+
+```
+sbi_hart_switch_mode(
+    hartid,
+    scratch->next_arg1,
+    scratch->next_addr,
+    scratch->next_mode,
+    FALSE
+);
+```
+
+所以所有路最后汇合到：
+
+```
+sbi_hart_switch_mode()
+```
+
+这就是下一阶段：
+
+> **OpenSBI 如何从 M-mode 切换到 S-mode，并跳到 Linux/U-Boot 等下一阶段。**
 
 #### `sbi_ecall.c`
 
