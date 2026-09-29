@@ -1,5 +1,3 @@
- 
-
 # RISCV 指令集
 
 > RISC-V 基本思想：数据先放寄存器，计算在寄存器之间进行；访问内存主要靠 `load`/`store`；控制流程靠 `branch`/`jump`。
@@ -5702,41 +5700,109 @@ hstate = sbi_hsm_hart_get_state(sbi_domain_thishart_ptr(), hartid);
 
 ##### 最后汇合到`sbi_hart_switch_mode()`
 
+> `sbi_init()` 负责“把 OpenSBI 自己初始化好”，而 `sbi_hart_switch_mode()` 负责“把当前 hart 正式交给下一阶段”。
+
+ `fw_base.S` 已经提前把 `next_arg1`、`next_addr`、`next_mode` 存入每个 Hart 的 scratch space，最后又设置好当前 hart 的 `mscratch`、栈和正式 trap handler，再调用 `sbi_init()`。
+
 `coldboot hart` 最后：
 
 ```c
 sbi_hsm_prepare_next_jump(scratch, hartid);
 
-sbi_hart_switch_mode(
+__attribute__((noreturn))  sbi_hart_switch_mode(	// 永远不会正常 return 给 sbi_init()
     hartid,
-    scratch->next_arg1,
-    scratch->next_addr,
-    scratch->next_mode,
+    scratch->next_arg1,	// 下一阶段的启动参数
+    scratch->next_addr,	// 下一阶段的启动地址
+    scratch->next_mode,	// 下一阶段的启动模式
     FALSE
-)
+);
 ```
 
 `warmboot hart` 最后也是：
 
-```
-sbi_hart_switch_mode(
+```c
+__attribute__((noreturn))  sbi_hart_switch_mode(	// 永远不会正常 return 给 sbi_init()
     hartid,
-    scratch->next_arg1,
-    scratch->next_addr,
-    scratch->next_mode,
+    scratch->next_arg1,	// 下一阶段的启动参数
+    scratch->next_addr,	// 下一阶段的启动地址
+    scratch->next_mode,	// 下一阶段的启动模式
     FALSE
 );
 ```
 
 所以所有路最后汇合到：
 
-```
+```c
 sbi_hart_switch_mode()
 ```
 
 这就是下一阶段：
 
-> **OpenSBI 如何从 M-mode 切换到 S-mode，并跳到 Linux/U-Boot 等下一阶段。**
+> `sbi_hart_switch_mode()` 的目标就是把 CPU 从：
+>
+> ```
+> M-mode OpenSBI
+> ```
+>
+> 变成：
+>
+> ```
+> S-mode Linux/U-Boot
+> ```
+
+所以它本质只需要完成四件事：
+
+- 检查下一阶段模式是否合法，然后配置 `mstatus.MPP`（执行`mret`后会回到这个寄存器存储的模式）:
+
+  ``` c
+  mstatus.MPP = S
+  ```
+
+- 设置`mepc = next_addr`（执行`mret`后`pc`寄存器会跳转到这个寄存器的地址执行指令）:
+
+  ``` c
+  csr_write(CSR_MEPC, next_addr);
+  ```
+
+- 清空初始化`S-Mode` CSR 寄存器：
+
+  ``` c
+  // 给即将进入的 S-mode 提供一个干净、确定的初始环境
+  if (next_mode == PRV_S) {
+      csr_write(CSR_STVEC, next_addr);	// 交接前的一个安全初始值。Linux开始运行后会建立自己的 trap/exception entry，然后重新设置
+      csr_write(CSR_SSCRATCH, 0);
+      csr_write(CSR_SIE, 0);
+      csr_write(CSR_SATP, 0);				// 处于 bare mode，没有开启 S-mode 地址转换/分页，Linux进入后会自己建立页表，然后设置satp。
+  }
+  ```
+
+- 准备`a0(hartid)、a1(DTB)`，最后`mret`。
+
+完整链路：
+
+``` c
+CPU reset
+  ↓
+OpenSBI _start
+  ↓
+relocation / boot hart同步
+  ↓
+platform / scratch / stack / mtvec
+  ↓
+sbi_init()
+  ↓
+sbi_hart_switch_mode()
+  ↓
+mstatus.MPP = S
+mepc = Linux entry
+a0 = hartid
+a1 = DTB
+satp = 0
+  ↓
+mret
+  ↓
+Linux（S-mode）
+```
 
 #### `sbi_ecall.c`
 
@@ -6623,31 +6689,29 @@ dd of=fw.bin bs=1k conv=notrunc seek=512 if=$SHELL_FOLDER/output/opensbi/quard_s
 dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.bin
 ```
 
-# 4. 添加domain机制
+# 添加domain机制
 
-`domain`的程序运行地址/参数地址在设备树中指定，`domain`的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中下级程序的地址**自动运行其`domain`的程序了。
+`domain`的程序运行地址/参数地址在设备树中指定，`domain`的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中指定的下级程序地址**就跳转自动运行`domain`里的程序了。
 
 ![添加domain](quard-star/添加domain.png)
 
-## 4.1 domain机制
+## domain机制
 
-​	`domain`机制提供了一种在系统中**划分资源（包括硬件资源）和权限的方法**，以确保软件实体之间的相同隔离和安全性。`domain`代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个`domain`都有自己的一组资源和权限，包括hart、内存、设备、中断等、`domain`之间是相互隔离的，不能直接访问或干扰彼此的资源。
+`domain`机制提供了一种在系统中**划分资源**（包括硬件资源）和权限的方法，以确保软件实体之间的相同隔离和安全性。核心目标是在**同一硬件平台上，实现比传统特权级（如 M/S/U 模式）更细粒度、更灵活的隔离**。它允许将系统的硬件资源（如内存、IO、中断）划分为多个相互独立的“域”，每个域可以运行独立的软件栈，彼此间实现硬件强制的安全隔离。
 
-​	通过`domain`机制，openSBI可以**实现不同软件实体的隔离和安全性**。每个`domain`只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
+`domain`代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个`domain`都有自己的一组资源和权限，包括hart、内存、设备、中断等、`domain`之间是相互隔离的，不能直接访问或干扰彼此的资源。
 
----
+通过`domain`机制，openSBI 可以**实现不同软件实体的隔离和安全性**。每个`domain`只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
 
-通过以下方式实现：
+## 硬件基石
 
-`domain ID`:   每个`domain`都有一个唯一的标识符，用于区分不同的`domain`。
+Domain 机制的硬件基础是 **Smmtt（Supervisor Domain Access Protection）** 扩展，它为物理地址空间（内存和设备）提供隔离。
 
-`Hart Mask`：每个`domain`都有一个唯一的位图`Hart Mask`，每个位表示一个`hart`，可以将相应的位设置为`1`来表示属于此domain。
+- **Supervisor Domain Identifier (SDID)**：每个域有一个唯一标识符 **SDID**。它存储在 Hart（硬件线程）的一个 M 模式 CSR 中，用于**动态指示当前 hart 正在哪个域中运行。**
+- **Memory Tracking Table (MTT)**：这是 Smmtt 的核心数据结构，类似于一个用于物理地址的页表。它**定义了每个物理内存页或设备区域允许哪个 SDID 访问（读/写）**，从而实现硬件级的访问控制。当 Hart 发起物理地址访问时，硬件会根据其当前 SDID 和 MTT 配置进行校验，非法访问会触发 fault。`Hart Mask`：每个`domain`都有一个唯一的位图`Hart Mask`，每个位表示一个`hart`，可以将相应的位设置为`1`来表示属于此domain。
+- **执行环境**：**M 模式**负责管理 SDID 和 MTT，是隔离机制的最终仲裁者。而 **Supervisor Domain Security Manager (SDSM)** 则是一段运行在 M 模式的固件，负责配置和维护域的安全策略。
 
-`SBI`接口：`openSBI`提供了一组SBI接口，用于domain之间的通信和资源管理。这些接口包括中断处理、内存管理、设备访问等，可以由domain调用这些接口来请求和管理资源。
-
----
-
-## 4.2 设备树划分domain
+## 设备树划分domain
 
 ​	使用**设备树**来基于openSBI划分`domain`。**默认**情况下所有hart都被划分给`ROOT domain`.设备树划分了`domain`在加载了`opensbi_fw.bin`固件之后就**自动执行**了。
 
