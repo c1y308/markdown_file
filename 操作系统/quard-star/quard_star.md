@@ -4383,9 +4383,9 @@ _wait_for_boot_hart:
 
 > 为什么需要重定位？
 
-OpenSBI编译时有一个`Link Address（链接地址）`，但是启动时实际加载到`Load Address（加载地址）`可能不同。
+OpenSBI 常常作为固件被上一级加载，上一级加载器可能不按 openSBI 固件中的 LMA（这里 VMA = LMA，按照 LMA 加载） 放，而是把整个固件搬到它自己选定的内存地址，比如 `0x80200000`。
 
-```
+```text
 编译认为：0x80000000
 
 实际运行：0x80200000
@@ -6689,31 +6689,35 @@ dd of=fw.bin bs=1k conv=notrunc seek=512 if=$SHELL_FOLDER/output/opensbi/quard_s
 dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.bin
 ```
 
-# 添加domain机制
+# 添加 Domain 机制
 
-`domain`的程序运行地址/参数地址在设备树中指定，`domain`的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中指定的下级程序地址**就跳转自动运行`domain`里的程序了。
+Domain 的程序运行地址/参数地址在设备树中指定，Domain 的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中指定的下级程序地址**就跳转自动运行 Domain 里的程序了。
 
 ![添加domain](quard-star/添加domain.png)
 
-## domain机制
+## Domain机制
 
-`domain`机制提供了一种在系统中**划分资源**（包括硬件资源）和权限的方法，以确保软件实体之间的相同隔离和安全性。核心目标是在**同一硬件平台上，实现比传统特权级（如 M/S/U 模式）更细粒度、更灵活的隔离**。它允许将系统的硬件资源（如内存、IO、中断）划分为多个相互独立的“域”，每个域可以运行独立的软件栈，彼此间实现硬件强制的安全隔离。
+Domain 机制提供了一种在系统中**划分资源**（包括硬件资源）和权限的方法，以确保软件实体之间的相同隔离和安全性。核心目标是在**同一硬件平台上，实现比传统特权级（如 M/S/U 模式）更细粒度、更灵活的隔离**。它允许将系统的硬件资源（如内存、IO、中断）划分为多个相互独立的“域”，每个域可以运行独立的软件栈，彼此间实现硬件强制的安全隔离。
 
-`domain`代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个`domain`都有自己的一组资源和权限，包括hart、内存、设备、中断等、`domain`之间是相互隔离的，不能直接访问或干扰彼此的资源。
+Domain 代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个 Domain 都有自己的一组资源和权限，包括hart、内存、设备、中断等、Domain 之间是相互隔离的，不能直接访问或干扰彼此的资源。
 
-通过`domain`机制，openSBI 可以**实现不同软件实体的隔离和安全性**。每个`domain`只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
+通过 Domain 机制，openSBI 可以**实现不同软件实体的隔离和安全性**。每个 Domain 只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
 
 ## 硬件基石
 
 Domain 机制的硬件基础是 **Smmtt（Supervisor Domain Access Protection）** 扩展，它为物理地址空间（内存和设备）提供隔离。
 
-- **Supervisor Domain Identifier (SDID)**：每个域有一个唯一标识符 **SDID**。它存储在 Hart（硬件线程）的一个 M 模式 CSR 中，用于**动态指示当前 hart 正在哪个域中运行。**
-- **Memory Tracking Table (MTT)**：这是 Smmtt 的核心数据结构，类似于一个用于物理地址的页表。它**定义了每个物理内存页或设备区域允许哪个 SDID 访问（读/写）**，从而实现硬件级的访问控制。当 Hart 发起物理地址访问时，硬件会根据其当前 SDID 和 MTT 配置进行校验，非法访问会触发 fault。`Hart Mask`：每个`domain`都有一个唯一的位图`Hart Mask`，每个位表示一个`hart`，可以将相应的位设置为`1`来表示属于此domain。
-- **执行环境**：**M 模式**负责管理 SDID 和 MTT，是隔离机制的最终仲裁者。而 **Supervisor Domain Security Manager (SDSM)** 则是一段运行在 M 模式的固件，负责配置和维护域的安全策略。
+- **Supervisor Domain Identifier (SDID)**：每个域有一个唯一标识符 **SDID**。它存储在 Hart（硬件线程）的一个 M 模式 CSR 中，用于**动态指示当前 Hart 正在哪个 Domain 中运行。**
 
-## 设备树划分domain
+- **Memory Tracking Table (MTT)**：这是 Smmtt 的核心数据结构，类似于一个用于物理地址的页表。它**定义了每个物理内存页或设备区域允许哪个 SDID 访问（读/写）**，从而实现硬件级的访问控制。当 Hart 发起物理地址访问时，硬件会根据其当前 SDID 和 MTT 配置进行校验，非法访问会触发 fault。
 
-​	使用**设备树**来基于openSBI划分`domain`。**默认**情况下所有hart都被划分给`ROOT domain`.设备树划分了`domain`在加载了`opensbi_fw.bin`固件之后就**自动执行**了。
+  `Hart Mask`：每个 Domain 都有一个唯一的位图`Hart Mask`，每个位表示一个 Hart，可以将相应的位设置为 `1` 来表示允许对应的 Hart 可以来访问这个 Domain。
+
+- **执行环境**：**M 模式** 负责管理 SDID 和 MTT，是隔离机制的最终仲裁者。而 **Supervisor Domain Security Manager (SDSM)** 则是一段运行在 M 模式的固件，负责配置和维护域的安全策略。
+
+## 设备树划分 Domain
+
+​	使用**设备树**来基于 openSBI 划分 Domain。**默认情况**下所有 Hart 都划分给 Root Domain。设备树划分了 Domain 之后加载`opensbi_fw.bin`固件之后就自动执行了。
 
 ``` json
 chosen {
@@ -6767,7 +6771,7 @@ chosen {
 	};
 ```
 
-## 4.3 编写link.lds
+## 编写 link.lds
 
 指定此汇编程序运行的入口函数,以及**程序运行的虚拟内存位置**。
 
