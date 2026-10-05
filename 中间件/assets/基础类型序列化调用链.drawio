@@ -1,0 +1,45 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="第 1 页" id="riM6jHMJ1gz7wQIoirot">
+    <mxGraphModel dx="1076" dy="594" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="n1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="&lt;div&gt;用户代码：&lt;/div&gt;stream &amp;lt;&amp;lt; int32_t{42}" vertex="1">
+          <mxGeometry height="40" width="160" x="530" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="W1Mc77ks9CirZRGQWywq-6" edge="1" parent="1" source="n2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#d5e8d4;strokeColor=#82b366;" value="operator&amp;lt;&amp;lt;(int32_t) -&amp;gt; write(int32_t)&amp;nbsp;" vertex="1">
+          <mxGeometry height="40" width="160" x="530" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="W1Mc77ks9CirZRGQWywq-7" edge="1" parent="1" source="n3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="n5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#ffe6cc;strokeColor=#d79b00;" value="写入 INT32 tag: write(&amp;type, 1)" vertex="1">
+          <mxGeometry height="40" width="280" x="470" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;div style=&quot;color: rgb(49, 53, 58); background-color: rgb(255, 255, 255); font-family: &amp;quot;JetBrains Mono&amp;quot;, Consolas, &amp;quot;Courier New&amp;quot;, monospace; white-space: pre; line-height: 100%;&quot;&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&lt;span style=&quot;color: rgb(64, 120, 242);&quot;&gt;write&lt;/span&gt;((&lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;char&lt;/span&gt; &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;*&lt;/span&gt;)&lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;&amp;amp;&lt;/span&gt;value, &lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;sizeof&lt;/span&gt;(&lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;int32_t&lt;/span&gt;));&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="40" width="280" x="470" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="W1Mc77ks9CirZRGQWywq-3" edge="1" parent="1" source="n5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;dashed=1;">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="420" y="290" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="W1Mc77ks9CirZRGQWywq-8" edge="1" parent="1" source="n5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#ffe6cc;strokeColor=#d79b00;" value="[BigEndian] std::reverse(first, last) // 字节序转换" vertex="1">
+          <mxGeometry height="40" width="280" x="470" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="e1-2" edge="1" parent="1" source="n1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeColor=#666666;rounded=0;" target="n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="W1Mc77ks9CirZRGQWywq-2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;color: rgb(49, 53, 58); background-color: rgb(255, 255, 255); font-family: &amp;quot;JetBrains Mono&amp;quot;, Consolas, &amp;quot;Courier New&amp;quot;, monospace; white-space: pre; line-height: 100%;&quot;&gt;&lt;div style=&quot;&quot;&gt;&lt;span style=&quot;font-size: 20px;&quot;&gt;&amp;nbsp; &lt;/span&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&amp;nbsp; &lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;if&lt;/span&gt; (byteorder_ &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;==&lt;/span&gt; &lt;span style=&quot;color: rgb(177, 94, 242);&quot;&gt;ByteOrder&lt;/span&gt;::BigEndian)&lt;/font&gt;&lt;/div&gt;&lt;div style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&amp;nbsp; &amp;nbsp; {&lt;/font&gt;&lt;/div&gt;&lt;div style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;char&lt;/span&gt; &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;*&lt;/span&gt; first &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;=&lt;/span&gt; (&lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;char&lt;/span&gt; &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;*&lt;/span&gt;)&lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;&amp;amp;&lt;/span&gt;value;&lt;/font&gt;&lt;/div&gt;&lt;div style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;char&lt;/span&gt; &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;*&lt;/span&gt; last &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;=&lt;/span&gt; first &lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;+&lt;/span&gt; &lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;sizeof&lt;/span&gt;(&lt;span style=&quot;color: rgb(95, 54, 178);&quot;&gt;int32_t&lt;/span&gt;);&lt;/font&gt;&lt;/div&gt;&lt;div style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &lt;span style=&quot;color: rgb(177, 94, 242);&quot;&gt;std&lt;/span&gt;::&lt;span style=&quot;color: rgb(64, 120, 242);&quot;&gt;reverse&lt;/span&gt;(first, last);&lt;/font&gt;&lt;/div&gt;&lt;div style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;&amp;nbsp; &amp;nbsp; }&lt;/font&gt;&lt;/div&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="60" x="180" y="270" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

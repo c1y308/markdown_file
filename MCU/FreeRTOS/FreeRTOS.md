@@ -1,35 +1,62 @@
-# 0. 中断
+**事件驱动（Event-Driven）+ 阻塞等待（Blocking）”**的架构。
+
+# 中断
 
 注意区分**中断的抢占优先级**，和**任务优先级**。
 
-<img src="mdpic/优先级.png" alt="优先级" style="zoom:80%;" />
+<img src="assets/优先级.png" alt="优先级" style="zoom:80%;" />
 
 这里的`LIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`（对应 FreeRTOS 的`configMAX_SYSCALL_INTERRUPT_PRIORITY`）是**中断抢占优先级的阈值**，规则是：
 
-- 中断的**抢占优先级数值 ≥ 该阈值**时，归 FreeRTOS 管理，可安全调用 FreeRTOS 中断安全 API（如`xQueueSendFromISR`）；
-- 中断的**抢占优先级数值 ＜ 该阈值**时，不归 FreeRTOS 管理，不能调用 FreeRTOS API。
+- 中断的**抢占优先级数值 ≥   阈值**时，归 FreeRTOS 管理，可安全调用 FreeRTOS 中断安全 API（如`xQueueSendFromISR`）；
+- 中断的**抢占优先级数值 ＜ 阈值**时，不归 FreeRTOS 管理，不能调用 FreeRTOS API。
 
 因此，当`LIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5`时，**优先级 5 的中断归 FreeRTOS 管理**（因为 5 ≥ 5，满足条件）；而优先级 0~4（数值＜5）的中断不归 FreeRTOS 管理。
 
-# 1.链表
+# 启动OS
+    在**系统上电的时候第一个执行的是启动文件里面由汇编编写的复位函数Reset_Handler**，。复位函数的最后会**调用库函数__main，主要工作是初始化系统的堆和栈，最后调用 C 中的 main 函数，从而去到 C 的世界。**
+``` c
+Reset_Handler PROC
+EXPORT Reset_Handler [WEAK]
+IMPORT __main
+IMPORT SystemInit
+LDR R0, =SystemInit
+BLX R0 
+LDR R0, =__main
+BX R0
+ENDP
+```
 
-## 1.1 根节点与节点
+# 链表
 
-根节点既是初始节点也是末节点，**根节点结构体内节点用结构体表示，还包含此链表的信息(有多少个节点，节点索引指针)。**
+## 链表/节点
 
-注意链表结构体内的内容，主要记录**链表挂在了多少节点，节点索引**以及根节点三个信息。
+根节点既是初始节点也是末节点，根节点结构体内节点用结构体表示，还包含此链表的信息(有多少个节点，节点索引指针)。
+
+注意链表结构体内的内容，主要记录**链表挂在了多少节点，节点索引**以及**根节点**三个信息。
 
 ``` c
 typedef struct xLIST
 {
+<<<<<<< HEAD
     MiniListItem_t xListEnd;      // 链表根节点
     ListItem_t* pxIndex;  		  // 节点索引指针，用于遍历链表（指向当前正在运行的任务）。初始化指向根节点
     UBaseType_t uxNumberOfItems;  // 该链表下有多少个节点
+=======
+    MiniListItem_t xListEnd;      	// 链表根节点
+    ListItem_t    *pxIndex;  		// 节点索引指针，用于遍历链表（指向当前正在运行的任务）。初始化指向根节点
+    UBaseType_t    uxNumberOfItems; // 该链表下有多少个节点
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
 }List_t;
     
+
 typedef struct xLIST_ITEM
 {
+<<<<<<< HEAD
 	TickType_t xItemValue;           // 赋值值，帮助链表排序
+=======
+	TickType_t xItemValue;           // 辅助值，帮助链表排序
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
 	struct xLIST_ITEM* pxNext;       // 结构体指针，指向链表上一个节点
 	struct xLIST_ITEM* pxPrevious;   // 结构体指针，指向链表下一个节点
     
@@ -38,7 +65,7 @@ typedef struct xLIST_ITEM
 	void* pvContainer; //该节点所在的链表 (链表节点初始化将其设为NULL)
 }ListItem_t;
 ```
-## 1.2链表/节点的初始化
+## 初始化
 
 链表结构体主要包含此链表的信息：节点数(不包含根节点)；节点索引；根节点。
 
@@ -49,7 +76,8 @@ void vListInitialise(List_t* const pxList)
 	pxList->pxIndex = (listItem_t*) &pxList->xListEnd;  // 初始化索引指向链表的根节点
 	
 	pxList->xListEnd->xItemValue = portMAX_DELAY;  // 辅助排序值最大
-	pxList->xListEnd->pxNext = (listItem_t*) &pxList->xListEnd;    //指向自身
+    
+	pxList->xListEnd->pxNext = 	   (listItem_t*) &pxList->xListEnd;    //指向自身
 	pxList->xListEnd->pxPrevious = (listItem_t*) &pxList->xListEnd;//指向自身
 }
 
@@ -59,11 +87,11 @@ void vListInitialiseItem( ListItem_t * const pxItem )
     pxItem->pxContainer = NULL;
 }
 ```
-## 1.3 节点的插入
+## 插入/删除
 
-节点的插入不会更新链表的`pxIndex`链表指针，初始化时默认指向根节点，运行过程中指向当前运行的任务节点，为动态根节点。
+节点的插入不会更新链表的`pxIndex`链表指针，初始化时默认指向根节点，**运行过程中指向当前运行的任务节点且为动态根节点**。
 
-只有将节点按照排序值插入时，`pxList->xlistEnd`才是原始的根节点。
+只有将节点按照排序值插入时，才把`pxList->xlistEnd`原始的根节点作为**静态根节点**。
 
 ``` c
 //将节点插入到链表尾部(将任务插入就绪列表)
@@ -80,6 +108,7 @@ void vListInsertEnd(List_t* const pxList, ListItem_t* const pxNewListItem)
     
 	pxlist->unxNumberOfItems++;
 }
+
 
 //将节点按照辅助排序顺序插入(将任务插入延时列表)
 void vListInsert(List* const pxList, ListItem_t* const pxNewListItem)
@@ -109,6 +138,7 @@ void vListInsert(List* const pxList, ListItem_t* const pxNewListItem)
     pxList->uxNumberOfItems++;
 }
 
+
 // 将链表节点从链表中移除
 UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 {
@@ -124,7 +154,10 @@ UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 		pxList->pxIndex = pxItemToRemove->pxPrevious;
 }
 ```
-## 1.4 链表的其他操作
+## 其他操作
+
+**节点对应的TCB操作：**
+
 ``` c
 /* 初始化节点指向的 TCB */
 #define listSET_LIST_ITEM_OWNER( pxListItem, pxOwner )\
@@ -133,7 +166,11 @@ UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 /* 获取节点指向任务的TCB */
 #define listGET_LIST_ITEM_OWNER( pxListItem )\
 ( ( pxListItem )->pvOwner )
+```
 
+**节点的辅助排序值操作：**
+
+``` c
 /* 初始化节点排序辅助值 */
 #define listSET_LIST_ITEM_VALUE( pxListItem, xValue )\
 ( ( pxListItem )->xItemValue = ( xValue ) )
@@ -141,34 +178,39 @@ UBaseType_t uxListRemove(ListItem_t* const pxItemToRemove)
 /* 获取节点排序辅助值 */
 #define listGET_LIST_ITEM_VALUE( pxListItem )\
 ( ( pxListItem )->xItemValue )
+```
 
-/* 获取链表根节点的节点计数器的值 */
-#define listGET_ITEM_VALUE_OF_HEAD_ENTRY( pxList )\
-( ( ( pxList )->xListEnd ).pxNext->xItemValue )
+**获取和根节点相关信息：**
 
+``` c
 /* 获取链表的入口节点 */
 #define listGET_HEAD_ENTRY( pxList )\
 ( ( ( pxList )->xListEnd ).pxNext )
 
-/* 获取节点的下一个节点 */
-#define listGET_NEXT( pxListItem )\
-( ( pxListItem )->pxNext )
-
-/* 获取链表的最后一个节点 */
+/* 获取链表的静态最后（最前）节点 */
 #define listGET_END_MARKER( pxList )\
 ( ( ListItem_t const * ) ( &( ( pxList )->xListEnd ) ) )
 
-/* 判断链表是否为空 */
-#define listLIST_IS_EMPTY( pxList )\
-( ( BaseType_t ) ( ( pxList )->uxNumberOfItems == ( UBaseType_t ) 0 ) )
+/* 获取链表根节点的排序辅助值的值 */
+#define listGET_ITEM_VALUE_OF_HEAD_ENTRY( pxList )\
+( ( ( pxList )->xListEnd ).pxNext->xItemValue )
+```
 
-configASSERT( pxTasksWaitingForBits->xListEnd.pxNext!= (ListItem_t *) &(pxTasksWaitingForBits->xListEnd) );
+**获取链表记录的信息：**
 
-
+``` c
 /* 获取链表的节点数 */
 #define listCURRENT_LIST_LENGTH( pxList )\
 ( ( pxList )->uxNumberOfItems )
 
+/* 判断链表是否为空 */
+#define listLIST_IS_EMPTY( pxList )\
+( ( BaseType_t ) ( ( pxList )->uxNumberOfItems == ( UBaseType_t ) 0 ) )
+```
+
+**获取下一个需要执行任务对应的节点：**
+
+``` c
 /* 获取(当前pxIndex指向节点)的下一个节点的TCB  (遍历链表) */
 #define listGET_OWNER_OF_NEXT_ENTRY( pxTCB, pxList ) \
 { \
@@ -184,13 +226,14 @@ configASSERT( pxTasksWaitingForBits->xListEnd.pxNext!= (ListItem_t *) &(pxTasksW
     ( pxTCB ) = pxConstList->pxIndex->pvOwner; \
 }
 ```
-# 2.任务
+
+# 任务管理
 
 
 
-![任务切换](mdpic/任务切换.png)
+![任务切换](assets/任务切换.png)
 
-## 2.1 栈
+## 栈
   栈是单片机**`RAM`**里面一段连续的内存空间，每个任务拥有各自独立的栈，这个栈空间通常是一个预先定义好的全局数组，也可以是动态分配的一段内存空间，但它们都存在于 `RAM` 中，基本单位为字(32位）。
 
 **任务的形参为结构体传入**，因此字的地址指向结构体地址。**栈是向下生成的**。`TCB`等全局变量都存储在`SRAM`里面。
@@ -203,7 +246,7 @@ StackType_t Task1Stack[TASK1_STACK_SIZE];
 StackType_t Task2Stack[TASK2_STACK_SIZE];
 ```
 
-## 2.2 TCB
+## TCB
 
   `TaskControlBlock`任务的身份证。
 
@@ -287,6 +330,7 @@ typedef struct tskTaskControlBlock
     #endif
 } tskTCB;
 ```
+<<<<<<< HEAD
 ## 2.3 就绪/延时列表
 当任务需要延时的时候，则将任务挂起：即先将任务**从就绪列表删除**，然后**插入到任务延时列表**，同时**更新下一个任务的解锁时刻变量**：`xNextTaskUnblockTime`**(全局变量) **的值（等于系统时基计数器的值 `xTickCount` 加上任务需要延时的值 `xTicksToDelay`）。当系统时基计数器 `xTickCount` 的值与 `xNextTaskUnblockTime` 相等时，就表示有任务延时到期了，需要将该任务就绪。
     
@@ -373,14 +417,454 @@ M3和M4的寄存器组一共有16个寄存器，其中`R0-R12`这13个寄存器�
 <img src="mdpic/M3寄存器组.png" alt="M3寄存器组" style="zoom:50%;" />
 
 
+=======
+## 就绪/延时列表
+当任务需要延时的时候，则将任务挂起：即先将任务**从就绪列表删除**，然后**插入到延时列表**，同时更新`xNextTaskUnblockTime`(全局变量) 的值（等于系统时基计数器的值 `xTickCount` 加上任务需要延时的值 `xTicksToDelay`）。当系统时基计数器 `xTickCount` 的值与 `xNextTaskUnblockTime` 相等时，就表示有任务延时到期了，需要将任务就绪。
+    
+延时列表是有环链表，每个节点代表了正在延时的任务，**节点按照延时时间做升序排列。**
+    
+当每次 SysTick 中断触发，系统时基计数器的值 `xTickCount` 与解锁时刻变量 `xNextTaskUnblockTime` 的值相比较，如果相等，则表示有任务延时到期，需要将任务就绪，否则只是单纯地更新系统时基计数器`xTickCount` 的值，然后进行任务切换。
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
 
 ---
 
-在 ARM Cortex-M 处理器中，xPSR 是**程序状态寄存器**的统称，它实际上由三个子状态寄存器组成：
+有多少个`ReadyList`优先级链表可以由`configMAX_PRIORITIES`这个宏得知，`xDelayedTaskList`固定为两个。
 
-- **APSR**：应用程序状态寄存器（保存条件标志，如 N, Z, C, V）
-- **IPSR**：中断程序状态寄存器（保存当前中断服务编号）
-- **EPSR**：执行程序状态寄存器（包含执行状态信息，如 Thumb 状态位）
+``` c
+static List_t xDelayedTaskList1;  // xTickCount未溢出
+static List_t xDelayedTaskList2;  // xTickCount溢出
+
+static List_t * volatile pxDelayedTaskList;
+static List_t * volatile pxOverflowDelayedTaskList;
+```
+## 创建任务
+​    静态创建任务中：控制块和任务栈的内存空间都是从内部的 SRAM 里面分配的，具体分配到哪个地址由编译器决定。而动态内存则使用**堆**，也属于 SRAM。本质为在 SRAM 里面**定义一个大数组**，也就是堆内存来供 FreeRTOS 的动态内存分配函数使用，在第一次使用的时候系统会将定义的堆内存进行初始化。
+
+**动态创建任务主要分为三步走**：
+
+- 通过调用`malloc`函数分配得到任务 TCB 和 栈 的地址，将其记录在形参 `TCB_t *pxNewTCB`中；
+- 调用 TCB 初始化函数将任务的`TaskFunction_t`（函数指针）、`params`（指针常量）、`uxPriority`（优先级）、`StackDepth`（栈深）、`name`（任务名称）等先写入形参`TCB_t *pxNewTCB`，调用栈初始化函数初始化栈，再赋值给指针常量`TaskHandle_t* const pxCreatedTask`；
+- 最后将创建好的`TCB`添加到就绪链表中。
+
+### 分配内存
+
+``` c
+typedef void (* TaskFunction_t)( void *arg );
+
+BaseType_t xTaskCreate( 	TaskFunction_t pxTaskCode,  // 函数指针
+                            const char * const pcName,
+                            const configSTACK_DEPTH_TYPE uxStackDepth,
+                            void * const pvParameters,  // 指针常量
+                            UBaseType_t uxPriority,
+                            TaskHandle_t * const pxCreatedTask )  // 指针常量
+{
+        TCB_t * pxNewTCB;
+        BaseType_t xReturn;
+
+        pxNewTCB = prvCreateTask( pxTaskCode,
+                                 pcName,
+                                 uxStackDepth,
+                                 pvParameters,
+                                 uxPriority,
+                                 pxCreatedTask );
+
+        if( pxNewTCB != NULL )
+        {
+            #if ( ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) )
+            {
+                /* Set the task's affinity before scheduling it. */
+                pxNewTCB->uxCoreAffinityMask = configTASK_DEFAULT_CORE_AFFINITY;
+            }
+            #endif
+
+            prvAddNewTaskToReadyList( pxNewTCB );
+            xReturn = pdPASS;
+        }
+        else
+        {
+            xReturn = errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+        }
+
+        traceRETURN_xTaskCreate( xReturn );
+
+        return xReturn;
+}
+
+
+
+
+static TaskHandle_t LED1_Task_Handle = NULL;
+
+xReturn = xTaskCreate(  (TaskFunction_t )LED1_Task, /* 任务入口函数 */ 
+                        (const char* )"LED1_Task",/* 任务名字 */ 
+                        (uint16_t )512, /* 任务栈大小 */ 
+                        (void* )NULL, /* 任务入口函数参数 */ 
+                        (UBaseType_t )2, /* 任务的优先级 */ 
+                        (TaskHandle_t* )&LED1_Task_Handle  );/* 任务控制块指针 */ 
+if (pdPASS == xReturn) 
+	printf("创建 LED1_Task 任务成功!\r\n");
+```
+``` c
+#if ( configSUPPORT_DYNAMIC_ALLOCATION == 1 )
+    static TCB_t * prvCreateTask( TaskFunction_t pxTaskCode,
+                                  const char * const pcName,
+                                  const configSTACK_DEPTH_TYPE uxStackDepth,
+                                  void * const pvParameters,
+                                  UBaseType_t uxPriority,
+                                  TaskHandle_t * const pxCreatedTask )
+    {
+        TCB_t * pxNewTCB;
+
+        /* If the stack grows down then allocate the stack then the TCB so the stack
+         * does not grow into the TCB.  Likewise if the stack grows up then allocate
+         * the TCB then the stack. */
+        #if ( portSTACK_GROWTH > 0 )
+        {
+            /* Allocate space for the TCB.  Where the memory comes from depends on
+             * the implementation of the port malloc function and whether or not static
+             * allocation is being used. */
+            /* MISRA Ref 11.5.1 [Malloc memory assignment] */
+            /* coverity[misra_c_2012_rule_11_5_violation] */
+            pxNewTCB = (TCB_t*) pvPortMalloc( sizeof( TCB_t ) );
+
+            if( pxNewTCB != NULL )
+            {
+                (void) memset( (void *) pxNewTCB, 0x00, sizeof( TCB_t ) );
+
+                /* Allocate space for the stack used by the task being created.
+                 * The base of the stack memory stored in the TCB so the task can
+                 * be deleted later if required. */
+                /* MISRA Ref 11.5.1 [Malloc memory assignment] */
+                /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
+                /* coverity[misra_c_2012_rule_11_5_violation] */
+                pxNewTCB->pxStack = (StackType_t*) pvPortMallocStack( ( ( (size_t) uxStackDepth ) * 										 sizeof( StackType_t ) ) );
+
+                if( pxNewTCB->pxStack == NULL )
+                {
+                    /* Could not allocate the stack.  Delete the allocated TCB. */
+                    vPortFree( pxNewTCB );
+                    pxNewTCB = NULL;
+                }
+            }
+        }
+        #else /* portSTACK_GROWTH */
+        {
+            StackType_t * pxStack;
+
+            /* Allocate space for the stack used by the task being created. */
+            /* MISRA Ref 11.5.1 [Malloc memory assignment] */
+            /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
+            /* coverity[misra_c_2012_rule_11_5_violation] */
+            pxStack = ( StackType_t * ) pvPortMallocStack( ( ((size_t) uxStackDepth) * sizeof( 																				   StackType_t) ) );
+
+            if( pxStack != NULL )
+            {
+                /* Allocate space for the TCB. */
+                /* MISRA Ref 11.5.1 [Malloc memory assignment] */
+                /* coverity[misra_c_2012_rule_11_5_violation] */
+                pxNewTCB = ( TCB_t* ) pvPortMalloc( sizeof(TCB_t) );
+
+                if( pxNewTCB != NULL )
+                {
+                    ( void ) memset( (void *) pxNewTCB, 0x00, sizeof(TCB_t) );
+
+                    /* Store the stack location in the TCB. */
+                    pxNewTCB->pxStack = pxStack;
+                }
+                else
+                {
+                    /* The stack cannot be used as the TCB was not created.  Free
+                     * it again. */
+                    vPortFreeStack( pxStack );
+                }
+            }
+            else
+            {
+                pxNewTCB = NULL;
+            }
+        }
+        #endif /* portSTACK_GROWTH */
+
+        if( pxNewTCB != NULL )
+        {
+            #if ( tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE != 0 )
+            {
+                /* Tasks can be created statically or dynamically, so note this
+                 * task was created dynamically in case it is later deleted. */
+                pxNewTCB->ucStaticallyAllocated = tskDYNAMICALLY_ALLOCATED_STACK_AND_TCB;
+            }
+            #endif /* tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE */
+
+            prvInitialiseNewTask( pxTaskCode,
+                                 pcName,
+                                 uxStackDepth,
+                                 pvParameters,
+                                 uxPriority,
+                                 pxCreatedTask,
+                                 pxNewTCB,
+                                 NULL );
+        }
+
+        return pxNewTCB;
+    }
+```
+### 初始化TCB
+
+如果在运行时，开启了 FreeRTOS 的栈溢出钩子函数（`configCHECK_FOR_STACK_OVERFLOW`），内核会检查栈的末尾是否还是初始值（比如 0xa5）。
+
+**原理**：如果栈被使用了，里面的 0xa5 应该会被覆盖成其他数据。如果到了栈底还发现是 0xa5，说明栈没有被使用过（或者被使用得很少）。反之，如果栈顶的值被意外修改了，可能就发生了溢出。
+
+``` c
+static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
+                                  const char * const pcName,
+                                  const configSTACK_DEPTH_TYPE uxStackDepth,
+                                  void * const pvParameters,
+                                  UBaseType_t uxPriority,
+                                  TaskHandle_t * const pxCreatedTask,
+                                  TCB_t * pxNewTCB,
+                                  const MemoryRegion_t * const xRegions )
+{
+    StackType_t * pxTopOfStack;
+    UBaseType_t x;
+
+    #if ( portUSING_MPU_WRAPPERS == 1 )
+        /* 检查此任务时候具有特权级 */
+        BaseType_t xRunPrivileged;
+
+        if( ( uxPriority & portPRIVILEGE_BIT ) != 0U )
+            xRunPrivileged = pdTRUE;
+        else
+            xRunPrivileged = pdFALSE;
+
+        uxPriority &= ~portPRIVILEGE_BIT;
+    #endif
+
+    /* Avoid dependency on memset() if it is not required. */
+    #if ( tskSET_NEW_STACKS_TO_KNOWN_VALUE == 1 )
+    {
+        /* Fill the stack with a known value to assist debugging. */
+        (void) memset( pxNewTCB->pxStack, (int) tskSTACK_FILL_BYTE, (size_t) uxStackDepth * sizeof( StackType_t) );
+    }
+    #endif
+
+	/* 计算并在TCB中存储栈指针 */
+    #if ( portSTACK_GROWTH < 0 )
+    {
+        pxTopOfStack = &( pxNewTCB->pxStack[ uxStackDepth - 1 ] );
+        pxTopOfStack = (StackType_t*) ( pxTopOfStack  & ~( portBYTE_ALIGNMENT_MASK ) );
+        configASSERT( ( (  pxTopOfStack & portBYTE_ALIGNMENT_MASK ) == 0U ) );
+
+        #if ( configRECORD_STACK_HIGH_ADDRESS == 1 )
+            pxNewTCB->pxEndOfStack = pxTopOfStack;
+        #endif
+    } 
+    #else
+    {
+        pxTopOfStack = pxNewTCB->pxStack;
+        pxTopOfStack = (StackType_t*) ( ( pxTopOfStack + portBYTE_ALIGNMENT_MASK ) & ( ~ portBYTE_ALIGNMENT_MASK ) );
+
+        configASSERT( ( ( pxTopOfStack & portBYTE_ALIGNMENT_MASK ) == 0U ) );
+
+        pxNewTCB->pxEndOfStack = pxNewTCB->pxStack + ( uxStackDepth -  1 );
+    }
+    #endif
+
+    /* 在TCB中存储任务名 */
+    if( pcName != NULL )
+    {
+        for( x = ( UBaseType_t ) 0; x < ( UBaseType_t ) configMAX_TASK_NAME_LEN; x++ )
+        {
+            pxNewTCB->pcTaskName[ x ] = pcName[ x ];
+            if( pcName[ x ] == ( char ) 0x00 )
+                break;
+            else
+                mtCOVERAGE_TEST_MARKER();
+        }
+        pxNewTCB->pcTaskName[ configMAX_TASK_NAME_LEN - 1U ] = '\0';
+    }
+    else
+        mtCOVERAGE_TEST_MARKER();
+    
+	/*在TCB中存储优先级 */
+    configASSERT( uxPriority < configMAX_PRIORITIES );
+    if( uxPriority >= ( UBaseType_t ) configMAX_PRIORITIES )
+        uxPriority = ( UBaseType_t ) configMAX_PRIORITIES - ( UBaseType_t ) 1U;
+    else
+        mtCOVERAGE_TEST_MARKER();
+    pxNewTCB->uxPriority = uxPriority;
+    
+    #if ( configUSE_MUTEXES == 1 )
+        pxNewTCB->uxBasePriority = uxPriority;
+    #endif 
+
+    /* 初始化TCB的状态链表节点以及事件链表节点 */
+    vListInitialiseItem( &( pxNewTCB->xStateListItem ) );
+    vListInitialiseItem( &( pxNewTCB->xEventListItem ) );
+
+    listSET_LIST_ITEM_OWNER( &( pxNewTCB->xStateListItem ), pxNewTCB );
+    listSET_LIST_ITEM_OWNER( &( pxNewTCB->xEventListItem ), pxNewTCB );
+    /* xEventList的插入是依据item_value值大小进行，优先级高的应插入到前面 */
+    /* xStateList的插入是默认插入到对应优先级链表的尾部，不需要item_value，插入到延时链表时会依据延时tick来对其进行设置*/
+    listSET_LIST_ITEM_VALUE( &( pxNewTCB->xEventListItem ),  configMAX_PRIORITIES - uxPriority );
+
+    
+    
+    #if ( portUSING_MPU_WRAPPERS == 1 )
+        vPortStoreTaskMPUSettings( &( pxNewTCB->xMPUSettings ), xRegions, pxNewTCB->pxStack, uxStackDepth );
+    #else
+        ( void ) xRegions;
+    #endif
+
+    #if ( configUSE_C_RUNTIME_TLS_SUPPORT == 1 )
+        /* Allocate and initialize memory for the task's TLS Block. */
+        configINIT_TLS_BLOCK( pxNewTCB->xTLSBlock, pxTopOfStack );
+    #endif
+
+    /* Initialize the TCB stack to look as if the task was already running,
+     * but had been interrupted by the scheduler.  The return address is set
+     * to the start of the task function. Once the stack has been initialised
+     * the top of stack variable is updated. */
+    #if ( portUSING_MPU_WRAPPERS == 1 )
+    {
+        /* If the port has capability to detect stack overflow,
+         * pass the stack end address to the stack initialization
+         * function as well. */
+        #if ( portHAS_STACK_OVERFLOW_CHECKING == 1 )
+        {
+            #if ( portSTACK_GROWTH < 0 )
+            {
+                pxNewTCB->pxTopOfStack = pxPortInitialiseStack( 
+                    pxTopOfStack, 
+                    pxNewTCB->pxStack,
+                    pxTaskCode,
+                    pvParameters,
+                    xRunPrivileged,
+                    &( pxNewTCB->xMPUSettings ) );
+            }
+            #else
+            {
+                pxNewTCB->pxTopOfStack = pxPortInitialiseStack( 
+                    pxTopOfStack,
+                    pxNewTCB->pxEndOfStack,
+                    pxTaskCode,
+                    pvParameters,
+                    xRunPrivileged,
+                    &( pxNewTCB->xMPUSettings ) );
+            }
+            #endif
+        }
+        #else
+        {
+            pxNewTCB->pxTopOfStack = pxPortInitialiseStack(
+                pxTopOfStack,
+                pxTaskCode,
+                pvParameters,
+                xRunPrivileged,
+                &( pxNewTCB->xMPUSettings ) );
+        }
+        #endif
+    }
+    #else
+    {
+        /* If the port has capability to detect stack overflow,
+         * pass the stack end address to the stack initialization
+         * function as well. */
+        #if ( portHAS_STACK_OVERFLOW_CHECKING == 1 )
+        {
+            #if ( portSTACK_GROWTH < 0 )
+            {
+                pxNewTCB->pxTopOfStack = pxPortInitialiseStack(
+                    pxTopOfStack,
+                    pxNewTCB->pxStack,
+                    pxTaskCode,
+                    pvParameters );
+            }
+            #else
+            {
+                pxNewTCB->pxTopOfStack = pxPortInitialiseStack(
+                    pxTopOfStack,
+                    pxNewTCB->pxEndOfStack,
+                    pxTaskCode,
+                    pvParameters );
+            }
+            #endif
+        }
+        #else
+        {
+            pxNewTCB->pxTopOfStack = pxPortInitialiseStack( pxTopOfStack,
+                                                            pxTaskCode,
+                                                            pvParameters );
+        }
+        #endif /* portHAS_STACK_OVERFLOW_CHECKING */
+
+        
+        #if ( portSTACK_GROWTH < 0 )
+        {
+            configASSERT( (  (pxTopOfStack - pxNewTCB->pxTopOfStack) ) < ( uxStackDepth ) );
+        }
+        #else
+        {
+            configASSERT( (  ( pxNewTCB->pxTopOfStack - pxTopOfStack ) ) < ( uxStackDepth ) );
+        }
+        #endif /* portSTACK_GROWTH */
+    }
+    #endif /* portUSING_MPU_WRAPPERS */
+
+    /* 如果为多核环境，初始化任务的运行状态 */
+    #if ( configNUMBER_OF_CORES > 1 )
+    {
+        pxNewTCB->xTaskRunState = taskTASK_NOT_RUNNING;
+
+        /* Is this an idle task? */
+        if( ( ( TaskFunction_t ) pxTaskCode == ( TaskFunction_t ) ( &prvIdleTask ) ) || ( ( TaskFunction_t ) pxTaskCode == ( TaskFunction_t ) ( &prvPassiveIdleTask ) ) )
+            pxNewTCB->uxTaskAttributes |= taskATTRIBUTE_IS_IDLE;
+    }
+    #endif
+
+    if( pxCreatedTask != NULL )
+    {
+        /* Pass the handle out in an anonymous way.  The handle can be used to
+         * change the created task's priority, delete the created task, etc.*/
+        *pxCreatedTask = ( TaskHandle_t ) pxNewTCB;
+    }
+    else
+        mtCOVERAGE_TEST_MARKER();
+}
+```
+
+### 初始化栈内容
+
+#### 内核寄存器
+寄存器分为内核寄存器和外设寄存器以及内核外设寄存器，内核寄存器是由ARM架构决定的，访问只能通过ARM公司制定的指令集进行调用。
+
+M3 和 M4 的寄存器组一共有16个寄存器，其中`R0-R12`这13个寄存器是通用寄存器，`R13`是 SP 寄存器，`r14`是 LR 寄存器，`R15`是 PC 寄存器。
+
+<img src="assets/M3寄存器组.png" alt="M3寄存器组" style="zoom:50%;" />
+
+- **通用寄存器**：**R0-R12**寄存器。
+
+- **堆栈指针 (SP)**：R13寄存器。在任何时候**R13 (SP)** 指向的要么是 MSP，要么是 PSP。处理器根据 **CONTROL 寄存器** 的第 1 位（`CONTROL[1]`，也称为 `SPSEL`）来决定 R13 链接到 MSP 还是 PSP：
+
+  - **当 `CONTROL[1] = 0` (默认值)**
+
+    R13 链接到 MSP，这是复位后的状态，也是处理**异常和中断**时**强制**使用的状态。这意味着所有操作系统内核代码和中断服务程序默认都使用 MSP，保证了系统的可靠性。
+
+  - **当 `CONTROL[1] = 1`**
+
+    R13 链接到 PSP。操作系统通常会在启动一个用户任务（线程）时，将 CONTROL 寄存器设置为这个状态。这样，该任务的所有堆栈操作（PUSH, POP）都会使用它自己的堆栈空间（由 PSP 指向），从而实现任务间的隔离。
+
+
+​	**关键点：** 当发生异常（如中断）时，硬件会**自动将 `CONTROL[1]` 清零**，强制处理器切换回使用 MSP。在异常返回时，再恢复之前的 			`CONTROL` 寄存器值。这个过程是自动的，确保了系统代码总是在一个已知的、安全的堆栈（MSP）上运行。
+
+- **链接寄存器 (LR)**：R14
+- **程序计数器 (PC)**：R15
+- **程序状态寄存器 (xPSR)**：在 ARM Cortex-M 处理器中，xPSR 是**程序状态寄存器**的统称，它实际上由三个子状态寄存器组成：
+  - **APSR**：应用程序状态寄存器（保存条件标志，如 N, Z, C, V）。
+  - **IPSR**： 中断程序状态寄存器（保存当前中断服务编号）。
+  - **EPSR**：执行程序状态寄存器（包含执行状态信息，如 Thumb 状态位）。
+- **中断屏蔽寄存器**（如PRIMASK, FAULTMASK）
+
+---
 
 为什么是 `0x01000000`？
 
@@ -388,12 +872,7 @@ M3和M4的寄存器组一共有16个寄存器，其中`R0-R12`这13个寄存器�
 
 - **位 24 (T-bit)**：这是最重要的位。对于所有 Cortex-M 处理器，**必须置 1** 以表明代码是在 **Thumb 状态**下执行。因为 Cortex-M 只支持 Thumb/Thumb-2 指令集，如果该位为 0，处理器将触发一个用法错误异常。
 
----
-
-将**任务的函数地址**以及**参数**存储以及**当前任务寄存器的值（寄存器组+程序状态寄存器xPSR组）**到任务栈中（R13 SP寄存器保存进任务的`TCB->pxtopofstack`）。初始化完成后的任务栈如下图所示：
-
-![初始化完成后的任务栈](mdpic/初始化完成后的任务栈.png)
-
+#### 代码实现
 ``` c
 static StackType_t* pxInitialiseStack( StackType_t    *pxTopOfStack,
                                        TaskFunction_t  pxTask,
@@ -411,6 +890,7 @@ static StackType_t* pxInitialiseStack( StackType_t    *pxTopOfStack,
 	return pxTopOfStack;
 }
 ```
+<<<<<<< HEAD
 ### 动态创建任务
 ​    静态创建任务中：控制块和任务栈的内存空间都是从内部的 SRAM 里面分配的，具体分配到哪个地址由编译器决定。而动态内存则使用**堆**，也属于 SRAM。本质为在 SRAM 里面**定义一个大数组**，也就是堆内存来供 FreeRTOS 的动态内存分配函数使用，在第一次使用的时候系统会将定义的堆内存进行初始化。
 
@@ -444,71 +924,227 @@ static void prvHeapInit( void )
     uxAddress = ( size_t ) ucHeap;
     /* 确保堆在正确对齐的边界上启动。*/
     if ( (uxAddress & portBYTE_ALIGNMENT_MASK) != 0 )
+=======
+
+将**任务的函数地址**以及**参数**存储以及**当前任务寄存器的值（寄存器组+程序状态寄存器xPSR组）**到任务栈中（R13 SP寄存器保存进任务的`TCB->pxtopofstack`）。初始化完成后的任务栈如下图所示：
+
+![初始化完成后的任务栈](assets/初始化完成后的任务栈.png)
+
+而外设寄存器如`UART,GPIO,TIMER,iic`等是由意法半导体公司分配的，通过**内存访问指令**（如 `LDR`, `STR`) 来读写特定的内存地址。每个外设寄存器都有一个在芯片**内存映射 (Memory Map)** 中独一无二的**绝对地址**。操作外设，本质上就是向这些地址读写数据。
+
+``` c
+#if ( configENABLE_MPU == 1 )
+    StackType_t * pxPortInitialiseStack( StackType_t * pxTopOfStack,
+                                         StackType_t * pxEndOfStack,
+                                         TaskFunction_t pxCode,
+                                         void * pvParameters,
+                                         BaseType_t xRunPrivileged,
+                                         xMPU_SETTINGS * xMPUSettings ) /* PRIVILEGED_FUNCTION */
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
     {
-        uxAddress += ( portBYTE_ALIGNMENT - 1 );
-        uxAddress &= ~( ( size_t ) portBYTE_ALIGNMENT_MASK );
-        xTotalHeapSize -= uxAddress - ( size_t ) ucHeap;
-    } 
-    pucAlignedHeap = ( uint8_t * ) uxAddress; 
-    /* xStart 用于保存指向空闲块列表中第一个项目的指针。void 用于防止编译器警告*/
-    xStart.pxNextFreeBlock = ( void * ) pucAlignedHeap;
-    xStart.xBlockSize = ( size_t ) 0; 
+        uint32_t ulIndex = 0;
+        uint32_t ulControl = 0x0;
 
-    /* pxEnd 用于标记空闲块列表的末尾，并插入堆空间的末尾。*/
-    uxAddress = ( ( size_t ) pucAlignedHeap ) + xTotalHeapSize;
-    uxAddress -= xHeapStructSize;
-    uxAddress &= ~( ( size_t ) portBYTE_ALIGNMENT_MASK );
-    pxEnd = ( void * ) uxAddress;
-    pxEnd->xBlockSize = 0;
-    pxEnd->pxNextFreeBlock = NULL;
-    /* 首先，有一个空闲块，其大小可以占用整个堆空间，减去 pxEnd 占用的空间。*/
-    pxFirstFreeBlock = ( void * ) pucAlignedHeap;
-    pxFirstFreeBlock->xBlockSize = uxAddress - ( size_t ) pxFirstFreeBlock;
-    pxFirstFreeBlock->pxNextFreeBlock = pxEnd;
+        xMPUSettings->ulContext[ ulIndex ] = 0x04040404; /* r4. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x05050505; /* r5. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x06060606; /* r6. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x07070707; /* r7. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x08080808; /* r8. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x09090909; /* r9. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x10101010; /* r10. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x11111111; /* r11. */
+        ulIndex++;
 
-    /* 只存在一个块 - 它覆盖整个可用堆空间。因为是刚初始化的堆内存*/
-    xMinimumEverFreeBytesRemaining = pxFirstFreeBlock->xBlockSize;
-    xFreeBytesRemaining = pxFirstFreeBlock->xBlockSize;
+        xMPUSettings->ulContext[ ulIndex ] = ( uint32_t ) pvParameters; /* r0. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x01010101; /* r1. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x02020202; /* r2. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x03030303; /* r3. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = 0x12121212; /* r12. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = ( uint32_t ) portTASK_RETURN_ADDRESS; /* LR. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = ( uint32_t ) pxCode; /* PC. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = portINITIAL_XPSR; /* xPSR. */
+        ulIndex++;
 
-    xBlockAllocatedBit = ( ( size_t ) 1 ) << ( ( sizeof( size_t ) * heapBITS_PER_BYTE ) - 1 );
-}
-
-    
-BaseType_t xTaskCreate( TaskFunction_t pxTaskCode,  // TaskFunction_t为函数指针，通过函数指针将函数作为参数传入
-                        const char * const pcName,  // 
-                        const uint16_t usStackDepth,
-                        void * const pvParameters,
-                        UBaseType_t uxPriority,
-                        TaskHandle_t * const pxCreatedTask )  // 指针常量
-{
-    if ( pxStack != NULL ) {
-        /* 分配任务控制块内存 */ 
-        pxNewTCB = ( TCB_t * ) pvPortMalloc( sizeof( TCB_t ) );
-        if ( pxNewTCB != NULL ) {
-        /* 将堆栈位置存储在 TCB 中。*/
-        pxNewTCB->pxStack = pxStack;
+        #if ( configENABLE_TRUSTZONE == 1 )
+        {
+            xMPUSettings->ulContext[ ulIndex ] = portNO_SECURE_CONTEXT; /* xSecureContext. */
+            ulIndex++;
         }
+        #endif /* configENABLE_TRUSTZONE */
+        xMPUSettings->ulContext[ ulIndex ] = ( uint32_t ) ( pxTopOfStack - 8 ); /* PSP with the hardware saved stack. */
+        ulIndex++;
+        xMPUSettings->ulContext[ ulIndex ] = ( uint32_t ) pxEndOfStack; /* PSPLIM. */
+        ulIndex++;
+
+        #if ( ( configENABLE_PAC == 1 ) || ( configENABLE_BTI == 1 ) )
+        {
+            /* Check PACBTI security feature configuration before pushing the
+             * CONTROL register's value on task's TCB. */
+            ulControl = prvConfigurePACBTI( pdFALSE );
+        }
+        #endif /* configENABLE_PAC == 1 || configENABLE_BTI == 1 */
+
+        if( xRunPrivileged == pdTRUE )
+        {
+            xMPUSettings->ulTaskFlags |= portTASK_IS_PRIVILEGED_FLAG;
+            xMPUSettings->ulContext[ ulIndex ] = ( ulControl | ( uint32_t ) portINITIAL_CONTROL_PRIVILEGED ); /* CONTROL. */
+            ulIndex++;
+        }
+        else
+        {
+            xMPUSettings->ulTaskFlags &= ( ~portTASK_IS_PRIVILEGED_FLAG );
+            xMPUSettings->ulContext[ ulIndex ] = ( ulControl | ( uint32_t ) portINITIAL_CONTROL_UNPRIVILEGED ); /* CONTROL. */
+            ulIndex++;
+        }
+
+        xMPUSettings->ulContext[ ulIndex ] = portINITIAL_EXC_RETURN; /* LR (EXC_RETURN). */
+        ulIndex++;
+
+        #if ( configUSE_MPU_WRAPPERS_V1 == 0 )
+        {
+            /* Ensure that the system call stack is double word aligned. */
+            xMPUSettings->xSystemCallStackInfo.pulSystemCallStack = &( xMPUSettings->xSystemCallStackInfo.ulSystemCallStackBuffer[ configSYSTEM_CALL_STACK_SIZE - 1 ] );
+            xMPUSettings->xSystemCallStackInfo.pulSystemCallStack = ( uint32_t * ) ( ( uint32_t ) ( xMPUSettings->xSystemCallStackInfo.pulSystemCallStack ) &
+                                                                                     ( uint32_t ) ( ~( portBYTE_ALIGNMENT_MASK ) ) );
+
+            xMPUSettings->xSystemCallStackInfo.pulSystemCallStackLimit = &( xMPUSettings->xSystemCallStackInfo.ulSystemCallStackBuffer[ 0 ] );
+            xMPUSettings->xSystemCallStackInfo.pulSystemCallStackLimit = ( uint32_t * ) ( ( ( uint32_t ) ( xMPUSettings->xSystemCallStackInfo.pulSystemCallStackLimit ) +
+                                                                                            ( uint32_t ) ( portBYTE_ALIGNMENT - 1 ) ) &
+                                                                                          ( uint32_t ) ( ~( portBYTE_ALIGNMENT_MASK ) ) );
+
+            /* This is not NULL only for the duration of a system call. */
+            xMPUSettings->xSystemCallStackInfo.pulTaskStack = NULL;
+        }
+        #endif /* configUSE_MPU_WRAPPERS_V1 == 0 */
+
+        #if ( configENABLE_PAC == 1 )
+        {
+            uint32_t ulTaskPacKey[ 4 ], i;
+
+            vApplicationGenerateTaskRandomPacKey( &( ulTaskPacKey[ 0 ] ) );
+
+            for( i = 0; i < 4; i++ )
+            {
+                xMPUSettings->ulContext[ ulIndex ] = ulTaskPacKey[ i ];
+                ulIndex++;
+            }
+        }
+        #endif /* configENABLE_PAC */
+
+        return &( xMPUSettings->ulContext[ ulIndex ] );
     }
-    /*  省略代码......*/
-}
 
+#else
 
-void *pvPortMalloc( size_t xWantedSize ) 
-{
-    BlockLink_t *pxBlock, *pxPreviousBlock, *pxNewBlockLink;
-    void *pvReturn = NULL;
-    vTaskSuspendAll();
+    StackType_t * pxPortInitialiseStack( StackType_t * pxTopOfStack,
+                                         StackType_t * pxEndOfStack,
+                                         TaskFunction_t pxCode,
+                                         void * pvParameters ) /* PRIVILEGED_FUNCTION */
     {
-        if (pxEnd == NULL) {
-        prvHeapInit();
-        } 
-        else {
-        mtCOVERAGE_TEST_MARKER();
-            /* 省略代码 */
-        }
-    }
-}
+        /* Simulate the stack frame as it would be created by a context switch
+         * interrupt. */
+        #if ( portPRELOAD_REGISTERS == 0 )
+        {
+            pxTopOfStack--;
+            *pxTopOfStack = portINITIAL_XPSR; /* xPSR. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) pxCode; /* PC. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) portTASK_RETURN_ADDRESS; /* LR. */
+            pxTopOfStack -= 5; /* R12, R3, R2 and R1. */
+            *pxTopOfStack = ( StackType_t ) pvParameters; /* R0. */
+            pxTopOfStack -= 9; /* R11..R4, EXC_RETURN. */
+            *pxTopOfStack = portINITIAL_EXC_RETURN;
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) pxEndOfStack; /* Slot used to hold this task's PSPLIM value. */
 
+            #if ( configENABLE_TRUSTZONE == 1 )
+            {
+                pxTopOfStack--;
+                *pxTopOfStack = portNO_SECURE_CONTEXT; /* Slot used to hold this task's xSecureContext value. */
+            }
+            #endif /* configENABLE_TRUSTZONE */
+        }
+        #else /* portPRELOAD_REGISTERS */
+        {
+            pxTopOfStack--; /* Offset added to account for the way the MCU uses the stack on entry/exit of interrupts. */
+            *pxTopOfStack = portINITIAL_XPSR; /* xPSR. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) pxCode; /* PC. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) portTASK_RETURN_ADDRESS; /* LR. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x12121212UL; /* R12. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x03030303UL; /* R3. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x02020202UL; /* R2. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x01010101UL; /* R1. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) pvParameters; /* R0. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x11111111UL; /* R11. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x10101010UL; /* R10. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x09090909UL; /* R09. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x08080808UL; /* R08. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x07070707UL; /* R07. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x06060606UL; /* R06. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x05050505UL; /* R05. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) 0x04040404UL; /* R04. */
+            pxTopOfStack--;
+            *pxTopOfStack = portINITIAL_EXC_RETURN; /* EXC_RETURN. */
+            pxTopOfStack--;
+            *pxTopOfStack = ( StackType_t ) pxEndOfStack; /* Slot used to hold this task's PSPLIM value. */
+
+            #if ( configENABLE_TRUSTZONE == 1 )
+            {
+                pxTopOfStack--;
+                *pxTopOfStack = portNO_SECURE_CONTEXT; /* Slot used to hold this task's xSecureContext value. */
+            }
+            #endif /* configENABLE_TRUSTZONE */
+        }
+        #endif /* portPRELOAD_REGISTERS */
+
+        #if ( configENABLE_PAC == 1 )
+        {
+            uint32_t ulTaskPacKey[ 4 ], i;
+
+            vApplicationGenerateTaskRandomPacKey( &( ulTaskPacKey[ 0 ] ) );
+
+            for( i = 0; i < 4; i++ )
+            {
+                pxTopOfStack--;
+                *pxTopOfStack = ulTaskPacKey[ i ];
+            }
+        }
+        #endif /* configENABLE_PAC */
+
+        return pxTopOfStack;
+    }
+
+<<<<<<< HEAD
 
 static TaskHandle_t LED1_Task_Handle = NULL;
 
@@ -522,9 +1158,132 @@ if (pdPASS == xReturn)
 	printf("创建 LED1_Task 任务成功!\r\n");
 ```
 #### 初始化栈
+=======
+#endif /* configENABLE_MPU */
+```
 
-寄存器分为内核寄存器和外设寄存器以及内核外设寄存器，内核寄存器是由ARM架构决定的，访问只能通过ARM公司制定的指令集进行调用如：
+### 插入就绪列表
 
+就绪列表的目的是找到下一个需要执行的任务，列表上挂载的为各个任务对应的 TCB；同一个优先级插入同一条就绪列表，默认优先级数量为5，最大支持256个优先级。
+
+`uxTopReadyPriorityies`记录当前有就绪任务的链表的最高优先级；
+
+`pxcurrentTCB`指向当前正在运行任务的 TCB；
+
+`uxCurrentNumberOfTasks`记录有多少个任务；
+
+---
+
+主要干三件事：
+
+- 如果是第一次创建任务即`pxCurrentTCB`为空则将其指定为`pxCurrentTCB`，并**初始化所有列表**。
+- 否则检查优先级是否需要将`pxcurrentTCB`指向此任务；
+- 将此任务添加到对应的`ReadyList`链表中：首先在`uxTopReadyPriorities`中标记这个优先级列表有就绪任务，然后将其插入到此列表的尾部。
+
+``` c
+List_t pxReadyTasksLists[ configMAX_PRIORITIES ];  // 就绪列表就是List_t类型的数组，全局变量
+// configMAX_PRIORITIES 默认为5，最大支持256个优先级
+
+static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
+{
+    /* Ensure interrupts don't access the task lists while the lists are being updated. */
+    taskENTER_CRITICAL();
+    {
+        uxCurrentNumberOfTasks = (UBaseType_t) ( uxCurrentNumberOfTasks + 1U );
+
+        if( pxCurrentTCB == NULL )
+        {
+            /* There are no other tasks, or all the other tasks are in
+             * the suspended state - make this the current task. */
+            pxCurrentTCB = pxNewTCB;
+			
+            /* 首次创建任务，初始化状态列表 */
+            if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
+                prvInitialiseTaskLists();
+            else
+                mtCOVERAGE_TEST_MARKER();
+        }
+        else
+        {
+            /* If the scheduler is not already running, make this task the
+             * current task if it is the highest priority task to be created
+             * so far. */
+            if( xSchedulerRunning == pdFALSE )
+            {
+                if( pxCurrentTCB->uxPriority <= pxNewTCB->uxPriority )
+                {
+                    pxCurrentTCB = pxNewTCB;
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            }
+            else
+                mtCOVERAGE_TEST_MARKER();
+        }
+
+        uxTaskNumber++;
+
+        #if ( configUSE_TRACE_FACILITY == 1 )
+        {
+            /* Add a counter into the TCB for tracing only. */
+            pxNewTCB->uxTCBNumber = uxTaskNumber;
+        }
+        
+        #endif /* configUSE_TRACE_FACILITY */
+        traceTASK_CREATE( pxNewTCB );
+
+        prvAddTaskToReadyList( pxNewTCB );
+
+        portSETUP_TCB( pxNewTCB );
+    }
+    taskEXIT_CRITICAL();
+
+    if( xSchedulerRunning != pdFALSE )
+    {
+        /* If the created task is of a higher priority than the current task
+         * then it should run now. */
+        taskYIELD_ANY_CORE_IF_USING_PREEMPTION( pxNewTCB );
+    }
+    else
+        mtCOVERAGE_TEST_MARKER();
+}
+
+
+/* 初始化所有列表 */
+void prvInitialiseTaskLists( void )
+{
+	UBaseType_t uxPriority;
+    for ( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
+    {
+        /* 参考1.3：其实就是设置根节点、将链表索引指向根节点、设置此链表的节点数为 0  */
+        vListInitialise( &( pxReadyTasksLists[ uxPriority ] ) );
+    }
+    
+    vListInitialise( &xDelayedTaskList1 ); 
+    vListInitialise( &xDelayedTaskList2 ); 
+
+    pxDelayedTaskList = &xDelayedTaskList1; 
+    pxOverflowDelayedTaskList = &xDelayedTaskList2;
+}
+
+
+void prvAddTaskToReadyList( pxTCB )
+{
+    /* 在uxReadyPriorities 这个全局变量中标记一下此优先级有任务就绪了*/
+    taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority );
+    vListInsertEnd( &( pxReadyTasksLists[ ( pxTCB )->uxPriority ] ),&( ( pxTCB )->xStateListItem ) );
+}
+```
+## 切换任务
+
+`xNextTaskUnblockTime`，记录下一个任务需要解锁的时间。
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
+
+### 创建调度器及空闲任务
+
+<<<<<<< HEAD
 - **通用寄存器**：**R0-R12**
 
 ---
@@ -639,6 +1398,8 @@ void prvAddTaskToReadyList( pxTCB )
 
 
 
+=======
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
 ### 设置PendSV/SysTick中断
 
 在`RTOSConfig.h`中添加设置中断优先级：`SysTick` 和`PendSV` 都会涉及到系统调度，**系统调度的优先级要低于系统的其它硬件中断优先级**，即优先相应系统中的外部硬件中断，所以 `SysTick` 和 `PendSV` 的中断优先级配置为最低。
@@ -683,7 +1444,11 @@ BaseType_t xStartScheduler(void){
 
 调用厂商提供的`CMSIS`库中的函数来设置这些寄存器（`#include"stm32f4xx.h"`）或者通过访问映射的内存地址。
 
+<<<<<<< HEAD
 ![SCB寄存器](mdpic/SCB寄存器.png)
+=======
+![SCB寄存器](assets/SCB寄存器.png)
+>>>>>>> 9c0f8afc251438e2631714b484aeec08a1650fd6
 
 在ARM架构中有两个堆栈指针：
 
@@ -733,7 +1498,7 @@ CPSIE F ; // FAULTMASK=0 ;开异常
 
 `PRIMASK` 和 `FAULTMASK` 是 Cortex-M内核里面三个中断屏蔽寄存器中的两个，还有一个是 `BASEPRI`，有关这三个寄存器的详细用法如下：
 
-![内核中断屏蔽寄存器](mdpic/内核中断屏蔽寄存器.png)
+![内核中断屏蔽寄存器](assets/内核中断屏蔽寄存器.png)
 
 调用`taskYIELD()`将 `PendSV` 的悬起位置 1，当没有其它中断运行的时候响应` PendSV `中断，去执行我们写好的 `PendSV`中断服务函数，在里面实现任务切换。
 
@@ -1203,19 +1968,6 @@ portRECORD_READY_PRIORITY( uxPriority, uxTopReadyPriority )
 
 #endif /* configUSE_PORT_OPTIMISED_TASK_SELECTION */
 
-```
-# 3. 启动OS
-​    在**系统上电的时候第一个执行的是启动文件里面由汇编编写的复位函数Reset_Handler**，。复位函数的最后会**调用库函数__main，主要工作是初始化系统的堆和栈，最后调用 C 中的 main 函数，从而去到 C 的世界。**
-``` c
-Reset_Handler PROC
-EXPORT Reset_Handler [WEAK]
-IMPORT __main
-IMPORT SystemInit
-LDR R0, =SystemInit
-BLX R0 
-LDR R0, =__main
-BX R0
-ENDP
 ```
 # 4. 消息队列
 ## 4.1 队列机制与控制块

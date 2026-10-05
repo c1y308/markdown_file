@@ -35,9 +35,1789 @@
     "version": 4
 }
 ```
-## 交叉编译
+## ADB
 
-# 常见问题及排查技巧
+连接USB OTG线，将IMX 6ULL连接到虚拟机。
+
+``` bash
+adb devices          # 查看已经连接的设备
+adb shell            # 登录开发板，可以在这个命令窗口执行开发板的命令，和在串口中执行一样
+adb push 1.txt /root # 把文件传输到开发板的 /root 目录 
+adb pull /root/2.txt # 把开发板的文件拉到当前的文件夹
+```
+
+## clangd
+
+编译数据库文件：
+
+``` shell
+# 在项目根目录创建build目录
+mkdir build && cd build
+
+# 生成编译数据库（关键参数）
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..  # 核心参数{insert\_element\_0\_}
+
+# 将compile_commands.json链接到项目根目录
+ln -s build/compile_commands.json ../
+```
+
+``` shell
+# 安装bear
+sudo apt install bear
+
+# 构建项目并生成编译数据库
+bear make  # 会在当前目录生成compile_commands.json
+```
+
+# Shell
+
+​								$\boxed{\text{Shell = 你和 Linux 内核/程序之间的命令解释器}}$   
+
+**Shell 本身也是一个进程**。例如输入：
+
+``` shell
+ip link set eth0 up
+```
+
+Shell 负责把这一行解析成：
+
+```
+程序：ip
+参数1：link
+参数2：set
+参数3：eth0
+参数4：up
+```
+
+然后启动 `ip` 这个程序。以后写 `.sh` 脚本，本质上就是把很多这样的 Shell 命令和一些控制逻辑放在一起执行。结合现在 Debian / RK3588 的环境，优先学 Bash 就够了。
+
+## 命令结构
+
+最常见形式是：$\boxed{command \ option \ argument}$，例如：
+
+```shell
+ls -l /home
+
+ls       命令
+-l       option / 选项
+/home    argument / 参数
+```
+
+再比如：
+
+```shell
+ip addr show eth0
+
+ip
+ └── addr
+      └── show
+           └── eth0
+```
+
+Shell 本身并不知道 `addr show eth0` 是什么意思。它只是把参数传给`ip`，真正解释这些参数的是 `ip` 程序自己。
+
+## 空格非常重要
+
+Shell 默认使用空格分隔不同参数。例如：
+
+```shell
+mkdir test
+```
+
+相当于：
+
+```shell
+程序：mkdir
+参数：test
+```
+
+而：
+
+```shell
+mkdir my test
+```
+
+会被理解为：
+
+```shell
+mkdir
+参数1：my
+参数2：test
+```
+
+也就是创建两个目录。如果目录叫：
+
+```shell
+my test
+```
+
+必须写：
+
+```shell
+mkdir "my test"
+```
+
+或者：
+
+```shell
+mkdir my\ test
+```
+
+所以要建立一个非常重要的概念：$\boxed{\text{Shell 首先做字符串解析，然后才执行命令}}$。
+
+## 单引号、双引号、不加引号
+
+这个是 Shell 最重要的基础之一。假设：
+
+```shell
+name=world
+```
+
+那么：
+
+```shell
+echo hello $name
+
+# 输出
+hello world
+```
+
+---
+
+双引号：
+
+```shell
+echo "hello $name"
+```
+
+也输出：
+
+```
+hello world
+```
+
+因为**双引号里面 `$name` 仍然会进行变量展开**。
+
+---
+
+单引号：
+
+```shell
+echo 'hello $name'
+
+# 输出
+hello $name
+```
+
+所以可以记成：
+
+| 写法      | 变量 `$name` 是否展开 | 空格是否保持 |
+| --------- | --------------------- | ------------ |
+| `$name`   | 是                    | 不一定安全   |
+| `"$name"` | 是                    | 是           |
+| `'$name'` | 否                    | 是           |
+
+实际写 Shell 时非常推荐：
+
+```shell
+echo "$name"
+cd "$dir"
+rm "$file"
+```
+
+而不是裸写：
+
+```shell
+echo $name
+cd $dir
+rm $file
+```
+
+因为变量里面一旦有空格，裸变量很容易出问题。
+
+## Shell 变量
+
+### 定义变量
+
+#### 直接定义
+
+Shell 中可以直接定义变量，例如：
+
+```shell
+name="Xiang"
+cpu=7
+iface="eth0"
+```
+
+读取变量时，在变量名前面加 `$`：
+
+```shell
+echo "$name"
+echo "$cpu"
+echo "$iface"
+```
+
+输出：
+
+```
+Xiang
+7
+eth0
+```
+
+需要特别注意，Shell 中变量赋值时：
+
+```shell
+#正确
+name="Xiang"
+
+#错误！！！这是会尝试执行一个名叫 name 的程序
+name = "Xiang"
+```
+
+因为 Shell 会把空格当成参数分隔符。所以：$\boxed{\text{变量赋值时 } = \text{ 两边不能有空格}}$
+
+#### 命令输出定义
+
+Shell 可以先执行一个命令，然后把这个命令的输出放到某个地方。例如：
+
+```shell
+kernel=$(uname -r)
+
+#相当于 kernel="6.1.99-rt"
+
+echo "$kernel"
+#输出
+6.1.99-rt
+```
+
+再例如：
+
+```shell
+current_time=$(date)
+
+echo "$current_time"
+```
+
+也可以直接：
+
+```shell
+echo "Current kernel: $(uname -r)"
+```
+
+因此：$\boxed{ \$(command) = \text{执行 command，并使用它的标准输出} }$。这个语法称为：**Command Substitution / 命令替换**。
+
+**注意：`read`命令是输出到后面的`argument`，使用`IFS= read -r value < "${path}" || true`**；而`cat`命令则为命令输出定义。
+
+### 读取变量
+
+读取变量有两种常见写法：
+
+```shell
+$name
+```
+
+以及：
+
+```shell
+${name}
+```
+
+例如：
+
+```shell
+name="Xiang"
+
+echo "$name"
+echo "${name}"
+```
+
+二者都输出：
+
+```
+Xiang
+```
+
+**但是 `${}` 可以明确告诉 Shell：变量名到这里结束**。例如：
+
+```shell
+name="eth"
+
+echo "${name}0"
+# 输出
+eth0
+
+echo "$name0"
+# Shell 会认为你访问的是变量：name0
+```
+
+所以**变量和其他字符串连接时**，推荐：
+
+```shell
+"${name}0"
+"${iface}_backup"
+"/sys/class/net/${iface}/operstate"
+```
+
+因此可以记住：$\boxed{ $\{var\} = 更明确、更安全的变量展开 }$。
+
+## 环境变量 `export`
+
+**普通 Shell 变量默认只属于当前 Shell 进程**。例如：
+
+```shell
+name="hello"
+```
+
+当前 Shell 进程可以：
+
+```shell
+echo "$name"
+
+#输出
+hello
+```
+
+但是当前 Shell 启动的其他进程程序，不一定能够看到这个变量。**如果希望子进程也能够访问它，需要**：
+
+```shell
+export name="hello"
+
+#或者先定义，再导出：
+name="hello"
+export name
+```
+
+这类变量称为：$\boxed{\text{环境变量（Environment Variable）}}$。意思不是：把变量存到系统里。而是：**把这个变量标记成环境变量，以后我启动子进程时，把它一起传给子进程**。而且**变量只能向下传递**。
+
+最常见的环境变量之一就是：
+
+```shell
+PATH
+
+echo "$PATH"
+#输出
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+这里**表示 Shell 查找程序时，会依次到这些目录寻找**。例如输入：
+
+```shell
+ls
+
+#Shell 不需要你写：
+/usr/bin/ls
+```
+
+可以使用：
+
+```
+which ls
+```
+
+查看实际执行哪个程序。所以：$\boxed{ PATH = Shell 查找可执行程序的目录列表 }$。
+
+## `source`
+
+假设有脚本`config.sh`，里面：
+
+```shell
+export CPU=7
+```
+
+如果`./config.sh`，Shell 通常会启动一个新的进程运行它。脚本结束后，里面设置的环境可能不会留在当前父 Shell 中，因为**当前 Shell 进程是父进程，环境变量无法向上传递**。如果：
+
+```
+source config.sh
+```
+
+或者：
+
+```
+. config.sh
+```
+
+则表示：$\boxed{\text{在当前的 Shell 中执行这个文件，不创建新的 Shell 子进程}}$​；而`~/.bashrc`本质上也只是一个 Shell 脚本文件，里面经常有：
+
+``` shell
+export PATH="$PATH:/opt/my_program/bin"
+
+export EDITOR=vim
+
+alias ll='ls -alF'
+```
+
+当 Bash 启动时，它会读取`~/.bashrc`；重新执行：
+
+```shell
+source ~/.bashrc
+```
+
+目的就是：
+
+> 不重新登录，直接让当前 Shell 重新读取配置。
+
+## 输入/输出源
+
+### 标准输入、标准输出和标准错误
+
+Linux 程序通常有三个非常重要的标准数据流：
+
+```shell
+0    stdin     Standard Input      标准输入
+1    stdout    Standard Output     标准输出
+2    stderr    Standard Error      标准错误
+```
+
+例如执行：
+
+```shell
+echo hello
+```
+
+程序把：
+
+```shell
+hello
+```
+
+写入：
+
+```shell
+stdout
+```
+
+默认情况下，stdout 连接到当前终端，所以你能看到：
+
+```
+hello
+```
+
+可以简单理解成：
+
+```
+程序
+ │
+ ├── stdin   ← 输入
+ │
+ ├── stdout  → 正常输出
+ │
+ └── stderr  → 错误输出
+```
+
+### 输出重定向 `>`
+
+正常情况下：
+
+```shell
+echo hello
+```
+
+输出到终端：
+
+```
+hello
+```
+
+如果写：
+
+```shell
+echo hello > test.txt
+```
+
+意思就是：
+
+> 不要把 stdout 输出到终端，而是写入 `test.txt`。
+
+于是：
+
+```
+stdout
+   ↓
+test.txt
+```
+
+需要注意：
+
+```
+>
+```
+
+会**覆盖原文件**。
+
+例如：
+
+```
+echo AAA > test.txt
+echo BBB > test.txt
+```
+
+最后文件中只有：
+
+```
+BBB
+```
+
+所以：$\boxed{ > = 覆盖写入 }$.
+
+### 输入重定向`<`
+
+``` shell
+IFS= read -r value < "${path}" || true
+```
+
+正常`read -r value`会等从键盘输入。
+
+但是这里`<` 是**输入重定向**：$\boxed{\text{把文件作为命令的标准输入}}$；
+
+假设：
+
+```shell
+path="/sys/class/net/eth0/address"
+```
+
+那么：
+
+```shell
+read -r value < "${path}"
+```
+
+实际上就是：
+
+```
+/sys/class/net/eth0/address
+            │
+            │ 文件内容
+            ↓
+          stdin
+            ↓
+           read
+            ↓
+          value
+```
+
+### 追加重定向 `>>`
+
+如果不想覆盖，而是追加到文件末尾：
+
+```
+echo AAA >> test.txt
+echo BBB >> test.txt
+```
+
+文件内容就是：
+
+```
+AAA
+BBB
+```
+
+这是 Shell 脚本记录日志时非常常见的写法。
+
+### 错误输出重定向 `2>`
+
+前面提到：
+
+```
+1 = stdout
+2 = stderr
+```
+
+所以：
+
+```shell
+command 2> error.log
+```
+
+表示：
+
+> 把标准错误 stderr 写入 `error.log`。
+
+例如：
+
+```shell
+ls /not_exist 2> error.log
+```
+
+终端可能不会显示错误，但是：
+
+```
+cat error.log
+```
+
+会看到：
+
+```
+ls: cannot access '/not_exist': No such file or directory
+```
+
+### `2>&1`
+
+这是 Shell 中非常常见但初看很奇怪的一段：
+
+```
+command > output.log 2>&1
+```
+
+可以拆成两部分。首先：
+
+```
+> output.log
+```
+
+实际上相当于：
+
+```
+1> output.log
+```
+
+也就是：
+
+```
+stdout → output.log
+```
+
+然后：
+
+```
+2>&1
+```
+
+意思是：
+
+> 让文件描述符 2，也就是 stderr，指向文件描述符 1 当前指向的位置。
+
+因为 stdout 已经指向：
+
+```
+output.log
+```
+
+所以最终：
+
+```
+stdout ──┐
+         ├──→ output.log
+stderr ──┘
+```
+
+因此：
+
+```
+command > output.log 2>&1
+```
+
+表示：$\boxed{\text{正常输出和错误输出全部写入 output.log}}$
+
+### `/dev/null`
+
+你还经常会看到：
+
+```
+command > /dev/null
+```
+
+`/dev/null` 可以理解成：$\boxed{\text{Linux 的“黑洞”}}$，写进去的数据会直接被丢弃。
+
+例如：
+
+```shell
+echo hello > /dev/null
+```
+
+什么都不会显示。如果：
+
+```shell
+command > /dev/null 2>&1
+```
+
+表示：
+
+```
+stdout → 丢弃
+stderr → 丢弃
+```
+
+也就是：
+
+> 什么输出都不要。
+
+## 管道 `|`
+
+`|` 是 Linux Shell 最重要的语法之一。
+
+例如：
+
+```shell
+ps aux | grep policy
+```
+
+这里不是单纯“执行两个命令”。而是：
+
+```
+ps aux
+   │
+   │ stdout
+   ↓
+grep policy
+   │
+   ↓
+最终输出
+```
+
+也就是说：$\boxed{ A | B = A 的 stdout 作为 B 的 stdin }$。
+
+例如：
+
+```shell
+dmesg | grep EtherCAT
+```
+
+意思是：
+
+```shell
+dmesg
+ │
+ │ 输出所有内核日志
+ ↓
+grep EtherCAT
+ │
+ │ 只保留包含 EtherCAT 的行
+ ↓
+终端
+```
+
+再例如：
+
+```shell
+ip addr | grep eth0
+```
+
+所以 Linux Shell 的一个核心思想就是：$\boxed{ \text{让多个简单程序通过管道组合起来完成复杂任务} }$.
+
+## `||`
+
+**注意这是 A 执行失败再执行 B**。
+
+## `grep`命令
+
+`grep` 是 Linux 中最常用的文本搜索工具之一。例如：
+
+```
+dmesg | grep EtherCAT
+```
+
+表示：
+
+> 从 `dmesg` 输出中寻找包含 `EtherCAT` 的行。
+
+```shell
+# 忽略大小写 -i = ignore case
+dmesg | grep -i ethercat
+
+
+# 显示行号
+grep -n "error" log.txt
+
+
+# 递归搜索目录 . 表示当前目录
+grep -R "policy_cmd" .
+# 从当前目录开始，递归寻找所有包含 `policy_cmd` 的文件内容。
+```
+
+## `awk`命令
+
+### 命令参数
+
+把它理解成一个专门处理文本表格的小程序就行：$\boxed{\texttt{awk}=\text{逐行读取文本}\rightarrow\text{按字段拆分}\rightarrow\text{按列判断}\rightarrow\text{处理/输出}}$.
+
+最常见的输入就是这种：
+
+```
+Alice 20 Beijing
+Bob   25 Shanghai
+Tom   30 Shenzhen
+```
+
+`awk` **默认按空格或 Tab 分列**，所以第一行里：
+
+```shell
+$1 = Alice
+$2 = 20
+$3 = Beijing
+$0 = Alice 20 Beijing
+```
+
+其中最重要的规律是：
+
+```shell
+$0   整行
+$1   第1列
+$2   第2列
+$3   第3列
+...
+```
+
+### 命令结构
+
+最常见结构：
+
+```shell
+awk '条件 { 动作 }' 文件
+
+# 条件(没有则对每一行都处理)
+# → 哪些行要处理
+
+
+# 动作
+# → 对这些行做什么
+
+
+# 每一行都打印第 1 列。
+awk '{ print $1 }' file.txt
+
+# 每一行都打印第 1, 3 列。
+# 加入逗号会在输出的 1, 3 列中间插入空格。
+awk '{ print $1, $3 }' file.txt
+```
+
+### `NF`/`NR`
+
+`NF` 是：$\boxed{\text{Number of Fields}}$，也就是**这一行有多少列**。例如：
+
+```shell
+awk '{ print NF }' file.txt
+```
+
+可以打印最后一列：
+
+```shell
+awk '{ print $NF }' file.txt
+```
+
+---
+
+`NR`是：$\boxed{\text{Number of Records}}$；也就是**当前处理到第几行**。例如：
+
+```shell
+awk '{ print NR, $0 }' file.txt
+```
+
+输出：
+
+```
+1 Alice 20 Beijing
+2 Bob 25 Shanghai
+3 Tom 30 Shenzhen
+```
+
+### 正则表达式
+
+
+
+## 命令的退出状态 `$?`
+
+那么 Shell 怎么知道一个命令：
+
+> 成功还是失败？
+
+Linux 程序结束时通常都会返回一个：**Exit Status / Exit Code / 退出状态**一般约定：
+
+```
+0       成功
+非 0    失败
+```
+
+执行：
+
+```shell
+ls /tmp
+```
+
+然后：
+
+```shell
+echo 
+```
+
+所以：
+
+```shell
+$?
+```
+
+表示：$\boxed{\text{上一条命令的退出状态}}$，因此：
+
+```
+A && B
+```
+
+本质上就是：
+
+```
+执行 A
+  ↓
+检查 A 的 exit status
+  ↓
+如果 exit status == 0
+  ↓
+执行 B
+```
+
+而：
+
+```
+A || B
+```
+
+就是：
+
+```
+如果 exit status != 0
+  ↓
+执行 B
+```
+
+## 后台执行 `&`
+
+正常执行：
+
+```
+./program
+```
+
+Shell 会等待`program`结束以后，才重新给你命令提示符。
+
+如果：
+
+```
+./program &
+```
+
+表示：
+
+> 把程序放到后台运行。Shell 会立即返回。
+
+可以查看当前 Shell 的后台任务：
+
+```shell
+jobs
+```
+
+## 通配符
+
+### 通配符 `*`
+
+Shell 可以**自动匹配文件名**。例如当前目录：
+
+```shell
+a.txt
+b.txt
+main.cpp
+test.cpp
+```
+
+执行：
+
+```shell
+ls *.txt
+```
+
+Shell 会先把`*.txt`展开成：`a.txt b.txt`，于是相当于：
+
+```shell
+ls a.txt b.txt
+```
+
+例如：
+
+```
+rm *.log
+```
+
+表示删除所有`.log`结尾的文件。因此涉及 `rm` 时，要对 `*` 特别谨慎。
+
+### 通配符 `?`
+
+`?` 表示：$\boxed{\text{任意一个字符}}$，例如：
+
+```shell
+file1.txt
+file2.txt
+fileA.txt
+file10.txt
+```
+
+执行：
+
+```shell
+ls file?.txt
+```
+
+会匹配：
+
+```
+file1.txt
+file2.txt
+fileA.txt
+```
+
+但是不会匹配：
+
+```
+file10.txt
+```
+
+因为`?`只能匹配一个字符。
+
+## Shell 脚本
+
+Shell 命令不一定只能一条一条在终端输入。可以把它们保存到一个文件中，例如：
+
+```shell
+#!/bin/bash
+# 上面选取bash执行器
+
+echo "Hello Linux"
+
+date
+
+uname -r
+```
+
+这就是一个简单的 Shell Script。
+
+### 修改执行权限
+
+可以：
+
+```shell
+chmod +x test.sh
+```
+
+> 增加 executable / 可执行权限。
+
+然后执行：
+
+```
+./test.sh
+```
+
+### 脚本目录
+
+`.`表示：$\boxed{\text{当前目录}}$，所以：
+
+```
+./test.sh
+```
+
+就是：
+
+> 当前目录中的 `test.sh`。
+
+而如果直接：
+
+```
+test.sh
+```
+
+Shell 会去：`$PATH`中的目录寻找，当前目录通常并不在 `$PATH` 中。
+
+因此：
+
+```
+./test.sh
+```
+
+是在明确告诉 Shell：
+
+> 不用去 PATH 找，就执行当前目录下的这个文件。
+
+### `if` 条件判断
+
+Shell 中最基本的条件结构：
+
+```shell
+if command; then
+    commands
+fi
+```
+
+例如：
+
+```shell
+if ping -c 1 192.168.1.1; then
+    echo "Network OK"
+else
+	 echo "Network BAD"
+fi
+```
+
+这里最重要的地方是：$\boxed{\text{Shell 的 if 本质上判断的是命令退出状态}}$，也就是：
+
+```shell
+ping 成功
+exit status = 0
+       ↓
+执行 then
+```
+
+如果失败：
+
+```shell
+exit status != 0
+       ↓
+不执行 then
+```
+
+### `[ ... ]`
+
+Shell 中经常看到：
+
+```shell
+if [ "$cpu" -eq 7 ]; then
+    echo "CPU7"
+fi
+```
+
+这里：
+
+```
+[ ... ]
+```
+
+不要把它简单理解为 C++ 的括号。实际上：
+
+```
+[
+```
+
+本质上可以看成一个 `test` 命令。例如：
+
+```shell
+[ "$cpu" -eq 7 ]
+```
+
+和：
+
+```shell
+test "$cpu" -eq 7
+```
+
+作用基本相同。所以必须注意空格：
+
+```shell
+#正确
+[ "$cpu" -eq 7 ]
+
+#错误
+["$cpu" -eq 7]
+```
+
+因为 Shell 依然要按照`命令 参数 参数 参数`来解析。
+
+### `[[ ... ]]`
+
+在 Bash 脚本中，还经常看到：
+
+```shell
+[[ ... ]]
+```
+
+例如：
+
+```shell
+if [[ "$iface" == "eth0" ]]; then
+    echo "This is eth0"
+fi
+```
+
+因为它比传统：
+
+```
+[ ... ]
+```
+
+在字符串判断、模式匹配等场景中更方便。可以先简单记：
+
+```
+[ ... ]      传统 test 语法
+[[ ... ]]    Bash 提供的增强条件语法
+```
+
+### 数字比较
+
+Shell 中整数比较不能直接照搬 C/C++。
+
+例如：
+
+```shell
+if [[ "$a" -eq "$b" ]]; then
+    echo "equal"
+fi
+```
+
+常见数字比较：
+
+| 写法  | 含义                       |
+| ----- | -------------------------- |
+| `-eq` | equal，等于                |
+| `-ne` | not equal，不等于          |
+| `-gt` | greater than，大于         |
+| `-lt` | less than，小于            |
+| `-ge` | greater or equal，大于等于 |
+| `-le` | less or equal，小于等于    |
+
+例如：
+
+```shell
+if [[ "$cpu" -gt 4 ]]; then
+    echo "Big core"
+fi
+```
+
+### 字符串比较
+
+例如：
+
+```shell
+iface="eth0"
+```
+
+判断：
+
+```shell
+if [[ "$iface" == "eth0" ]]; then
+    echo "Matched"
+fi
+```
+
+判断不相等：
+
+```shell
+if [[ "$iface" != "eth0" ]]; then
+    echo "Not eth0"
+fi
+```
+
+判断字符串为空：
+
+```shell
+if [[ -z "$iface" ]]; then
+    echo "Empty"
+fi
+```
+
+判断字符串非空：
+
+```shell
+if [[ -n "$iface" ]]; then
+    echo "Not empty"
+fi
+```
+
+其中：
+
+```shell
+-z    zero length
+-n    non-zero length
+```
+
+### 判断文件和目录
+
+Shell 特别适合判断文件是否存在。例如：
+
+```shell
+if [[ -f "/etc/ethercat.conf" ]]; then
+    echo "File exists"
+fi
+```
+
+常用判断：
+
+| 写法 | 含义         |
+| ---- | ------------ |
+| `-e` | 路径存在     |
+| `-f` | 普通文件存在 |
+| `-d` | 目录存在     |
+| `-r` | 可读         |
+| `-w` | 可写         |
+| `-x` | 可执行       |
+
+例如：
+
+```shell
+if [[ -d "/sys/class/net/eth0" ]]; then
+    echo "eth0 exists"
+fi
+```
+
+### `for` 循环
+
+基本结构：
+
+```shell
+for variable in values; do
+    commands
+done
+```
+
+例如：
+
+```shell
+for cpu in 0 1 2 3; do
+    echo "$cpu"
+done
+```
+
+执行过程相当于：
+
+```
+cpu=0 → echo 0
+cpu=1 → echo 1
+cpu=2 → echo 2
+cpu=3 → echo 3
+```
+
+例如处理文件：
+
+```shell
+for file in *.log; do
+    echo "$file"
+done
+```
+
+### `while` 循环
+
+基本结构：
+
+```shell
+while condition; do
+    commands
+done
+```
+
+例如：
+
+```shell
+count=0
+
+while [[ "$count" -lt 5 ]]; do
+    echo "$count"
+    ((count++))
+done
+```
+
+### 算术运算 `$((...))`
+
+Shell 中：
+
+```
+$((...))
+```
+
+用于整数算术运算。例如：
+
+```shell
+a=10
+b=2
+
+c=$((a + b))
+```
+
+还可以：
+
+```shell
+x=$((x + 1))
+```
+
+或者：
+
+```shell
+((x++))
+```
+
+特别注意：
+
+```shell
+$(...)
+```
+
+和：
+
+```shell
+$((...))
+```
+
+完全不是一个东西。前者：$\boxed{ \$(...) = 命令替换 }$；后者：$\boxed{ \$((...)) = 算术运算 }$
+
+例如：
+
+```shell
+a=$(date)
+```
+
+表示执行命令。而：
+
+```shell
+a=$((1 + 2))
+```
+
+表示计算。
+
+### 脚本参数
+
+执行：
+
+```shell
+./deploy.sh eth0 7
+```
+
+那么：
+
+```shell
+$0 = ./deploy.sh
+$1 = eth0
+$2 = 7
+```
+
+所以脚本：
+
+```shell
+#!/bin/bash
+
+echo "Script: $0"
+echo "Interface: $1"
+echo "CPU: $2"
+```
+
+---
+
+`$#` 表示：$\boxed{\text{脚本收到多少个参数}}$，
+
+例如：
+
+```shell
+./deploy.sh eth0 7
+```
+
+那么：
+
+```shell
+echo "$#"
+```
+
+因此可以**检查参数数量**：
+
+```shell
+if [[ "$#" -ne 2 ]]; then
+    echo "Usage: $0 <iface> <cpu>"
+    exit 1
+fi
+```
+
+---
+
+`$@` 表示：$\boxed{\text{所有传入的参数}}$，例如：
+
+```shell
+./test.sh A B C
+```
+
+那么：
+
+```shell
+echo "$@"
+```
+
+输出：
+
+```shell
+A B C
+```
+
+在脚本或函数中，通常推荐**来安全地保留每个参数**。
+
+### 默认参数 `${1:-default}`
+
+经常看到：
+
+```shell
+iface="${1:-eth0}"
+```
+
+意思是：
+
+> 如果用户提供了 `$1`，就使用 `$1`；否则使用 `eth0`。
+
+所以：$\boxed{ \$\{var:-default\} = \text{变量没有值时使用默认值} }$.
+
+### `exit`
+
+Shell 脚本可以主动结束：
+
+```shell
+exit
+```
+
+更常见：
+
+```shell
+exit 0
+```
+
+表示成功退出，而：
+
+```shell
+exit 1
+```
+
+表示失败退出。例如：
+
+```shell
+if [[ ! -f "$config" ]]; then
+    echo "Config missing"
+    exit 1
+fi
+```
+
+### 函数
+
+可以把一组命令封装成函数。例如：
+
+```shell
+check_cpu() {
+    echo "Checking CPU..."
+    lscpu
+}
+```
+
+调用：
+
+``` shell
+check_cpu
+```
+
+---
+
+函数也可以接收参数：
+
+```shell
+check_iface() {
+
+	local path value # 使用 local 关键词创建函数的局部变量
+	
+    echo "Checking interface: $1"
+    ip link show "$1"
+}
+```
+
+调用：
+
+```
+check_iface eth0
+```
+
+此时函数内部：
+
+```
+$1 = eth0
+```
+
+因此 Shell 函数和 Shell 脚本的位置参数使用方式非常类似。
+
+---
+
+函数中可以使用`return 0`或`return 1`.例如：
+
+```shell
+check_iface() {
+    if ip link show "$1" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+```
+
+然后：
+
+```shell
+if check_iface eth0; then
+    echo "eth0 exists"
+fi
+```
+
+注意`exit`是退出整个脚本或 Shell。而`return`主要是从函数返回。
+
+### `case`
+
+当一个变量有多个可能值时，`case` 比大量 `if` 更清楚。例如：
+
+```shell
+case "$1" in
+    start)
+        echo "Starting..."
+        ;;
+    stop)
+        echo "Stopping..."
+        ;;
+    check)
+        echo "Checking..."
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|check}"
+        exit 1
+        ;;
+esac
+```
+
+这里：
+
+```
+*)
+```
+
+表示：
+
+> 其他所有情况。
+
+`case` 特别适合写这种命令：
+
+```
+start
+stop
+restart
+check
+apply
+install
+```
+
+## 最常用语法总结
+
+目前最值得优先掌握的 Shell 语法可以按下面这个顺序：
+
+```shell
+command option argument
+        ↓
+空格与参数划分
+        ↓
+单引号 / 双引号
+        ↓
+变量
+$var
+${var}
+        ↓
+环境变量
+export
+        ↓
+命令替换
+$(...)
+        ↓
+标准输入输出
+stdin stdout stderr
+        ↓
+重定向
+>
+>>
+2>
+2>&1
+        ↓
+管道
+|
+        ↓
+退出状态
+$?
+        ↓
+命令连接
+;
+&&
+||
+        ↓
+后台执行
+&
+        ↓
+通配符
+*
+?
+        ↓
+Shell 脚本
+#!/bin/bash
+        ↓
+if
+[[ ]]
+        ↓
+for / while
+        ↓
+$0 $1 $2 $# $@
+        ↓
+函数
+        ↓
+case
+        ↓
+set -euo pipefail
+```
+
+学习 Shell 最重要的不是死记符号，而是看到一行命令以后，能够把它**按照 Shell 的解析顺序拆开**。例如：
+
+```shell
+pid=$(pgrep policy_test) && taskset -cp 7 "$pid" > /tmp/result.log 2>&1
+```
+
+不要整行看。
+
+先拆：
+
+```shell
+pid=$(pgrep policy_test)
+│
+├── pgrep policy_test
+│       ↓
+│   查找 policy_test 的 PID
+│
+└── $(...)
+        ↓
+    把输出赋值给 pid
+```
+
+然后：
+
+```
+&&
+ ↓
+前面的命令成功才继续
+```
+
+再：
+
+```
+taskset -cp 7 "$pid"
+│
+├── taskset       命令
+├── -cp           选项
+├── 7             CPU
+└── "$pid"        目标 PID
+```
+
+最后：
+
+```shell
+> /tmp/result.log
+        ↓
+stdout 写入文件
+
+2>&1
+        ↓
+stderr 也写到 stdout 当前指向的位置
+```
+
+最终整句话就是：
+
+$\boxed{ \text{找到 policy\_test 的 PID} \rightarrow \text{如果成功} \rightarrow \text{把它绑定到 CPU7} \rightarrow \text{把正常输出和错误输出都写入日志} }$
+
+这就是读 Shell 最核心的方法。
+
+# 常见问题及排查
 
 ## 模块无法加载
 
@@ -73,6 +1853,73 @@ sudo insmod second_drv.ko second_major=0  # 0表示让内核动态分配设备�
 # 3. 查看动态分配的主设备号（加载后执行）
 cat /proc/devices | grep second
 ```
+
+## CAN编号不对应
+
+为什么硬件手册里面写的rk3588的can0的引脚被复用了，能使用的是can1和can2，但是通过ifconfig -a查看到的是can0和can1呢？
+
+<img src="./assets/CAN_1.png" alt="CAN_1" style="zoom:67%;" />
+
+
+
+<img src="./assets/CAN_2.png" alt="CAN_2" style="zoom:67%;" />
+
+<img src="./assets/CAN_3.png" alt="CAN_3" style="zoom:67%;" />
+
+**硬件手册上写的是芯片内部的物理控制器编号，而** **ifconfig** **看到的是 Linux 系统分配的软件逻辑接口编号。两者不需要、通常也不会完全一一对应。**
+
+在 Linux 系统（SocketCAN 子系统）中，网络接口的命名规则是从 0 开始依次递增的（如 eth0, eth1 或者 can0, can1）。
+
+当 Linux 系统启动时，它会去读取**设备树（Device Tree, DTS）**。
+
+- 系统发现硬件 **CAN0** 被禁用了（状态设为 disabled）。
+- 系统发现硬件 **CAN1** 是启用的（okay），它是系统找到的**第一个**可用的 CAN 设备，于是 Linux 给它分配了逻辑名称 **can0**。
+- 系统发现硬件 **CAN2** 是启用的（okay），它是系统找到的**第二个**可用的 CAN 设备，于是 Linux 给它分配了逻辑名称 **can1**。
+
+**设备树的别名（Aliases 机制）**
+
+为了让应用层编程更规范，驱动工程师通常会在 Linux 的设备树文件（dts）中写一段 aliases（别名）代码，强制进行映射。代码通常长这样：
+
+```dts
+aliases {
+    can0 = &can1;  // 将硬件的 can1 映射为软件的 can0
+    can1 = &can2;  // 将硬件的 can2 映射为软件的 can1
+};
+```
+
+这样做的目的是保证无论底层哪个硬件控制器被启用，应用层用 ifconfig 看到的接口始终是从 can0 开始，符合软件开发习惯。
+
+**查看 dmesg 日志：**
+输入 `dmesg | grep can`：
+您通常能看到类似 *“rk358x-can fed40000.can can0: registered...”* 的日志。那个 fed40000（或者类似的十六进制地址）就是物理 CAN1 在芯片内部的真实寄存器地址。
+
+**查看 sysfs 文件系统：**
+输入`ls -l /sys/class/net/can0/device`：
+这个命令会显示 can0 这个软接口链接到了设备树中的哪个硬件节点，通常会指向类似 .../platform/fed40000.can （对应硬件 CAN1）。
+
+CAN 总线遵循 **SocketCAN** 标准，归类为 **网络设备（net_device）**，网络设备的统一管理路径是：`/sys/class/net/`，**不挂载在 /dev 目录下**，管理工具用 `ip link`/`ifconfig`，而不是读写 `/dev` 文件。
+
+## i2c节点数量不对
+
+每一个`iic`控制器都在`/dev`中被封装为`i2c-*`**文件**节点，可以使用如下命令把系统里所有的 I2C 节点的“真实身份”打印出来：
+
+``` shell
+cat /sys/class/i2c-adapter/i2c-*/name
+```
+
+**ddc (Display Data Channel)：**
+
+**身份：** 这是 **HDMI 接口专属**的通信总线。
+
+**作用：** 当你用 HDMI 线连上显示器时，主板需要读取显示器的“身份证”（EDID：包含支持什么分辨率、多少Hz刷新率等信息）。这个读取过程走的就是标准的 I2C 协议。Linux 内核为了方便管理，把 HDMI 内部的这个小模块单独抽出来，注册成了一个独立的 /dev/i2c-X 设备。
+
+**fde50000.dp：**
+
+**身份：** dp 代表 **DisplayPort**。fde50000 是这个 DP 控制器在 RK3588 芯片内部的物理内存地址。
+
+**作用：** 你的鲁班猫板子支持通过 Type-C 接口输出 DP 视频信号。和 HDMI 一样，DP 接口也需要一条通道去和显示器沟通。Linux 同样把这个 DP 的辅助通道包装成了一个虚拟的 I2C 总线。
+
+# 系统启动流程
 
 
 
@@ -255,7 +2102,7 @@ GDB 显示的行是**即将执行**的行。
 - 如果只想查看单个变量则：`p(print)` 指令用于**打印变量、表达式或内存地址的值**，是调试时查看程序运行时数据的核心命令之一。
 - 用`display`命令使得每次停下来的时候都显示当前需要观察的值。
 
-![bt](../../嵌入式/开发工具/gdb-pic/bt.png)
+![bt](../../markdown_file/开发工具/gdb-pic/bt.png)
 
 ---
 
@@ -263,9 +2110,9 @@ GDB 显示的行是**即将执行**的行。
 
 	- 先用`frame`命令（简写为`f`）选择1号栈帧然后再`i(info) locals`查看当前栈帧中局部变量的值：
 
-![frame](../../嵌入式/开发工具/gdb-pic/frame.png)
+![frame](../../markdown_file/开发工具/gdb-pic/frame.png)
 
-- 如果我们不想浪费这次调试机会，可以在`gdb`中马上把`sum`的初值改为0继续运行。
+- 如果不想浪费这次调试机会，可以在`gdb`中马上把`sum`的初值改为0继续运行。
 
 ```bash
 set var sum=0
@@ -278,48 +2125,63 @@ set var sum=0
 
 调试模式下`g_count`并不是等于1000，正常运行`g_count=1000`是因为一个线程占据了时间片完成了1000次相加，会出现调试与正常运行时候结果不一致的情况。GDB 的断点会改变线程的执行节奏 —— 断点触发时程序会暂停，**CPU 会切换到 GDB 进程处理调试指令，这个 “暂停” 会打断子线程的 “连续时间片”**。
 
-# 常用命令
+# 内核文件夹
 
-连接USB OTG线，将IMX 6ULL连接到虚拟机。
+## `/dev`目录
 
-``` bash
-adb devices          # 查看已经连接的设备
-adb shell            # 登录开发板，可以在这个命令窗口执行开发板的命令，和在串口中执行一样
-adb push 1.txt /root # 把文件传输到开发板的 /root 目录 
-adb pull /root/2.txt # 把开发板的文件拉到当前的文件夹
-```
+存放系统中所有的**设备文件**，全称是 Device Nodes，/dev 是用来传递**真实业务数据流**和发送**复杂控制指令（ioctl）**的地方。
 
+**驱动视角**：在 Linux 驱动中，硬件通常被抽象为三种：字符设备（按字节流访问，如串口、鼠标）、块设备（按数据块访问，如硬盘、U盘）和网络设备（不通过 /dev，走 Socket）。
+**当驱动程序向内核注册一个字符或块设备时，系统会在 /dev 下创建一个对应的文件**（例如 /dev/ttyS0 代表串口，/dev/sda 代表硬盘），应用程序通过标准的 C 语言文件 I/O 函数（open、read、write、ioctl）来操作这些文件。
 
+---
+
+查看i2c设备：
 
 ``` shell
-sh-5.0# ls /dev/fb0
-/dev/fb0
-sh-5.0# cd /sys/firmware
-sh-5.0# ls
-devicetree  fdt
-sh-5.0# cd devicetree
-sh-5.0# ls
-base
-sh-5.0# cd base
-sh-5.0# ls
-'#address-cells'   framebuffer-mylcd		   regulators
-'#size-cells'	   gpio-keys			   reserved-memory
- aliases	   interrupt-controller@00a01000   sii902x-reset
- backlight	   leds				   soc
- chosen		   memory			   sound
- clocks		   model			   spi4
- compatible	   name
- cpus		   pxp_v4l2
-
-
-cd /sys/bus
-cd platform
-ls
-cd drivers
-/*probe函数是否被调用*/
+ls /dev/i2c-*
 ```
 
-## 文件夹层级
+
+
+## `/proc`目录
+
+procfs（虚拟文件系统），它**完全在内存中**，不占用硬盘空间；/proc 主要用于**查看系统和驱动的统计信息、调试运行状态**。
+
+**历史与驱动视角**：最初，/proc 只是用来**查看系统中运行的进程（Process）信息**的（你可以看到一堆以数字命名的文件夹，就是进程的 PID）。
+后来，内核开发者觉得这个虚拟文件系统太好用了，就开始往里面塞各种内核和驱动的运行状态。例如：
+
+---
+
+- `/proc/interrupts`：查看各个驱动的中断触发次数。
+- `/proc/meminfo`：查看内存使用情况。
+- `/proc/devices`：查看当前注册的字符设备和块设备的主设备号。
+- `/proc/device-tree/compatible`：查看当前采用的设备树。
+
+---
+
+由于缺乏规范，/proc 逐渐变成了一个“垃圾桶”，各种杂乱无章的内核信息都被扔在里面，非常混乱。这就导致了后来 /sys 的诞生。
+
+## `/sys`目录
+
+sysfs（虚拟文件系统），在 Linux 2.6 内核引入。它是为了解决 /proc 的混乱而诞生的。
+
+**驱动视角**：现代 Linux 驱动引入了**“设备模型”（Device Model）**。它将系统中的硬件抽象为总线（Bus）、设备（Device）、驱动（Driver），/sys 目录就是这个内核设备模型在用户空间的真实映射，用于**展示硬件**的拓扑结构，并通过读写属性文件来**配置硬件参数或获取硬件状态**。
+
+---
+
+- 在驱动代码中，**每一个底层的数据结构（kobject）都会在 /sys 下自动生成一个对应的文件夹**。
+- 驱动开发者可以利用 sysfs 提供的 API（如 DEVICE_ATTR 宏），在这些文件夹下生成具体的文本文件，用来暴露硬件的**属性（Attributes）**。
+
+## `/boot`目录
+
+设备树文件和配置文件在这里。
+
+配置文件`UbuntuEnv.txt`：配置设备树插件的开启与关闭，内核的启动参数，选择启动的内核。
+
+# 常用命令
+
+## 文件夹
 
 有一个最大的文件夹称为根目录`/`，其下有`home`(内包含所有普通用户的目录); `root`(超级用户的home目录); bin(常用命令); boot(启动目录); dev(设备文件，任何设备都是以文件形式存在此目录中); etc(配置文件); lib(系统的函数库); var(存可变文件)等文件夹。
 - `pwd(Print Work Directory)`:打印当前工作目录。
@@ -348,7 +2210,8 @@ sudo chmod -R(Recursive) 777 /home
 // 755 所有用户都能读取·执行·文件
 // 744 所有用户都能读取文件
 ```
-## 文件层级
+## 文件
+
 ``` bash
 touch /home/my_project/main.c  # 创建一个空文件
 cat   /main.c  # 查看文件
@@ -361,22 +2224,20 @@ rm [-R -f] 删除文件
 
 **`|`管道符，将左侧命令的结果作为右侧命令的输入。**
 
-## 交叉编译
-若需要编译出能ARM板能执行的程序，需要用GCC交叉编译：
-``` bash
-arm-buildroot-linux-gnueabihf-gcc -o hello hello.c
-```
-## 命令行输入形参
-.c文件采用`int argc, char** argv`方式处理命令行输入形参。
+## 资源
 
-`argv[0]` 默认为为文件名，方便处理错误信息；**传入的形参可以为其他文件**，可以在此`.c`程序中使用文件io函数对其进行处理。
+### `top`
 
-## 资源相关
+**使用`top`查看线程的 CPU 的使用率**：
 
-**使用`top`查看进程的 CPU 的使用率**，`top -H`查看线程的 CPU 使用率，`top -H -p <PID>`查看指定进程的线程的 CPU 占用率。
+| 命令                  | 作用                                  |
+| --------------------- | ------------------------------------- |
+| `top -H(显示TID)`     | 查看系统**所有线程**的 CPU / 资源占用 |
+| `top -H -p <进程PID>` | 查看**指定进程**下所有线程的 CPU 占用 |
 
 ---
 
+### `ps`
 | `ps`    | 仅显示**当前终端**的进程（极简）           |
 | ------- | ------------------------------------------ |
 | `ps -l` | 长格式显示当前终端进程（含优先级、状态码） |
@@ -397,8 +2258,9 @@ ps -Lf 12345    #-L显示线程的ID f=全格式
 
 ---
 
+### `kill`
+
 **`kill`的本质不是直接 “杀死” 进程**，而是向进程发送**信号（Signal）**，进程根据信号做出响应（终止、暂停、重新加载配置等）。
-权限问题：普通用户只能终止自己的进程，终止 root 进程会报错Operation not permitted（需加sudo）；
 僵尸进程：kill -9也无法终止（进程已死，只是未被父进程回收），需终止父进程（PPID）；
 优雅退出 vs 强制终止：优先用kill PID（信号 15），让进程释放资源；只有进程无响应时，再用kill -9（可能导致数据丢失）。
 
@@ -435,56 +2297,314 @@ kill -18 12345
 cat /proc/devices
 ```
 
+## 性能排查
 
+### 诊断直觉
 
-# shell脚本
+排查链路：**系统异常 -> 判断资源类型 -> 定位进程/线程 -> 定位函数 -> 定位内核/驱动**。
 
-查看当前环境变量：
-
-``` bash
-echo $PATH
+``` text
+                    系统卡了
+                       │
+                      top
+                       │
+        ┌──────────────┼──────────────┐
+        ↓              ↓              ↓
+      us 高           sy 高          wa 高
+        │              │              │
+  用户代码计算      内核/syscall       I/O
+        │              │              │
+      perf        strace/perf       iostat
 ```
 
-`$` 是 Shell 的**变量解引用符号**，用于告诉 Shell：**后面的字符串是一个变量名，需要替换为该变量的实际值**。
+再加：
 
-`PATH` 是 Shell 的**环境变量**（由系统 / Shell 初始化，存储了系统查找可执行程序的路径列表，路径之间用冒号 `:` 分隔。控制台输入命令首先查找内置命令，如果没有找到内置命令就在`PATH`的路径中去查找是否有对应的可执行的程序。
+``` text
+hi / si 高
+    │
+    ↓
+IRQ / softirq
+    │
+    ↓
+/proc/interrupts
+```
 
-<img src="Linux应用开发/查看环境变量.png" alt="查看环境变量" style="zoom: 67%;" />
+以及：
 
----
+``` text
+CPU不高，但 latency 高
+    │
+    ├── scheduling
+    ├── lock
+    ├── sleep
+    ├── IRQ
+    └── blocking
+```
 
-目前最常用的解释shell命令的解释器就是`/bin/bash`解释器。
+### `uptime`：系统负载
 
-<img src="C:/Users/CJ/AppData/Roaming/Typora/typora-user-images/image-20251220170122203.png" alt="image-20251220170122203" style="zoom:67%;" />
+#### 问题现象
 
-编写`shell`脚本首先需要指定使用什么`shell`解释器：
+假设现在机器人突然出现：
+
+- 控制周期从 1 ms变成偶尔 3~10 ms；
+- CPU 使用率突然升高；
+- 整个板子偶尔卡顿。
+
+第一反应不要看代码。先跑：
+
+``` shell
+# 最后三位分别是 1min，5min，15min 的平均系统负载
+cat@lubancat:~/robot_deploy$ uptime
+ 14:55:28 up 17 min,  1 user,  load average: 3.41, 3.88, 2.94
+```
+
+> **Load Average 不是 CPU utilization。**
+
+Linux load 大致统计：**正在 CPU 上运行 + 等待 CPU 的 runnable task + 部分不可中断睡眠任务**。
+
+所以可能出现：`CPU idle = 80%` 但是 `load average = 8`，这并不矛盾。可能有很多进程处于D态：也就是不可中断睡眠任务。例如卡在：
+
+- eMMC；
+- NFS；
+- 驱动；
+- 块设备；
+- 某些内核等待。
+
+#### 怎么判断负载高不高？
+
+假如 RK3588 有 `8 CPU cores`，粗略可以这样理解：
+
+- load ≈ 1：意味着平均大约有 1 个执行流需要 CPU。
+
+- load ≈ 8：说明 8 核基本都可能有活干。
+
+- load ≈ 16：说明平均：8 个在执行 + 8 个在等待。
+
+当然这只是建立直觉，不是严格等号。所以以后看到：load average = 12。**第一反应应该是：我的机器有几个 CPU？看：**
 
 ```shell
-#!/bin/bash
+nproc
+# 或者
+cat /proc/cpuinfo
 ```
 
----
+#### 
 
-在shell中定义变量**不允许有空格**！
+```
 
-单引号抑制**所有扩展**（包括变量扩展），直接把`$var`当成普通字符串传递给`echo`，如果使用`''`定义变量的话`$`和`$()`将不会被视为语法。
+top
+free -h
+vmstat 1
+```
 
-变量是**存储字符串**的 “容器”（比如 `file_pattern="*.txt"`，变量里存的是字符串 `*.txt`）。
+再看：
 
-在shell中也是使用`$`和`$()`来使用定义的变量。
+```
+dmesg | tail -n 50
+```
 
-使用`unset 变量名`来删除变量。
+这五个命令是第一层。
+
+### `top`：第一核心命令
+
+<img src="./assets/top命令分析.png" alt="top命令分析" style="zoom:80%;" />
+
+#### `%Cpu(s)`解读
+
+`top`命令包含`uptime`命令的功能；此外首先关注：
+
+``` c++
+%Cpu(s): 0.6 us, 2.6 sy,  0.0 ni, 96.7 id, 0.0 wa, 0.0 hi,  0.0 si,  0.0 st
+```
+
+- `us`：CPU 在执行用户态程序，例如神经网络推理、矩阵运算、C++算法代码通常主要贡献。**如果`us = 90%，sy = 3%`一般说明 CPU 主要在算用户代码**。这时候**下一步应该找哪个 process/thread 的哪个 function**最终可能用：
+
+  ```
+  perf top
+  ```
+
+- `sy`：CPU 在执行kernel mode，例如执行系统调用进入内核：
+
+  ```c
+  read()
+  write()
+  ioctl()
+  send()
+  recv()
+  ```
+  如果**此项占比较高则排查方向不是优化 C++ 数学计算，而应该是为什么这么频繁进入 kernel？**后面会用：
+  
+  ```shell
+  strace
+  perf
+  ```
+  
+- `id`：CPU 没活干的时间，如果此项占比较高则说明CPU算力整体非常富裕。所以如果**程序 latency 很高但`id = 90%`就不能简单说CPU性能不够**。可能是：**sleep、锁竞争、I/O调度、中断、阻塞等问题**。
+
+- `wa`：经常被简单理解为：CPU 在等磁盘。嵌入式里很常见：
+
+  - SD 卡慢；
+  - eMMC 抖动；
+  - logging 写太多；
+  - 文件系统 sync；
+  - 数据记录线程持续落盘。
+
+- `hi(hardware interrupt)/si(software interrupt)`：如果`hi / si`异常高，就要开始怀疑：
+
+  ```text
+  NIC
+  EtherCAT
+  USB
+  CAN
+  UART
+  timer
+  driver
+  ```
+
+  例如：
+
+  ```
+  EtherCAT NIC
+       ↓
+  大量 IRQ
+       ↓
+  某 CPU
+       ↓
+  实时线程也绑在这个 CPU
+  ```
+
+  **就可能发生IRQ→抢占实时控制代码→jitter**。后面会重点学：
+
+  ```
+  cat /proc/interrupts
+  ```
+
+### `vmstat 1`：第二核心命令
+
+``` shell
+cat@lubancat:~/robot_deploy$ vmstat 1
+procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----
+ r  b     交换 空闲      缓冲   缓存       si   so   bi    bo   in   cs    us   sy  id  wa st
+ 2  0      0 13056208  64832 1377332    0    0    44    11  1206  1354   1    3   96  0  0
+ 3  0      0 13056208  64832 1377332    0    0     0     0  9578  10909  1    3   97  0  0
+ 1  0      0 13056208  64832 1377332    0    0     0     0  9646  11054  1    3   96  0  0
+ 1  0      0 13056208  64832 1377332    0    0     0    52  10105 12861  2    4   94  0  0
+ 1  0      0 13056208  64832 1377332    0    0     0     0  9427  10571  1    3   97  0  0
+```
+
+#### 字段解读
+
+- `r`：Runnable tasks：大致为**正在运行+等待 CPU的任务**。如果 8 核 CPU 且 r = 1~4，CPU 通常不算拥挤。如果长期 r = 20 说明 CPU run queue 很拥挤。
+
+  ---
+
+- `b`：Blocked processes：可能很多 task 正在不可中断等待。如果出现：
+
+  ```text
+  load 很高
+  CPU idle 很高
+  b 很高
+  ```
+
+  这是非常典型的信号：**不是CPU算不动，而是大量任务阻塞了**。
+
+  ---
+
+- `cs`：context switch：对实时程序特别重要。假设写了大量线程：
+
+  ```
+  Thread A
+  Thread B
+  Thread C
+  Thread D
+  ...
+  ```
+
+  互相：
+
+  ```
+  mutex
+  condition_variable
+  sleep
+  wake
+  ```
+
+  那么：context switch 可能很多。以后遇到典型表现为：**CPU利用率并不高，但实时性很差。**
+
+  其中一个排查方向就是大量上下文切换。后面我们会专门讲：
+
+  ```
+  pidstat -w
+  ```
+
+  找出谁在切。
+
+### `free`：查看内存
 
 ```shell
-$0 # 脚本的文件名
-$1 # 第一个参数
-$2 # 第二个参数
-...
-
-$#    # 传递给shell脚本的参数
-$@ $* # 传递给shell脚本的所有参数
-$$    # 当前shell脚本的所在的进程ID
+free -h
+               total   used   free   shared  buff/cache  available
+Mem:            8Gi    3Gi   500Mi    100Mi       4.5Gi       4.7Gi
 ```
+
+新手最容易看到：
+
+```
+free = 500 MiB
+```
+
+然后说内存马上没了。不对。**Linux 会主动拿闲置 RAM 做page cache、buffer**。所以更值得关注`available`。例如：
+
+```
+free      = 500 MB
+available = 4.7 GB
+```
+
+系统其实完全不缺内存。
+
+### `cat /proc/xxx`：内核暴露的信息
+
+服务器上你可能有：
+
+```
+htop
+pidstat
+iostat
+perf
+```
+
+但嵌入式板子经常只有：
+
+```
+BusyBox
+```
+
+所以你必须会：
+
+```
+/proc
+```
+
+因为这是内核直接暴露的信息。例如：
+
+```shell
+cat /proc/loadavg
+cat /proc/meminfo
+cat /proc/stat
+cat /proc/interrupts
+cat /proc/softirqs
+```
+
+即使系统里没有：
+
+```
+pidstat
+iostat
+htop
+```
+
+这些东西通常仍然存在。
 
 # makefile
 
@@ -516,10 +2636,6 @@ $(TARGET) : $(OBJ)
 # 包含依赖文件
 -include $(DEP)
 
-# （如果不生成.d文件）则显式声明头文件依赖
-# main.o : $(HEADERS)
-# utils.o : common.h
-
 # 编译规则
 %.o : %.c
 	gcc -c -o $@ $< -MD -MF $(@:.o=.d)
@@ -535,15 +2651,18 @@ clean:
 
 Linux 系统执行`gcc`命令时，会按以下优先级找编译器：
 
-1. 若设置了`CC`环境变量 → 优先用`$CC`指定的编译器（比如`CC=arm-buildroot-linux-gnueabihf-gcc`）；
+1. 若设置了**`CC`环境变量** → 优先用`$CC`指定的编译器（比如`CC=arm-buildroot-linux-gnueabihf-gcc`）；
 2. 若未设置`CC` → **按`PATH`环境变量的目录顺序**，找第一个名为`gcc`的可执行文件；
 3. 若`PATH`中无`gcc` → 检查系统`/usr/bin/gcc`软链接（默认指向原生 gcc，若被篡改则指向 ARM 编译器）。
 
 ``` makefile
 $@  # 表示当前规则的目标名
+
 $<  # 第一个依赖文件
 $^  # 所有的依赖
+
 %   # 通配符表示
+$() # 引用变量
 
 test : a.o b.o
 	gcc -o test $^
@@ -578,7 +2697,7 @@ C = $(filter %.o, $(B))      # 从变量中的值取出符合要求格式的值
 D = $(filter-out %.o, $(B))  # 从变量中的值取出不符合要求格式的值
 ```
 
-# 虚拟文件文件系统
+# 虚拟文件系统
 
 ![系统IO](Linux开发/系统IO.png)
 
@@ -698,7 +2817,7 @@ struct inode {
 
 查看`/proc/devices`可以获知系统中注册的设备，第一列为主设备号，第二列为设备名。
 
-# 进程
+# 进程/文件
 
 ## 进程状态
 
@@ -747,11 +2866,272 @@ root      9999  0.0  0.0      0     0 ?        D    12:00   0:00 [jbd2/sda1-8]
 # + (foreground) - 前台进程组
 ```
 
-### 等待队列
+## 常用库
 
-**等待队列属于"资源"，不属于"进程"**。
+### 时间库
 
-## 常用函数/库
+两种库核心都是解决两个问题：
+
+- 现在几点？例如：
+
+  ```
+  2026-08-18 14:30:25
+  ```
+
+  这是**现实世界时间 / wall-clock time**。
+
+- 过了多久？例如：一次 inference 花了 1.37 ms这里根本不关心：`14:30:25`而是在测：Δt=t1−t0。这是**elapsed time / duration**。
+
+  典型用途：
+
+  - inference latency；
+  - 控制周期；
+  - timeout；
+  - jitter。
+
+  这时候应该优先用：`std::chrono::steady_clock`而不是 `system_clock`。
+
+#### `<time.h>`
+
+**只有需要和 Linux/POSIX 系统接口交互时**，再直接使用 `<time.h>`。
+
+##### `time_t`/`time()`：纪元开始经过的秒数
+
+``` c
+time_t now = time(nullptr);
+```
+
+它通常可以理解成：**Unix Epoch→现在之间经过的秒数**。Unix Epoch 是：1970-01-01 00:00:00 UTC.
+
+但严格说，C/C++ 标准并没有要求 `time_t` 必须就是“Unix 秒数”，只是绝大多数 Linux 系统都是这么实现的。
+
+##### `struct tm`/`localtime()`：把秒数拆成年月日
+
+`time_t` 本身不适合人类阅读，所以有：
+
+``` c
+struct tm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+
+    int tm_wday;
+    int tm_yday;
+
+    int tm_isdst;
+};
+```
+
+比如：
+
+``` c
+std::time_t now = std::time(nullptr);
+std::tm* local  = std::localtime(&now);
+```
+
+这就把：`1787034625`解释成：
+
+```
+2026-08-18
+14:30:25
+```
+
+不过这里有两个很经典的坑：
+
+- `tm_year`不是直接的年份，而是：`year−1900`，所以：`local->tm_year + 1900`才是真实年份。
+
+- 而：`tm_mon`范围是：0 ~ 11所以：`local->tm_mon + 1`才是月份。
+
+这就是老 C API 很典型的问题：
+
+> 数据有语义，但是类型系统没有表达这种语义。
+
+##### `clock_t`/`clock()`：进程消耗的CPU时间
+
+`clock()` 测量的通常是：进程消耗的 CPU 时间，而不是现实经过时间。比如程序：
+
+```c
+sleep(5);
+```
+
+现实中过了：5s但这个进程可能几乎没有使用 CPU。所以：
+
+```
+clock()
+```
+
+测出来可能远远不到 5 秒。
+
+##### `struct timespec`/`clock_gettime()`：可选时钟源（纳秒级）
+
+常用的时钟类型 (`clk_id`)，这是该函数最灵活的地方，可以根据需求选择不同的“时钟源”：
+
+| **时钟类型**               | **描述**                                                     |
+| -------------------------- | ------------------------------------------------------------ |
+| `CLOCK_REALTIME`           | **系统实时时间**（墙上时钟）。反映从 1970 年开始算经过的秒数。如果你手动修改了系统时间，它会跟着变。 |
+| `CLOCK_MONOTONIC`          | **单调时钟**。从系统启动开始计时经过的秒数，不受系统时间修改的影响（对应`std::chrono::steady_clock`）。**最适合用来测量程序运行耗时**。 |
+| `CLOCK_PROCESS_CPUTIME_ID` | **进程 CPU 时间**。统计当前进程在 CPU 上运行的总时间（不包括休眠时间）。 |
+| `CLOCK_THREAD_CPUTIME_ID`  | **线程 CPU 时间**。仅统计当前线程消耗的 CPU 时间。           |
+
+`clock_gettime`比传统的 `time()`（秒级）或 `gettimeofday()`（微秒级）更强大，因为它能达到 **纳秒级（Nanoseconds）** 的精度。
+
+``` c++
+// clk_id: 指定要使用的“时钟类型”（见下文）。
+// *tp: 指向 timespec 结构体的指针，函数会将获取到的时间写入其中。
+// 返回值: 成功返回 0，失败返回 -1。
+int clock_gettime(clockid_t clk_id, struct timespec *tp);
+
+
+struct timespec {
+    time_t   tv_sec;        /* 秒 (seconds) */
+    long     tv_nsec;       /* 纳秒 (nanoseconds: 10^-9 秒) */
+};
+
+
+TIMESPEC2NS(time);//一个宏: struct timespec 结构体（包含秒和纳秒）转换成一个 64 位整数（uint64_t）的纳秒值。
+```
+
+#### `<chrono>`
+
+`chrono` 的设计比 `time.h` 高一个抽象层次。它的核心只有三个概念：
+
+​									$$Duration + Clock + TimePoint$$
+
+把这三个搞懂，`chrono` 基本就懂了。
+
+##### `duration`：一段时间
+
+```c++
+std::chrono::seconds()
+std::chrono::milliseconds()
+std::chrono::microseconds()
+std::chrono::nanoseconds()
+    
+    
+// 可以使用std::chrono::duration_cast<std::chrono::xxseconds>(xx) 进行安全类型转换
+auto us = std::chrono::duration_cast<std::chrono::microseconds>(ns);
+```
+
+都是`duration`，也就是**一段时间有多长**。例如：
+
+```c++
+std::chrono::milliseconds timeout{10};
+```
+
+表示：10ms.不是：某个时间点是 10 ms。而是有一段 10 ms 的长度。
+
+---
+
+实际上：`std::chrono::milliseconds`大致等价于：
+
+```c++
+std::chrono::duration<long long, std::milli>
+```
+
+其中：`std::milli`代表：$10^{-3}s$；
+
+类似：`std::chrono::microseconds`就是：$10^{-6}s$；
+
+类似：`std::chrono::nanoseconds`就是：$10^{-9}s$。
+
+所以 chrono 把**数值和单位放进了类型系统**；这就是它比传统 C API 好很多的核心原因。
+
+可以使用`.count`来获取**这个 duration 以自身单位表示的数值**：
+
+``` c++
+std::chrono::nanoseconds d{1000};  // 返回 1000，而不是0.000001 second
+```
+
+##### `time_point`/`xxx_clock::now()`：时间点
+
+如果 `duration` 是过了多久，那么：`time_point`就是时间轴上的某个点。例如：
+
+```c++
+auto start = std::chrono::steady_clock::now();
+```
+
+这里`start`的类型本质上就是：
+
+```c++
+std::chrono::time_point<std::chrono::steady_clock>
+```
+
+---
+
+chrono 里最常用的三个 Clock：
+
+```c++
+std::chrono::system_clock			// 现实世界当前时间;可以与 time_t 互转。适合：日志时间、年月日、timestamp
+std::chrono::steady_clock			// 专门适合测latency。单调时钟，时间不会倒退
+std::chrono::high_resolution_clock
+```
+
+其中真正需要重点掌握前两个。
+
+##### `sleep for()`和`sleep until()`
+
+chrono 还能很好地描述休眠。例如：
+
+```c++
+std::this_thread::sleep_for(std::chrono::milliseconds(10));
+```
+
+意思是：休眠大约 10 ms。这里参数就是`duration`；语义是**睡多久**。
+
+---
+
+而：
+
+```
+std::this_thread::sleep_until(next);
+```
+
+参数则是：`time_point`，语义是**睡到什么时候**。比如要做一个：1kHz循环，即：T=1ms.很多初学者会写：
+
+```c++
+while (running) {
+    do_work();
+
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(1));
+}
+```
+
+这其实有问题。假设：
+
+```c++
+do_work = 0.2 ms
+sleep   = 1.0 ms
+```
+
+实际周期就是：1.2ms而不是：1ms.还会不断发生 drift。
+
+------
+
+更合理的思路是：
+
+```c++
+using clock = std::chrono::steady_clock;
+
+
+auto next = clock::now();
+
+
+while (running) {
+    next += std::chrono::milliseconds(1);
+
+
+    do_work();
+
+
+    std::this_thread::sleep_until(next);
+}
+```
 
 ### `<fcntl.h>` 
 
@@ -767,13 +3147,55 @@ O_CREAT     // 如果不存在则创建
 O_TRUNC     // 如果存在则清空
 O_APPEND    // 追加模式
 
-// 文件状态标志：
-O_NONBLOCK  // 非阻塞模式 - 本程序中使用，避免串口阻塞
-O_SYNC      // 同步写入
-O_NOCTTY    // 不分配控制终端 - 防止串口成为控制终端
+```
 
+---
+
+``` c
+// 文件状态标志：
+O_NONBLOCK  // 非阻塞模式 - 避免串口阻塞
+```
+**文件描述符默认是阻塞模式：**执行 `read() / write()` 等 I/O 系统调用时，如果操作条件不满足（如无数据可读、发送缓冲区已满），**进程会被内核挂起阻塞**，直到条件满足才返回。设置 `O_NONBLOCK` 后，I/O 调用永远不会阻塞等待：
+
+- 条件满足时，正常完成读写并返回实际操作的字节数；
+- 条件不满足时，立即返回 `-1`，并将 `errno` 设置为 `EAGAIN`（Linux 中等价于 EWOULDBLOCK），表示 “资源暂时不可用，请稍后重试”。
+
+---
+
+```c
+O_SYNC      // 同步写入
+```
+
+默认情况下，Linux 的 `write()` 采用**延迟写**机制：调用仅把数据写入内核页缓存（Page Cache）就立即返回，真正的磁盘写入由内核后台线程异步完成。这种方式性能很高，但掉电或系统崩溃时，可能丢失缓存中尚未刷盘的数据。
+
+`O_SYNC` 是 Linux `open()` 系统调用的**同步写文件状态标志**，属于 POSIX 标准定义，核心作用是**强制写操作必须持久化到物理磁盘后才返回**，保证数据的落盘一致性。
+
+可以理解为：**每次 write 之后自动执行一次 `fsync(fd)`，会造成严重性能瓶颈**。工程上更推荐批量写入后手动调用 `fsync()`，而非全程开启该标志。
+
+---
+
+```c
+O_NOCTTY    // 不分配控制终端 - 防止串口成为控制终端
+```
+专门针对终端设备场景，核心作用是**阻止`open()`的终端设备成为当前进程的控制终端**。
+
+在 Unix/Linux 的会话 - 进程组模型中，每个会话可以关联一个**控制终端（Controlling Terminal）**：
+
+- 控制终端负责向前台进程组发送终端信号（如 Ctrl+C 触发 `SIGINT`、终端断开触发 `SIGHUP`），是交互进程信号输入的核心来源。
+- 默认规则：**没有控制终端的进程**打开一个终端设备文件时，该终端会自动成为该进程（及其所在会话）的控制终端。
+
+设置 `O_NOCTTY` 后，即使当前进程没有控制终端，打开该终端设备时也**不会将其设置为进程的控制终端**，仅作为普通设备文件用于数据读写。
+
+---
+
+```
+O_CLOEXEC
+```
+1
+
+```c
 // 函数：
-open()      // 打开文件 - 本程序核心：打开串口设备
+open()      // 打开文件 - 如打开串口设备
 fcntl()     // 文件描述符控制
 ```
 ### `<unistd.h>`
@@ -870,9 +3292,7 @@ int ioctl(int fd, unsigned long request, ...);
 
 ## 阻塞查询
 
-​	阻塞查询会在进程执行设备操作时如果**不能获取到资源则挂起进程**，直到满足可操作的条件后再进行操作。被挂起的进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足。
-
-​	在驱动程序中使用**等待队列**来实现阻塞进程的唤醒。
+​	阻塞查询会在线程/进程执行设备操作时如果**不能获取到资源则挂起线程/进程**，直到满足可操作的条件后再进行操作。被挂起的线程/进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足，在驱动程序中使用**等待队列**来实现阻塞线程/进程的唤醒。
 
 ``` c
 // 定义等待队列头部
@@ -965,7 +3385,1486 @@ if (fds[0].revents & POLLOUT) {
 
 ### `epoll`
 
+### `select`
 
+`select` 本质是**IO 多路复用**核心接口，用来**单线程同时监控多个文件描述符（fd）**，解决「单个阻塞 IO 卡住，没法处理其他 IO」的问题。
+
+---
+
+**单线程监控多个 IO**：不用开多线程，一个线程就能同时等：键盘、串口、网络 socket、设备文件（驱动节点）等多个 fd。
+
+**避免单个 IO 无限阻塞**：普通 `read` 会阻塞在**单个 fd**上，有数据才返回；`select` 阻塞在**多个 fd**上，**任意一个就绪就立刻返回**，不会死等某一个。
+
+**实现带超时的 IO 操作**：可以给阻塞加超时时间，超时就返回，不会永久卡住。
+
+**适用场景**：嵌入式串口 / 设备监控、轻量级网络服务、多 IO 事件轮询（Linux 早期经典方案）。
+
+---
+
+``` c
+#include <sys/select.h>
+#include <sys/time.h>
+
+/* 返回值：就绪的fd数量, =0(超时) */
+int select(int nfds, 
+           fd_set *readfds, 
+           fd_set *writefds, 
+           fd_set *exceptfds, 
+           struct timeval *timeout);
+```
+
+| 参数        | 含义                                                         |
+| ----------- | ------------------------------------------------------------ |
+| `nfds`      | 待监控的**最大文件描述符 + 1**（必须填，内核遍历效率要求）   |
+| `readfds`   | 读事件集合：监控这些 fd**是否有数据可读**（最常用）          |
+| `writefds`  | 写事件集合：监控这些 fd**是否可写**                          |
+| `exceptfds` | 异常事件集合：监控 fd 是否发生异常                           |
+| `timeout`   | 超时时间：- `NULL`：永久阻塞- `{0,0}`：非阻塞，立即返回- 赋值：定时阻塞，超时返回 |
+
+fd_set 是文件描述符集合，必须用以下宏操作，不能直接赋值：
+``` c
+// 清空整个fd集合
+void FD_ZERO(fd_set *set);
+
+// 将fd添加到集合中
+void FD_SET(int fd, fd_set *set);
+
+// 将fd从集合中移除
+void FD_CLR(int fd, fd_set *set);
+
+// 判断fd是否在集合中（是否就绪）
+int FD_ISSET(int fd, fd_set *set);
+```
+
+# 线程
+
+**线程模型**：现代 Linux 使用 **NPTL**（Native POSIX Thread Library），**线程是轻量级进程**，内核中每个线程用一个 `task_struct` 表示，共享同一进程的地址空间、文件描述符表等。
+
+## pthread 库
+
+### 编译链接
+
+编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接 pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；然后`#include <pthread.h>`。
+
+``` bash
+gcc xxx.c -pthread
+```
+
+### 创建线程
+
+``` c
+#include <pthread.h>
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine) (void*), void *arg);
+//argc[0]：线程号变量的指针
+//argc[1]：线程的属性，一般传入NULL表示默认
+
+//argc[2]：函数指针，线程的执行函数
+//garc[3]：传入参数，不传入为NULL 传入多个参数则使用结构体 (注意void *可以直接传入变量，使用时将其数据类型强制转化回来就行)
+//如果为地址传入，则两个直接相关，变量传入则相互独立
+
+//注意线程运行顺序随机，因此需在主线程中加入sleep()函数，释放CPU，使其去执行子线程。当主线程伴随进程结束，所创建出来的子线程也会结束。
+```
+### 退出线程
+
+``` c
+#include <pthread.h>
+//线程自身主动退出
+void pthread_exit(void *retval); //退出可以给主线程传递一个void *数据(主线程通过join函数获取)，
+                                 //不传为NULL 传出的数据需要用static修饰
+
+//其他线程让其退出
+int pthread_cancel(pthread_t thread); //argc[0]:tid号 成功：返回0
+
+
+//线程资源回收，等待子线程执行完毕再退出主线程
+int pthread_join(pthread_t thread, void **retval);       //阻塞方式,直到成功返回才返回
+int pthread_tryjoin_np(pthread_t thread, void **retval); //非阻塞,成功返回 0
+//argv[0]:tid
+//argv[1]:接受传入数据(类型为地址)的变量的地址(万能指针)
+```
+### 获取线程号
+
+Linux采用POSIX线程。进程有唯一对应的**PID**,线程有**TID**.本质是一个`pthread_t`变量,但对于线程号而言，在其所属的进程上下文中才有意义。
+
+``` c
+#include <pthread.h>
+int main()
+{
+	pthread_t pthread_self(void);//获取主线程的tid号
+}
+
+typedef unsigned long int pthread_t;
+pthread_t tid_1 = 0;
+```
+### 线程名称
+
+线程名称不能为空或者`\0`，也不能超过 15 字节限制。**设置线程名称：**
+
+``` c
+// 设置成功返回 0
+int pthread_setname_np (pthread_t __target_thread, const char *__name)  // 设置线程名称
+   
+    
+// 获取当前线程的 pthread_t 对象
+const pthread_t self = pthread_self();
+// 设置线程名称
+int result = pthread_setname_np(self, name);
+```
+
+---
+
+**获取线程名称：**
+
+``` c++
+extern int pthread_getname_np (pthread_t __target_thread, char *__buf, size_t __buflen)
+
+
+char actual_name[16]{};
+
+result = pthread_getname_np(self, actual_name, sizeof(actual_name));
+
+if (result != 0) {
+    return thread_setup_error("pthread_getname_np", result);
+}
+```
+
+### 绑核（affinity）
+
+``` c
+#include<pthread.h>
+int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
+
+int pthread_getaffinity_np (pthread_t __th, size_t __cpusetsize, cpu_set_t *__cpuset)
+    
+#include<sched.h>
+
+// 进行绑核
+cpu_set_t expected;
+CPU_ZERO(&expected);
+
+for (const int cpu : options.cpu_ids) {  // options.cpu_ids 是一个 vector 容器
+    CPU_SET(cpu, &expected);
+}
+
+result = pthread_setaffinity_np(self, sizeof(expected), &expected);
+
+// 验证绑核
+cpu_set_t actual;
+CPU_ZERO(&actual);
+
+result = pthread_getaffinity_np(self, sizeof(actual), &actual);
+
+if (result != 0) {
+    return thread_setup_error("pthread_getaffinity_np", result);
+}
+if (!CPU_EQUAL(&expected, &actual)) {
+    return thread_setup_error("thread affinity verification", 0);
+}
+```
+
+### 调度策略与优先级
+
+​					$$\boxed{ \text{选择调度策略} \rightarrow \text{检查优先级} \rightarrow \text{设置 policy/priority} \rightarrow \text{读取} \rightarrow \text{验证} }$$
+
+#### `pthread_setschedparam()`
+
+**pthread 并不是单独发明了一套线程优先级系统。** 在 Linux 上，pthread 线程最终对应内核可调度的 task，因此 `pthread_setschedparam()` 本质上是在给某个线程配置 Linux scheduler 使用的：$(\text{scheduling policy},\ \text{scheduling priority})$，也就是代码里的：
+
+```c
+#include<pthread.h>
+int pthread_setschedparam (pthread_t __target_thread, int __policy, const struct sched_param *__param)
+    
+#include<sched.h>
+/* Data structure to describe a process' schedulability.  */
+struct sched_param
+{
+  int sched_priority;
+};  
+  
+
+sched_param requested{};
+requested.sched_priority = options.priority;
+
+pthread_setschedparam(self, policy, &requested);
+```
+
+其中 `policy` 决定“用什么调度规则”，`requested.sched_priority` 决定“在这个规则下是什么优先级”。
+
+#### `pthread_getschedparam()`
+
+**获取目标线程的调度策略和优先级设置**：
+
+``` c
+#include<pthread.h>
+int pthread_getschedparam (pthread_t __target_thread, int *__restrict policy, struct sched_param *__restrict param)
+    
+    
+int actual_policy = 0;
+sched_param actual{};
+result = pthread_getschedparam(self, &actual_policy, &actual);
+
+if (result != 0) {
+    return thread_setup_error("pthread_getschedparam", result);
+}
+
+if (actual_policy != policy || actual.sched_priority != options.priority) {
+    return thread_setup_error("thread scheduling verification", 0);
+}
+```
+
+
+
+#### 调度策略
+
+``` c++
+/* Scheduling algorithms.  */
+#define SCHED_OTHER		0  // 普通 Linux 调度
+#define SCHED_FIFO		1  // 实时 FIFO 
+#define SCHED_RR		2  // 实时 Round-Robin(带时间片)
+
+
+#ifdef __USE_GNU
+# define SCHED_BATCH		3  // batch workload
+# define SCHED_ISO		    4
+# define SCHED_IDLE		    5  // 极低优先级普通任务
+# define SCHED_DEADLINE		6  // deadline-based RT scheduling
+
+# define SCHED_RESET_ON_FORK	0x40000000
+#endif
+```
+
+##### `SCHED_FIFO`：实时程序
+
+###### `RT priority`
+
+Linux 对 `SCHED_FIFO` / `SCHED_RR` 使用 **real-time static priority**，Linux 上范围通常是：$\boxed{1\sim99}$，而且$\boxed{\text{数值越大，优先级越高}}$，例如：
+
+```c
+priority 90    很高
+priority 80
+priority 70
+priority 50
+priority 10
+priority 1     最低 RT priority
+```
+
+Linux scheduler 会优先选择最高 RT priority 的 runnable thread。`SCHED_FIFO` 和 `SCHED_RR` 的 Linux RT priority 范围为 1–99，而普通调度策略的 `sched_priority` 必须为 0。
+
+**查询系统支持的优先级：**
+
+``` c
+if (policy == SCHED_FIFO) {
+    
+    const int minimum = sched_get_priority_min(SCHED_FIFO);
+    const int maximum = sched_get_priority_max(SCHED_FIFO);
+    
+    if (minimum < 0 || maximum < 0 || options.priority < minimum ||
+        options.priority > maximum) {
+        return thread_setup_error("SCHED_FIFO priority is out of range", EINVAL);
+    }
+}
+```
+
+
+
+###### `FIFO`是对于相同优先级
+
+`SCHED_FIFO`：$\boxed{\text{First In First Out}}$但这里最容易误解。它不是说：
+
+> 所有 realtime thread 按照到达时间排队。
+
+真正逻辑首先是：$\boxed{\text{优先级高的先运行}}$，只有**相同 RT priority**的多个 runnable `SCHED_FIFO` thread 之间，才涉及 FIFO queue。可以理解成 scheduler 为不同 priority 维护不同 runnable queue：
+
+```
+priority 90:
+    T1 → T2
+
+priority 80:
+    T3 → T4 → T5
+
+priority 70:
+    T6
+```
+
+scheduler 首先找：
+
+```
+最高的非空 priority queue
+```
+
+因此这里：
+
+```
+priority 90:
+    T1 → T2
+```
+
+先运行。Linux 的调度规则本质上就是：$\boxed{ \text{highest runnable RT priority} \rightarrow \text{head of that priority queue} }$。
+
+###### 高优先级可以抢占低优先级
+
+例如：
+
+```
+RT_A     SCHED_FIFO  priority 80
+RT_B     SCHED_FIFO  priority 60
+```
+
+开始：
+
+```
+RT_B running
+████████████████████
+```
+
+突然 RT_A 被 timer 唤醒：
+
+```
+                RT_A wake up
+                     ↓
+RT_B ███████████|
+RT_A            ███████████
+```
+
+因为：80>60，于是：$\boxed{\text{RT\_A立即抢占 RT\_B}}$，Linux 文档明确规定：当一个更高 static priority 的实时线程变为 runnable 时，当前低优先级线程会被 preempt。
+
+###### 没有普通意义上的 time slice
+
+这是它非常重要的特性。假设：
+
+```
+Thread A
+SCHED_FIFO
+priority = 80
+```
+
+一旦它成为最高优先级 runnable thread，它可能一直运行：
+
+```
+CPU
+ │
+ └── AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA...
+```
+
+它不会因为：
+
+> “你已经运行 5 ms 了，该轮到别人了”
+
+而自动让出 CPU。
+
+`SCHED_FIFO` thread 通常一直运行到以下情况之一：
+
+```
+1. 主动 block / sleep
+2. 等待 mutex / event / I/O
+3. 被更高 priority thread 抢占
+4. 调用 sched_yield()
+```
+
+Linux `sched(7)` 明确说明 `SCHED_FIFO` 没有 time slicing。
+
+这也是为什么：
+
+```
+while (true) {
+}
+```
+
+如果放在一个很高优先级的thread 里面是非常危险的。
+
+##### `SCHED_RR`：有时间片
+
+可以把它理解成：
+
+> **`SCHED_FIFO` + 同优先级线程之间具有时间片。**
+
+例如：
+
+```
+A    SCHED_RR priority 70
+B    SCHED_RR priority 70
+C    SCHED_RR priority 70
+```
+
+可能：
+
+```
+CPU:
+
+AAAAA
+     BBBBB
+          CCCCC
+               AAAAA
+                    ...
+```
+
+当 A 使用完自己的 quantum：
+
+```
+A
+ ↓
+被放到 priority 70 queue 尾部
+```
+
+于是 B 运行。Linux 文档说明，`SCHED_RR` 基本继承 `SCHED_FIFO` 的规则，只是增加了 maximum time quantum；同优先级 thread 用完 quantum 后会移动到该优先级队列尾部。
+
+##### `SCHED_OTHER`：普通程序
+
+普通程序默认通常使用$\boxed{SCHED\_OTHER}$，这种情况下$\boxed{sched\_priority = 0}$；Linux 手册明确规定，`SCHED_OTHER`、`SCHED_BATCH` 和 `SCHED_IDLE` 的 `sched_priority` 必须为 0。
+
+###### `nice`值
+
+普通线程之间的权重更多通过$\boxed{nice}$来调整。例如：
+
+```
+nice -n 10 ./program
+```
+
+nice 范围通常是：$\boxed{-20\sim19}$，**数值和 RT priority 的方向相反**：
+
+```
+nice:
+-20    高
+  0    默认
++19    低
+```
+
+而 RT priority：
+
+```
+RT priority:
+
+99    高
+80
+50
+1     低
+```
+
+**一个 runnable 的 `SCHED_FIFO` / `SCHED_RR` 实时线程，会优先于普通 `SCHED_OTHER` runnable thread。**
+
+所以如果：
+
+```
+Thread A:
+SCHED_FIFO
+priority = 1
+
+Thread B:
+SCHED_OTHER
+nice = -20
+```
+
+只要 A 是 runnable：$\boxed{A\text{ 仍然属于 RT scheduling class}}$，不是说：
+
+```
+nice -20 > FIFO 1
+```
+
+这两个数字没有直接可比性。
+
+## C++线程库
+
+**面向对象封装，类型安全，支持 RAII**，底层通常基于 pthread 实现。C++11 起引入了线程支持库，包括线程管理、互斥量、条件变量、原子操作和 future 异步模型等。
+
+### 编译链接
+
+编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接 pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；然后`#include <thread>`。
+
+### 创建线程
+
+C++11标准线程库中采用` std::thread`类型表示一个线程变量：
+
+``` c++
+#include <thread>
+#include <iostream>
+
+void func(int x) {
+    std::cout << "Thread running, arg = " << x << std::endl;
+}
+
+int main() {
+    std::thread t1(func, 42);          // 传递函数和参数
+    std::thread t2([] { func(100); });  // lambda 方式
+
+    t1.join();
+    t2.join();
+}
+```
+
+### 核心操作函数
+
+| 操作               | 说明                                                         |
+| :----------------- | :----------------------------------------------------------- |
+| `.joinable()`      | 判断当前 `std::thread` 对象是否关联了一个活跃的执行线程，且尚未调用 `join()` 或 `detach()`。 |
+| `.join()`          | 阻塞当前线程，等待调用这个函数的目标子线程执行完毕，随后回收该子线程的系统资源。（只能在 `joinable() == true` 时调用，否则会抛出 `std::system_error` 异常。`detach()`同理） |
+| `.detach()`        | 将执行线程与 `std::thread` 对象分离，线程将在后台独立运行，**生命周期不再受线程对象管控**。绝对不能让分离线程访问已经销毁的局部变量 / 对象，否则会出现悬空引用、内存崩溃。 |
+| `.get_id()`        | 获取线程 ID。                                                |
+| `.native_handle()` | 获取底层 `pthread_t`（便于混合编程）。                       |
+
+**注意事项**：
+
+- 线程对象析构前必须处于不可汇合状态（`!joinable()`），否则 `std::terminate` 被调用。
+- 使用 RAII 包装（如 `std::jthread`）来保证异常安全。
+
+## 锁
+
+### 谁提供用户态的锁
+
+在 C++ 开发中，锁的概念确实非常容易混淆，因为我们实际上跨越了**操作系统层**、**语言标准层**和**硬件指令层**三个维度。
+
+为了理清这层关系，我们可以把它们想象成一家公司的三个层级：Linux 库是“保安部门”（直接管理资源），C++ 标准库是“行政部门”（提供统一的跨平台接口，底层还是求助保安），而自己实现则是“员工自己制定规则”（绕过保安，追求极致效率）。
+
+| **锁的类型 / 概念**    | **Linux/POSIX (<pthread.h>)** | **C++ 标准库 (std::)**      | **需要自己实现 (或第三方库)**    |
+| ---------------------- | ----------------------------- | --------------------------- | -------------------------------- |
+| **基础互斥锁 (Mutex)** | `pthread_mutex_t`             | `std::mutex`                | ❌ (通常不需要，系统自带足够好)   |
+| **读写锁 (R/W Lock)**  | `pthread_rwlock_t`            | `std::shared_mutex` (C++17) | ❌ (基础休眠版不需要，系统自带)   |
+| **自旋锁 (Spinlock)**  | `pthread_spinlock_t`          | ❌ **(C++标准无此现成类)**   | ✅ (使用 `std::atomic_flag` 手搓) |
+| **原子读写自旋锁**     | ❌ (POSIX无此纯自旋版本)       | ❌                           | ✅                                |
+| **顺序锁 (SeqLock)**   | ❌ (Linux内核有，应用层无)     | ❌                           | ✅                                |
+| **条件变量**           | `pthread_cond_t`              | `std::condition_variable`   | ❌                                |
+
+### 自旋锁
+
+#### 与内核自旋锁的区别
+
+**1.无法阻止被抢占：**
+
+在用户态（比如 C++ 应用程序），线程就像是租用 CPU 的打工人。不管当前有没有拿到自旋锁，只要操作系统分配给你的时间片用完了，调度器就会无情地把你踢下 CPU，换别的线程上。
+
+**灾难场景：** 线程 A 拿到了用户态自旋锁，正在修改数据，突然时间片到了，被操作系统挂起。此时线程 B 被调度上 CPU，也想拿这个锁。因为 A 拿着锁却不在运行，B 就会在 CPU 上疯狂执行 `while` 循环（死等），白白烧毁整个时间片的 CPU 资源。这在实时系统中是灾难性的延迟来源。
+
+内核态自旋锁：直接**禁用抢占 (`preempt_disable`)。**
+
+当代码运行在内核态并调用 `spin_lock()` 时，它不仅仅是去修改一个原子变量。它的底层实现会自动通知操作系统调度器：“从现在起，**不管我的时间片有没有用完，你都不准把我踢下 CPU！”**这就保证了，**只要内核线程拿到了自旋锁，它就一定能一口气把临界区的代码跑完并释放锁**。绝对不会出现“拿着锁去睡觉”或“拿着锁被强行换下班”的荒唐事。
+
+---
+
+**2.无法对抗硬件中断**
+
+**用户态：对硬件一无所知。**用户态程序根本没有权限去管网卡的硬件中断。
+
+**内核态：可以屏蔽硬件中断 (`spin_lock_irqsave`)。**在内核中，网卡接收到数据时会触发一个硬件中断。中断的优先级是极高的，它会瞬间打断当前 CPU 正在执行的任何普通代码。
+
+**灾难场景：** 假设主线程拿到了一个自旋锁，正在处理网卡缓存。突然，网卡来了一个新数据，触发了中断。CPU 立刻暂停主线程，跳去执行“网卡中断处理函数”。但是中断处理函数也需要访问同一个网卡缓存，于是它也去请求那个自旋锁。
+
+**结果：** 死锁！主线程拿着锁被中断打断了，中断函数在死等主线程释放锁。CPU 直接彻底卡死。
+
+为了解决这个问题，内核自旋锁提供了特权版本 `spin_lock_irqsave`。当内核线程获取这个锁时，**它会直接向 CPU 寄存器发送指令，把当前 CPU 的硬件中断接收功能给关掉！** 这样就保证了在修改核心数据时，连网卡、定时器这种底层硬件都无法打断它。用户态根本不可能有这种权限。
+
+---
+
+**3.爆炸半径不同**
+
+- **用户态自旋锁**写崩： 顶多就是你的**当前进程** CPU 占用率飙升到 100%（俗称死循环），或者你的电机控制进程卡死。你按一下 `Ctrl+C` 或者 `kill -9` 就能把进程杀掉，Linux 系统本身依然运行良好。
+- **内核态自旋锁**写崩： 如果你在编写内核驱动时，自旋锁忘记释放，或者引发了上面说的中断死锁，由于它禁用了抢占甚至中断，这个 **CPU 核心**就彻底变成了僵尸。如果你锁死了所有核心，整个 Linux 系统会瞬间失去响应（鼠标不动、键盘没反应、网络断开），直接触发 **Kernel Panic（内核恐慌）**，只能拔电源硬重启。
+
+#### pthread 库
+
+**核心API：**自旋锁（`pthread_spinlock_t`）。**核心特性**：完全排他性锁，等待线程不睡眠，而是在循环中不断检查锁状态（"自旋"）。
+
+``` c++
+#include <pthread.h>
+
+// 初始化自旋锁（pshared: 0=线程间共享，非0=进程间共享）
+int pthread_spin_init(pthread_spinlock_t *lock, int pshared);
+// 销毁自旋锁
+int pthread_spin_destroy(pthread_spinlock_t *lock);
+
+
+// 加锁（自旋直到锁可用）
+int pthread_spin_lock(pthread_spinlock_t *lock);
+// 尝试加锁（非阻塞）
+int pthread_spin_trylock(pthread_spinlock_t *lock);
+
+
+// 解锁
+int pthread_spin_unlock(pthread_spinlock_t *lock);
+
+```
+
+完整示例：
+
+``` c++
+pthread_spinlock_t spinlock;
+
+// 初始化
+pthread_spin_init(&spinlock, 0);
+
+// 加锁/解锁
+pthread_spin_lock(&spinlock);
+counter++;
+pthread_spin_unlock(&spinlock);
+
+// 销毁
+pthread_spin_destroy(&spinlock);
+```
+
+#### CPP手动实现
+
+C++ 标准库**没有直接提供自旋锁**，但可以使用`std::atomic_flag`（C++11 引入的**原子布尔类型**）轻松实现：
+
+``` c++
+#include <atomic>
+
+class Spinlock {
+private:
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;  // 初始化为清除状态
+
+public:
+    void lock() {
+        // test_and_set：设置标志为true，并返回之前的值。（和atomic<>的 exchange 操作类似）
+        // 如果之前是true则保持自旋
+        while (flag.test_and_set(std::memory_order_acquire)) {
+            // 可选：在自旋时让出CPU，降低CPU占用
+            // std::this_thread::yield();
+        }
+    }
+
+    void unlock() {
+        // 清除标志，允许其他线程获取锁
+        flag.clear(std::memory_order_release);
+    }
+
+    bool try_lock() {
+        return !flag.test_and_set(std::memory_order_acquire);
+    }
+};
+```
+
+使用示例：
+
+``` c++
+Spinlock spinlock;
+int counter = 0;
+
+void thread_func() {
+    for (int i = 0; i < LOOP_COUNT; i++) {
+        std::lock_guard<Spinlock> lock(spinlock);  // 可以和标准库的lock_guard配合使用
+        counter++;
+    }
+}
+```
+
+#### 注意事项
+
+- **仅适用于多核 CPU 系统**：单 CPU 系统上自旋锁会导致死锁（持有锁的线程无法被抢占）
+
+- **临界区必须极短**：通常只保护几个变量的操作（如计数器增减、链表节点插入）
+
+- 临界区内**绝对不能调用可能导致睡眠的函数**（如`malloc`、`printf`、`copy_from_user`等）
+
+- 高竞争场景下性能会急剧下降（大量 CPU 时间浪费在自旋上）
+
+### 互斥锁
+
+**核心特性**：完全排他性锁，任何时刻仅一个线程可持有，等待线程**进入睡眠状态**。
+
+#### pthread 库
+
+`pthread_mutex_t`：
+
+``` c++
+#include <pthread.h>
+
+// 初始化互斥锁（attr为NULL使用默认属性）
+int pthread_mutex_init(pthread_mutex_t *restrict mutex, const pthread_mutexattr_t *restrict attr);
+// 销毁互斥锁
+int pthread_mutex_destroy(pthread_mutex_t *mutex);
+
+// 加锁（阻塞，直到锁可用）
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+// 尝试加锁（非阻塞，立即返回）
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+
+// 解锁
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+```
+
+#### CPP线程库
+
+C++ 提供多种互斥锁（`mutex`）和自动锁管理。
+
+``` c++
+#include <mutex>
+
+std::mutex mtx;
+int counter = 0;
+
+void increment() {
+    std::lock_guard<std::mutex> lock(mtx);  // RAII 自动加解锁
+    ++counter;
+}
+
+// 或使用更灵活的 unique_lock
+void flexible_increment() {
+    std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+    // ... 一些不需要锁的操作
+    lock.lock();
+    ++counter;
+    lock.unlock();  // 可提前解锁
+}
+```
+
+
+
+#### 注意事项
+
+- 加锁和解锁必须**严格成对出现**，否则会导致死锁或其他线程永久阻塞；
+
+- 不能对未初始化或已销毁的互斥锁进行操作；
+
+- 默认互斥锁不支持递归加锁（同一线程重复加锁会导致死锁），如需递归锁需设置`PTHREAD_MUTEX_RECURSIVE`属性
+
+### 读写锁
+
+核心特性：**读共享、写独占**。多个线程可同时持有读锁，写锁持有期间所有其他线程都被阻塞。**读写锁仅用于读多写少场景**：读操作频率至少是写操作的 10 倍以上时，读写锁才能体现出性能优势
+
+#### 与原子读写锁的区别
+
+如果把这两种锁拆开来看，它们都具备“读写分离”（允许多个读者同时访问，但写者排他）的特性。它们之间真正的、也是唯一的根本区别在于：**当锁已经被别人占用时，当前申请锁的线程接下来该干什么？**
+
+| **特性**               | 标准读写锁                               | 原子读写锁                                   |
+| ---------------------- | ---------------------------------------- | -------------------------------------------- |
+| **抢锁失败时的行为**   | 线程休眠，让出 CPU                       | 线程死循环 (while)，霸占 CPU                 |
+| **唤醒延迟 (Latency)** | 较高（微秒级，受 OS 调度影响）           | **极低（纳秒级，几乎无缝衔接）**             |
+| **CPU 占用率**         | 锁竞争激烈时较低（都在睡觉）             | 锁竞争激烈时极高（甚至跑满 100%）            |
+| **适用临界区大小**     | 长临界区（涉及 I/O、复杂计算、系统调用） | **极短临界区（仅仅是复制几个字节的内存等）** |
+| **实时性保证**         | 差（存在调度不确定性）                   | **强（只要临界区极短，延迟是确定的）**       |
+
+**1.等待机制不同：**
+
+- **标准读写锁**（如 `std::shared_mutex` 或 `pthread_rwlock_t`）：
+  - **机制：阻塞挂起（睡觉）。** 如果线程 A 发现有写者占用着锁，它会立刻向操作系统报告：“我拿不到锁，我先睡一会儿，等锁空出来了你叫醒我。”
+  - **结果：** 操作系统会将线程 A 从 CPU 的运行队列中移出，放入睡眠队列。此时 CPU 会去执行其他线程的代码。
+- **原子读写锁**（手搓的基于 `std::atomic` 的自旋锁）：
+  - **机制：自旋死等（罚站）。** 如果线程 A 发现有写者占用，它绝不主动睡觉（在它拥有的时间片内），而是在一个 `while` 循环里不断地使用 CPU 检查锁的状态：“好了没？好了没？好了没？”
+  - **结果：** 线程 A 一直霸占着 CPU 核心不放，直到锁被释放它立刻冲进去。
+
+---
+
+**2.底层依赖不同：**
+
+- **标准读写锁：** 深度依赖**操作系统内核的调度机制**。在 Linux 中，它底层通常调用 `futex`（快速用户态互斥锁）。加锁解锁操作可能涉及用户态到内核态的切换。
+- **原子读写锁：** 完全剥离操作系统，纯粹依赖 **CPU 硬件级别的原子指令**（如 x86 的 `LOCK CMPXCHG`，即 CAS 操作）。它在纯用户态运行，系统调度器甚至不知道这个锁的存在。
+
+---
+
+**3.性能代价不同：**
+
+- **标准读写锁：**
+  - **优点：** 节省 CPU 资源。拿不到锁就让出 CPU 给别人干活。
+  - **致命缺点（对实时系统而言）：上下文切换带来的“毛刺”延迟。** 线程从休眠到被操作系统再次唤醒调度上 CPU，这个过程需要保存寄存器、切换内存页表等，通常会消耗 **几微秒到几十微秒**。
+- **原子读写锁：**
+  - **优点：零唤醒延迟。** 因为线程一直在 CPU 上盯着，锁一释放，它只需要几个纳秒（几条 CPU 指令的时间）就能立刻拿到锁进入临界区。
+  - **致命缺点：** 如果临界区代码执行时间很长，等锁的线程会把当前 CPU 核心跑满 100%，白白烧电而不产出任何价值。
+
+#### pthread 库
+
+`pthread_rwlock_t`；核心特性：**读共享、写独占**。多个线程可同时持有读锁，写锁持有期间所有其他线程都被阻塞。
+
+``` c++
+#include <pthread.h>
+
+// 初始化读写锁
+int pthread_rwlock_init(pthread_rwlock_t *restrict rwlock, const pthread_rwlockattr_t *restrict attr);
+// 销毁读写锁
+int pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+
+// 获取读锁（阻塞）
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+// 获取写锁（阻塞）
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+
+// 释放锁（读锁和写锁通用）
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+```
+
+#### CPP 库
+
+``` c++
+#include <shared_mutex>
+
+class shared_mutex {
+public:
+    // 写锁操作
+    void lock();        // 获取写锁（阻塞）
+    bool try_lock();    // 尝试获取写锁（非阻塞）
+    void unlock();      // 释放写锁
+
+    // 读锁操作
+    void lock_shared();        // 获取读锁（阻塞）
+    bool try_lock_shared();    // 尝试获取读锁（非阻塞）
+    void unlock_shared();      // 释放读锁
+};
+```
+
+#### 注意事项
+
+- 读锁和写锁使用**同一个`pthread_rwlock_unlock`函数**释放
+
+- 默认实现通常是**读者优先**，可能导致**写者饥饿**（大量读者持续持有锁时，写者永远无法获取锁）
+
+- 如需写者优先，可通过设置`pthread_rwlockattr_t`属性实现（不同系统支持程度不同）
+
+- 仅在**读多写少**场景下性能优于互斥锁，写操作频繁时性能可能更差
+
+### 实际工程中的选型场景
+
+在常规的业务逻辑或网络请求中，无脑使用 C++ 标准库的 `std::mutex` + `std::lock_guard` 是最安全、最正确的选择。
+
+但如果在开发对实时性要求极高的系统，比如需要以 1kHz 甚至 4kHz 频率运行的控制循环，情况就完全不同了。假设你的实时主线程负责接收底层网络传来的 PDO (Process Data Object) 数据，并计算各个节点的运动指令。如果在这个关键的纳秒级循环中使用 `std::mutex`，一旦发生竞争，实时线程就会被 Linux 内核挂起。这种挂起带来的上下文切换延迟（几十微秒到几毫秒不等）会导致控制周期的严重抖动 (Jitter)，进而可能引起系统的不稳定或报错。
+
+在这种“核心控制循环与外部通信线程共享数据”的场景下，开发者通常会抛弃 Linux/C++ 自带的休眠锁，转而投入“阵营三”：
+
+1. 使用**原子读写自旋锁**，确保读写极快完成且绝不休眠。
+2. 或者更进一步，彻底放弃锁，采用**双缓冲 (Double Buffering)** 结合 `std::atomic<指针>` 的原子替换。
+3. 使用基于环形缓冲的**无锁队列 (Lock-free Queue)** 进行数据传递。
+
+ 线程是**操作系统所能调度的最小单位**。通过多线程编程使得**一个进程执行多个不同的任务**。**线程享有共享资源，即进程中的全局变量每个线程都可以访问**。
+
+## 信号量
+
+管理**资源数量**：代表 “有 N 个资源可用”，线程拿一个少一个，还回去多一个。
+
+**条件可以简化为具有二值性**：通过**二值信号量**来进行同步（线程的执行顺序）。
+
+C++ 标准库提供的信号量（C++20）和 POSIX / pthread 库提供的信号量，在设计上都是**线程安全，因此设计上信号量无需锁**。
+
+**信号量是“非所有权的”**，线程A执行了`sem_wait`，可以由线程B执行`sem_post`，这在生产者-消费者模型中非常自然：生产者释放资源，消费者获取资源，双方互不干涉。
+
+> **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
+>
+> - 条件能简化为 `count > 0` → 用 `sem_t`进行同步（二值信号量的计数值本身就是条件，且本身具有线程安全性）
+
+### 核心API
+
+#### 创建/删除
+
+``` c
+#include <semaphore.h>
+
+static sem_t g_sem;
+
+int sem_init(sem_t *sem, int pshared, unsigned int value);  // 信号量初始化
+//argv[0]:sem_t指针
+//argv[1]:0为线程控制，否则为进程控制
+//grav[2]:初始值，0表示阻塞(无)，1为运行(有)
+
+int sem_destory(sem_t *sem);  // 删除信号量
+```
+#### P/V操作
+
+``` c
+#include <semaphore.h>
+
+int sem_wait(sem_t *sem);     // 尝试获取，检测此信号量是否有资源可用，没有则阻塞
+int sem_trywait(sem_t *sem);  // 非阻塞式申请信号量资源
+
+int sem_post(sem_t *sem); 	  // 释放此信号量的资源
+```
+
+### 适用场景
+
+#### 二值信号量（记忆性）
+
+> **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
+>
+> - 条件自然表现为 `count > 0` → 用 `sem_t`进行同步（**二值信号量的计数值本身就是条件（不依赖 `if` 语句中的条件）**，且本身具有线程安全性）
+
+**信号量特性**：信号量拥有“记忆性”。如果线程A执行了`sem_post`（V操作），此时没有线程在等待，信号量会保持值为1。当线程B随后调用`sem_wait`时，它能立即获取信号量并继续运行，不会阻塞。
+**条件变量问题**：条件变量本身不维护状态，仅作为通知机制。如果线程A发送通知时线程B未在`pthread_cond_wait`上阻塞，该通知将丢失。线程B后续进入等待时将永远阻塞。必须额外定义一个共享变量（如`int count`）来记录状态，并在互斥锁的保护下严格检查该变量。
+
+---
+
+使用信号量（线程A等待线程B完成初始化，可以简化条件为具有二值性）：
+
+``` c++
+#include <semaphore.h>
+
+sem_t sem;
+sem_init(&sem, 0, 0); 
+
+// 线程A (等待者)
+void* thread_a(void* arg) {
+    sem_wait(&sem); // 若信号量为0则阻塞，否则减1继续
+    // 执行后续任务
+    return NULL;
+}
+
+// 线程B (通知者)
+void* thread_b(void* arg) {
+    // 执行初始化...
+    sem_post(&sem); // 信号量加1，唤醒A（或保持状态供A后续获取）
+    return NULL;
+}
+```
+
+#### 环形缓冲区的生产消费模型（管理资源）
+
+**场景描述**：生产者与消费者共用一个大小为 N 的环形缓冲区。生产者关心的是“剩余空位数”，消费者关心的是“已有数据数”。
+
+若使用条件变量，必须定义两个条件变量（`not_full`和`not_empty`），并配合一个互斥锁和一个或两个整型计数器。每次加锁后需手动检查计数器状态并等待，逻辑极其繁琐。而**信号量天生就是“资源计数器”**，其PV操作原语完美映射了“申请资源”与“释放资源”的语义，且在未满/未空时可以不加锁直接通过，具有更高的并发度。
+
+``` c++
+#include <semaphore.h>
+#include <stdlib.h>
+#define CAPACITY 8
+
+typedef struct {
+    int buffer[CAPACITY];
+    int pos; // 简化位置索引
+    sem_t empty_slots; // 计数器：记录剩余空位，初值为 CAPACITY
+    sem_t data_items;  // 计数器：记录已有数据，初值为 0
+} RingQueue;
+
+
+void producer(RingQueue *rq, int item) {
+    // P操作：申请一个空位资源。若empty_slots为0，自动阻塞等待
+    sem_wait(&rq->empty_slots);
+
+    rq->buffer[rq->pos++] = item;
+    rq->pos %= CAPACITY;
+    // V操作：释放一个数据资源，唤醒可能在等待的消费者
+    sem_post(&rq->data_items);
+}
+
+
+int consumer(RingQueue *rq) {
+    // P操作：申请一个数据资源。若无数据则阻塞
+    sem_wait(&rq->data_items);
+    int item = rq->buffer[rq->pos--]; // 简化索引
+    rq->pos %= CAPACITY;
+    // V操作：释放一个空位资源，唤醒可能在等待的生产者
+    sem_post(&rq->empty_slots);
+    return item;
+}
+```
+
+## 条件变量
+
+管**状态** → **线程需要等待某个复杂条件满足才能继续执行**的场景。**必须配合互斥锁一起用（条件检查 + 等待必须原子操作，防止竞态）**，自己本身不存任何 “计数”。
+
+### 核心API
+
+#### 创建/删除
+
+``` c
+// 动态初始化
+int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
+// 静态初始化
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+
+int pthread_cond_destroy(pthread_cond_t *cond);
+```
+
+#### 等待/唤醒
+
+这个函数**原子执行 3 步**：**释放互斥锁**；线程进入**休眠**（不占 CPU）；被唤醒后 → **自动重新竞争锁。**
+
+> 原子性：解锁 + 休眠 是原子完成的，不会出现中间状态，绝对安全。
+
+``` c
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+```
+
+**定时等待**：
+
+``` c
+int pthread_cond_timedwait(
+    pthread_cond_t *cond,
+    pthread_mutex_t *mutex,
+    const struct timespec *abstime
+);
+```
+
+---
+
+**释放条件变量，唤醒一个等待线程：**
+
+``` c
+int pthread_cond_signal(pthread_cond_t *cond);
+```
+
+**释放条件变量，唤醒所有等待线程：**
+
+``` c
+int pthread_cond_broadcast(pthread_cond_t *cond);
+```
+
+### 消费者固定模板
+
+``` c
+void *worker(void *arg) {
+    while (1) {
+        
+        pthread_mutex_lock(&mutex);
+        // 内层必须循环：防虚假唤醒，确保条件满足才跳出
+        while ( 条件不满足 ) {
+            // 持有锁时调用，内部原子完成解锁+等待+唤醒后重加锁
+            pthread_cond_wait(&cond, &mutex);
+        }
+		
+        // 支持优雅退出
+        if (shutdown_requested) {
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
+        
+        // 处理任务
+        pthread_mutex_unlock(&mutex);
+        执行任务(); 
+    }
+    return NULL;
+}
+```
+
+
+### 适用场景
+
+> **工程铁律(APUE《Unix环境高级编程》第11/12章，POSIX.1-2008 标准文档)**：
+>
+> - 能把复杂条件等价重构成一个条件（等待对象能自然表达成可消费的 permit ）→ 用 `sem_t`进行同步。（二值信号量的计数值本身就是条件，且本身具有线程安全性）；
+>
+> - 复杂条件中的不同变量可能由不同的情况设置，比如`queue_empty(&task_queue)`和`consumer_is_work`分别由不同的地方来设置；单一条件满足时无法确保其他条件也满足，产生什么时候应该 `sem_post()`的问题；如果这么干会导致所有producer必须检查整个条件，虽然有一些条件并非它负责；
+>
+> - `sem_wait` 无法将“任意外部共享 predicate 的检查”+“进入 semaphore wait”原子绑定；中间存在不可消除的竞态窗口（如果需要消除则要使用互斥锁，完全违背“信号量无需锁”的直觉）：
+>
+>   ``` c++
+>   pthread_mutex_t mutex;
+>   
+>   void *consumer(void *arg) {
+>       while (1) {
+>           pthread_mutex_lock(&mutex);
+>           if ((!queue_empty(&task_queue) && consumer_is_work) || shutdown_requested) {
+>               // 条件满足，处理...
+>               pthread_mutex_unlock(&mutex);
+>           } else {
+>               pthread_mutex_unlock(&mutex);  // 解锁
+>               
+>             /*******存在可被调度打断的时间窗口**********/
+>             /**不过信号量有记忆性，其实没有太大问题***/
+>   
+>             sem_wait(&sem);           // 等待信号
+>         }
+>     }
+>   }
+>
+> - 信号量**无法进行广播**；如果需要则需要while循环并还需要记录有多少个线程在等待这个信号量；
+> - 信号量为了实现**优雅退出**需要额外在`atomic_store(&shutdown, true)`之后添加`for (int i = 0; i < 8; ++i) { sem_post(&sem); }`
+> - 信号量由于有记忆性消费的可能为历史信号，而条件变量的原子性保证了**线程阻塞的瞬间，一定已经错过了之前的所有 `signal`，只会响应未来的 `signal`（因此不能存在时间窗口）**。
+> - 理论上信号量可以替代条件变量，但实践中代价高昂且容易出错；条件变量之所以依然存在，是因为它在语义匹配、安全性、可维护性和性能上针对“多条件等待”场景做了专门优化。
+
+#### 条件依赖多变量、逻辑组合
+
+复杂条件中的不同变量可能由不同的情况设置，比如`queue_empty(&task_queue)`和`consumer_is_work`分别由不同的地方来设置；单一条件满足时无法确保其他条件也满足，产生什么时候应该 `sem_post()`的问题；如果这么干会导致所有 producer 必须检查整个条件，虽然有一些条件并非它负责；
+
+``` c
+// 线程A
+pthread_mutex_lock(&mutex);
+/*...*/
+else(组合条件不满足) {
+    
+    pthread_mutex_unlock(&mutex); // 先释放锁
+    
+    /* 竞态窗口 */
+    
+    sem_wait(&sem);               // 再等待信号量
+}
+```
+
+**POSIX 标准规定**：`sem_wait` 只操作内部计数器，不关联任何 mutex。使用信号量来替代则必须手动拆分“解锁→等待→加锁”，这必然留下时间窗口。而 `pthread_cond_wait` 在内核态用 `futex` 保证这三步是原子事务：`pthread_cond_wait` 与互斥锁的解锁**原子绑定**，它能保证：当我因条件不满足而睡眠时，**我先释放锁**（允许生产者进入），醒来时**我立刻重新持有锁**。
+
+---
+
+> 为什么必须先解锁再获取信号量？
+
+如果不释放锁就直接等待信号量，就会立即死锁。原因很简单：
+
+- **信号量（`sem_t`）本身与互斥锁没有任何关联。**
+  调用 `sem_wait` 时，它只会对信号量的内部计数器减一，如果计数器为 0 就阻塞当前线程。**它完全不知道、也不会去释放你持有的其他锁。**
+- **互斥锁是“谁加锁，谁解锁”。**
+  如果你在持有 `mutex` 的情况下因为 `sem_wait` 而阻塞，那么锁就永远攥在你手里，其他线程永远不可能获取到同一个 `mutex` 来修改共享条件并执行 `sem_post` 唤醒你。
+
+这样就形成了一个死循环：
+
+1. 线程 A 加锁，检查条件不成立。
+2. 线程 A 调用 `sem_wait` 阻塞，但锁仍然被 A 持有。
+3. 生产者线程 B 想要修改条件并 `sem_post`，但它首先需要获取同一把锁。
+4. B 永远拿不到锁，A 永远等不到 `post`。死锁。
+
+#### 线程池销毁(广播)
+
+**`post(1)` 无法实现 `broadcast`**：线程池中有多个工作线程阻塞等待任务，当线程池需要关闭（`shutdown`）时，主线程必须一次性唤醒所有等待的工作线程，让它们检测到退出标志并安全终止。
+
+如果使用信号量，主线程无法通过一次操作唤醒所有线程；信号量是**计数器消耗模型**，`post(1)` 只释放一个令牌，不知道当前有多少线程在等。若循环执行`sem_post`，则需要精确知道等待线程的数量，且在多线程动态入队出队的过程中极易出错，若想模拟广播，必须：
+
+```c
+// 需额外维护原子等待计数器 waiting_cnt
+for (int i = 0; i < waiting_cnt; i++) sem_post(&sem);
+```
+
+但这引入了新的共享状态，仍需锁保护，完全违背“信号量无需锁”的直觉。
+
+``` c
+#include <pthread.h>
+#include <stdbool.h>
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    bool shutdown;
+    // ... 任务队列等其他成员
+} ThreadPool;
+
+
+void* worker_thread(void* arg) {
+    ThreadPool* pool = (ThreadPool*)arg;
+    pthread_mutex_lock(&pool->lock);
+    // 必须使用while检查共享状态，防止唤醒丢失和虚假唤醒
+    while (!pool->shutdown && 任务队列为空) {
+        // 条件变量允许线程在此处释放锁并阻塞，等待唤醒后重新获取锁
+        pthread_cond_wait(&pool->cond, &pool->lock);
+    }
+    if (pool->shutdown) {
+        pthread_mutex_unlock(&pool->lock);
+        pthread_exit(NULL);
+    }
+    // ... 执行任务
+    pthread_mutex_unlock(&pool->lock);
+    return NULL;
+}
+
+
+void threadpool_shutdown(ThreadPool* pool) {
+    pthread_mutex_lock(&pool->lock);
+    pool->shutdown = true;
+    // 广播：一次性唤醒所有阻塞在cond上的线程，这是信号量无法做到的
+    pthread_cond_broadcast(&pool->cond);
+    pthread_mutex_unlock(&pool->lock);
+}
+```
+
+**计数器污染（State Drift）**
+
+假设硬编码 `sem_post(&sem)` 唤醒 5 次。5 个线程醒来，但其中 3 个发现 `is_running` 又被改为 `false`，必须继续等。此时信号量计数器已变为 `0`。 下次真正 `resume` 时，你只能 `post(1)`，但实际有 3 个线程在等！**内部计数器与外部业务状态彻底脱节**，必须引入额外的状态机同步，代码复杂度指数上升。
+
+---
+
+使用条件变量：
+
+``` c
+#include <pthread.h>
+#include <stdbool.h>
+
+pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  cv  = PTHREAD_COND_INITIALIZER;
+
+int task_count = 0;
+bool is_running = false; // 初始为暂停状态
+
+// 工作线程
+void* worker_cv(void* arg) {
+    pthread_mutex_lock(&mtx);
+    // POSIX 规范：pthread_cond_wait 会原子地 [解锁mutex + 阻塞 + 唤醒后重新加锁]
+    while (task_count == 0 || !is_running) {
+        pthread_cond_wait(&cv, &mtx);
+    }
+    task_count--; // 安全消费
+    pthread_mutex_unlock(&mtx);
+    
+    // 处理任务...
+    return NULL;
+}
+
+// 主线程恢复所有工作线程
+void resume_all_cv(void) {
+    pthread_mutex_lock(&mtx);
+    is_running = true;
+    pthread_cond_broadcast(&cv); // 唤醒所有等待者
+    pthread_mutex_unlock(&mtx);
+}
+
+```
+
+## 线程通信
+
+### 需要解决三个问题
+
+1. **共享状态**：在生产者-消费者之间共享一块内存。
+2. **同步通知**：生产者告知消费者“结果已就绪”，消费者等待这个通知。
+3. **异常/错误传递**：需要额外的标志或预定义错误值来指示任务失败。
+
+### C 语言
+
+#### 三剑客
+
+C 里最典型的是：$\boxed{ pthread\_mutex + pthread\_cond + 状态变量 }$。比如定义：
+
+```c
+struct setup_state {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+
+    int ready;			// 线程有无完成 setup ？
+    int success;
+
+    char error[256];
+};
+```
+
+子线程写法：
+
+``` c++
+void* worker(void* arg)
+{
+    struct setup_state* state = arg;
+
+    int success = configure_current_thread();
+	
+    /* 用锁来防止数据竞态以及配合条件变量 */
+    pthread_mutex_lock(&state->mutex);
+
+    state->success = success;
+    state->ready = 1;
+	/********************************/
+    
+    pthread_cond_signal(&state->cond);
+
+    pthread_mutex_unlock(&state->mutex);
+
+    if (success) {
+        run();
+    }
+
+    return NULL;
+}
+```
+
+**父线程需要等待子线程传递信息（配置成功）才继续运行下去**，因此写法为：
+
+``` c
+pthread_mutex_lock(&state.mutex);
+
+while (!state.ready) {
+    pthread_cond_wait(&state.cond, &state.mutex);
+}
+
+int success = state.success;
+
+pthread_mutex_unlock(&state.mutex);
+```
+
+#### FreeRTOS
+
+FreeRTOS中最简单的方式：把结果直接放入**队列**，消费者从队列中阻塞读取。
+
+**优点**：简单，队列自带同步和缓冲。
+**缺点**：只能一对一传递，且结果类型固定；难以传递异常信息（需要额外协议，如负值表示错误）。
+
+---
+
+使用 **事件组** 传递状态：事件组允许设置/等待多个事件位，可用于表示结果就绪或错误。
+
+### C++语言
+
+#### 四剑客
+
+`std::future`、`std::promise`、`std::async` 和 `std::packaged_task` 构成了一套**异步任务与结果传递**机制。它们**将“如何启动任务”与“如何获取结果”解耦**，让我们能用更高层次的方式编写并发程序，而不必手动管理线程和锁。
+
+- `std::future`：一个**只读**的“期待值”句柄，从异步任务中获取结果（或异常）。
+- `std::promise`：一个**只写**的“承诺”端，用于手动设置结果或异常，并**关联一个 `future`**。
+- `std::packaged_task`：将**任意可调用对象包装成一个异步任务**，其结果通过关联的 `future` 获取。
+- `std::async`：一个便捷函数，自动创建线程（或延迟执行）来运行任务，并返回一个 `future`。
+
+它们的关系可以理解为一条**通道**：
+
+``` c
+任务提供方 (promise / packaged_task / async)
+       |
+       | 设置值或异常
+       v
+     共享状态
+       |
+       | 查询或获取
+       v
+  future / shared_future (消费方)
+```
+#### `future<T>`
+
+`std::future<T>`：代表一个**唯一**的异步结果持有者，**只能移动，不可拷贝**。
+
+- 通过 `get()` **获取结果**：
+  - 若结果尚未就绪，**阻塞**当前线程直到结果可用；若已就绪，立即返回。
+  - **只能调用一次**，调用后 `valid()` 变为 `false`。
+- 也可用 `wait()` **等待但不取值**，`wait_for()` 和 `wait_until()` 实现限时等待。
+
+```c++
+std::future<int> fut = std::async([]{ return 42; });
+
+std::cout << fut.get();  // 42，调用后 fut.valid() 为 false
+```
+
+#### `shared_future<T>`
+
+`std::shared_future<T>`：允许多个消费者共享同一个结果，**可拷贝**。
+
+- `get()` 可多次调用，每次返回相同的结果（或反复抛出存储的异常）。
+- 通常通过 `share()` 转移所有权，或用 `std::shared_future` 构造函数从 `future` 移动创建。
+
+``` c++
+std::future<int> fut = std::async([]{ return 100; });
+
+std::shared_future<int> shared = fut.share();
+// 现在可以拷贝给多个线程读取
+auto copy = shared;
+std::cout << shared.get() << " " << copy.get(); // 100 100
+```
+
+#### `promise<T>`
+
+`std::promise<T>` 是**写端**。
+
+通过 `set_value()` 或 `set_exception()` 设置异步操作的结果，然后与之关联的 `future` 就能读到该结果。这可以在任何地方（比如创建的 `std::thread` 内部）将结果“发送”出去。
+
+``` c++
+void compute(std::promise<int> prom) {
+    try {
+        // 复杂计算
+        int result = 40 + 2;
+        prom.set_value(result);  // 设置结果
+    } catch (...) {
+        prom.set_exception(std::current_exception()); // 传递异常
+    }
+}
+
+int main() {
+    std::promise<int> prom;
+    std::future<int> fut = prom.get_future();  // 关联 future 对象
+    std::thread t(compute, std::move(prom));   // promise 移动给线程
+    std::cout << fut.get() << std::endl;       // 阻塞直到 compute 设置结果
+    
+    t.join();
+}
+```
+
+**关键点**：
+
+- `get_future()` 只能调用一次，之后 `promise` 和 `future` 通过**共享状态**关联。
+- 如果 promise 在析构前没有设置值或异常，析构时将设置 `std::future_error` 异常（`broken_promise`），导致 `future.get()` 抛出异常。
+- promise 本身**不可拷贝，只能移动**。
+
+**适用场景**：
+
+- 需要将结果从一个线程传递给另一个，且不使用更高级的 `packaged_task` 或 `async`。
+- 例如线程池中，提交任务时返回 `future`，内部用 promise 实现结果回传。
+
+#### `async`
+
+`std::async` 是一个模板函数，它**接受一个可调用对象和参数**，返回一个 `std::future`；通过**启动策略**控制是立即新开线程还是延迟执行：
+
+- `std::launch::async`：在**新线程**中异步执行。
+- `std::launch::deferred`：**延迟执行**，直到返回的 `future` 调用了 `get()` 或 `wait()`，任务才会在**当前线程**中同步执行。
+- 默认策略（两者组合）：由实现决定，通常等价于 `async`，但不保证一定新开线程。
+
+``` c++
+#include <future>
+#include <iostream>
+
+int work(int x) {
+    return x * 2;
+}
+
+int main() {
+    // 在新线程中异步执行
+    auto fut = std::async(std::launch::async, work, 21);
+    std::cout << fut.get(); // 42
+
+    // 延迟执行：fut.get() 时在当前线程同步调用
+    auto fut2 = std::async(std::launch::deferred, work, 100);
+    // 此时 work 尚未调用
+    std::cout << fut2.get(); // 200，此时在当前线程执行
+}
+```
+
+**特点**：
+
+- 返回的 `future` 在析构时，如果使用了 `std::launch::async` 策略，会**阻塞等待**任务完成（相当于隐式 `join`）；若为 `deferred`，则什么都不做。这个行为可以保证异步任务在 future 销毁前完成，避免“悬空”线程。
+- 使用默认策略时，析构是否阻塞取决于实现，为了可移植性，通常建议明确指定策略或确保持有 future 足够久。
+- 能自动传递异常：任务抛出异常时，`get()` 会重新抛出该异常。
+
+#### `packaged_task`
+
+`std::packaged_task` 将任意可调用对象（函数、lambda、函数对象）包装成一个**可移动的异步任务**。
+
+通过 `get_future()` 关联 `future`对象。可以将 `packaged_task` 传递给线程、线程池或直接调用，其执行结果会自动通过 `future` 传递。
+
+``` c++
+#include <future>
+#include <thread>
+#include <iostream>
+
+int main() {
+    std::packaged_task<int(int,int)> task([](int a, int b){
+        return a + b;
+    });
+
+    std::future<int> fut = task.get_future();
+
+    // 将任务移入线程执行
+    std::thread t(std::move(task), 3, 4);
+    std::cout << "Result: " << fut.get() << std::endl; // 7
+    t.join();
+}
+```
+
+**关键点**：
+
+- `packaged_task` 只能移动，不能拷贝。
+- 调用 `get_future()` 后，必须确保在某个线程中通过 `operator()` 执行该任务，否则 `future` 将永远等不到结果。
+- 如果 `packaged_task` 在未执行时就被析构，关联的 `future` 会收到 `std::future_error`（`broken_promise`）。
+- 你可以在 `operator()` 调用时捕获异常，它会自动调用 `promise::set_exception`。
+
+**适用场景**：
+
+- **线程池**：将 `packaged_task` 作为任务队列的元素，提交后返回 `future`。
+- 需要将任务与执行分离，但又要方便地获取结果。
+- 实现自定义的任务调度器。
+
+### 总结对比
+
+| 场景                          | pthread 实际做法                                        | 相当于 C++ 的                                                |
+| :---------------------------- | :------------------------------------------------------ | :----------------------------------------------------------- |
+| **简单两线程握手**            | 互斥锁 + 条件变量 + 一个结果变量                        | `promise` + `future`，但无需封装                             |
+| **生产者-消费者队列**         | 互斥锁 + 条件变量 + 环形缓冲区                          | `std::queue` + `std::condition_variable`                     |
+| **线程池/投递任务并获取结果** | 自定义任务结构体（含函数指针 + future 字段）            | `std::packaged_task` + `std::future`                         |
+| **一次性异步计算**            | 创建线程，`join` 后用全局或传出参数获取结果             | `std::async`                                                 |
+| **多任务并行等待任意一个**    | 用 `poll`/`select` 模拟，或每个任务设标志位，主线程轮询 | `std::future::wait_for` + `std::future::wait_any` (需自己封装) |
+
+可以看出，只有当需要 **将任务与结果解耦、跨线程传递未来值** 时，才会用到类似于 future 的封装。日常开发中大量使用的是“互斥锁 + 条件变量”直接解决问题，但是存在以下问题：
+
+**异常 / 错误传递**
+
+任务可能失败，你不仅需要传递结果，还要传递“是否成功”以及错误原因。手动方案需要在共享结构体中添加错误码、错误字符串等，消费端必须检查。一旦忘记检查，错误就会被忽略。`promise/future` 的 `set_exception` 和 `get()` 重抛机制把错误处理**强制统一**了。
+
+**结果的唯一所有权与生命周期**
+
+简单变量 `int result` 生命周期由作用域管理，但如果结果是一个动态分配的对象（如字符串、复杂结构），谁来释放？如果消费者 `get` 后忘记释放，就会内存泄漏。`future` 通过移动语义或 `shared_future` 明确所有权，并且析构时自动清理共享状态，减轻了心智负担。
+
+**消费者的生命周期与安全性**
+
+如果消费者还在等待，生产者所在线程却异常退出且没有设置结果，那么消费者将永远阻塞。C++ 中，`promise` 如果析构前未设置值，会自动设置 `broken_promise` 异常，消费者 `get()` 会抛出异常，从而**不会无限阻塞**。这种“约定式”的安全保证，手动模式极难做到不漏。
+
+**多个消费者等待同一个结果**
+
+你需要广播给多个线程，手写就要用 `pthread_cond_broadcast`，同时每个线程在获得结果后还不能破坏共享数据（比如别释放掉字符串）。如果每个消费者要独立拥有结果，就要复制。`std::shared_future` 直接提供了“多个消费者安全共享同一结果”的语义，还能拷贝。
+
+**超时等待和“等待任意一个实现复杂**
+
+你想同时等待多个任务，并在**第一个完成时**立即处理。手动方案通常需要为每个任务设置一个标志，主线程在一个循环里轮询所有标志（忙等）或使用多个条件变量，代码迅速膨胀。`std::future::wait_for` 和自定义的 `wait_any` 封装（标准未直接提供）将复杂性隐藏起来了。
+
+**无法表示任意返回类型**
+
+当你要做一个通用的线程池，任务可以是任何返回类型的函数。手动模式下，你需要定义一个通用结构体，里面包含函数指针和 `void*` 结果指针，还要手动管理类型转换。而 `std::packaged_task` 将任意可调用对象包装成统一接口，并通过关联的 `future` 提供强类型的结果，这正是线程池的理想构件。
 
 # 信号
 
@@ -973,11 +4872,11 @@ if (fds[0].revents & POLLOUT) {
 
 > 进程告诉内核："当这个文件描述符有数据时，发 `SIGIO` 信号通知我"，然后进程去做别的事（或休眠），不用轮询检查。
 
-​	信号是 Linux 内核向进程发送的**异步通知**（可以理解为 “进程级别的中断”），用于告知进程发生了某个事件（比如用户按 Ctrl+C、进程访问非法内存、其他进程主动发送信号等）。
+信号是 Linux 内核向进程发送的**异步通知**（可以理解为 “进程级别的中断”），用于告知进程发生了某个事件（比如用户按 Ctrl+C、进程访问非法内存、其他进程主动发送信号等）。
 
 ## `singal`函数
 
-​	**异步信号安全函数**：信号是 “异步” 的（可能在进程执行任意代码时触发），因此处理函数中只能调用「无全局状态、无锁、可重入」的函数（如`write`/`_exit`/`memset`），绝对不能用`printf`/`exit`/`malloc`（这些函数内部有全局缓冲区 / 锁，会导致程序崩溃）。
+**异步信号安全函数**：信号是 “异步” 的（可能在进程执行任意代码时触发），因此处理函数中只能调用「无全局状态、无锁、可重入」的函数（如`write`/`_exit`/`memset`），绝对不能用`printf`/`exit`/`malloc`（这些函数内部有全局缓冲区 / 锁，会导致程序崩溃）。
 
 ``` c
 #include <signal.h>  // 必须包含的头文件
@@ -1085,467 +4984,9 @@ int main(void) {
 }
 ```
 
+# 输入设备
 
-
-# 4.LCD
-
-## 4.1原理及机制
-linux中通过**FrameBuffer（显存，GRAM）驱动程序**来控制LCD。假设 LCD 的分辨率是 1024x768，每一个像素的颜色用 32 位来表示，那么FrameBuffer 的大小就是：1024x768x32/8=3145728 字节。
-
-8080接口 RGB接口。
-
----
-
-主要流程为：
-
-1.设置LCD的极性，依据LCD的分辨率，BPP（bits per pixel）配置 Framebuffer 大小。
-
-2.APP通过**ioctl**获取**分辨率，BPP**。
-
-``` c
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#incldue <linux/fb.h>
-
-int fd_fb;
-fd_fb = open("/dev/fb0", O_RDWR);
-static struct fb_var_screeninfo var;
-ioctl(fd_fb, FBIOGET_VSCREENINFO, &var);
-```
-3.APP **通过 mmap 映射 Framebuffer**，在 `Framebuffer` 中写入数据。
-
-``` c
-int line_width,pixel_width,screen_size,fb_base;
-line_width = var.xres * var.bits_per_pixel / 8;
-pixel_width = var.bits_per_pixel / 8;
-screen_size = var.xres * var.yres * var.bits_per_pixel / 8;
-fb_base = (unsigned char *)mmap(NULL, screen_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fb, 0);
-if (fb_base == (unsigned char *)-1)
-{
-printf("can't mmap\n");
-return -1;
-}
-```
-## 4.2应用开发
-
-### 4.2.1 ioctl()函数
-
-APP 可以使用各种 ioctl 跟驱动程序交互：可以传数据给驱动程序，也可以从驱动程序中读出数据。
-
-``` c
-#include <sys/ioctl.h>
-int ioctl(int fd, unsigned long request, ...);
-//fd 表示文件描述符；
-
-//request 表示与驱动程序交互的命令，用不同的命令控制驱动程序输出我们需要的数据；
-//FBIOGET_VSCREENINFO，它表示 get var screen info
-
-//… :表示可变参数 arg，根据 request 命令，设备驱动程序返回输出的数据。
-
-//返回值：打开成功返回文件描述符，失败将返回-1。
-```
-### 4.2.2 mmap()函数
-如果成功映射，则返回映射区域的地址；失败则返回 -1。
-``` c
-#include <sys/mman.h>
-void *mmap(void *addr, size_t length, int prot, int flags,int fd, off_t offset);
-//addr 表示指定映射的內存起始地址，通常设为 NULL 表示让系统自动选定地址，并在成功映射后返回该地址；
-//length 表示将文件中多大的内容映射到内存中；
-
-//prot 表示映射区域的保护方式，可以为以下 4 种方式的组合
-//PROT_EXEC 映射区域可被执行 PROT_READ 映射区域可被读出 PROT_WRITE 映射区域可被写入  PROT_NONE 映射区域不能存取
-
-//flags 影响映射区域的不同特性:
-//MAP_SHARED 对映射区写入的数据会复制回源文件内 MAP_PRIVATE 对映射区的操作会产生一个映射文件的复制
-```
-## 驱动框架
-
-### 核心逻辑
-
-查看板子的Linux内核的设备树：
-
-``` shell
-a@cj:~/100ask_imx6ull-sdk$ cd Linux-4.9.88
-a@cj:~/100ask_imx6ull-sdk/Linux-4.9.88$ cd arch/arm/boot/dts
-a@cj:~/100ask_imx6ull-sdk/Linux-4.9.88/arch/arm/boot/dts$ grep "fsl,imx28-lcdif" * -nr
-```
-
----
-
-Linux 为嵌入式设备设计了 “平台总线”（platform_bus），它是一种**虚拟总线**（没有物理线缆），核心作用是连接 `platform_device`（设备）和 `platform_driver`（驱动），三者构成 “总线 - 设备 - 驱动” 三层架构：
-
-- **platform_bus**：中间人，负责遍历所有已注册的 `platform_device` 和 `platform_driver`，执行 “匹配逻辑”；
-- **platform_device**：对硬件设备的抽象（描述 “有什么硬件”），内核启动时会自动解析设备树（`imx6ull-100ask.dts`），自动为 `&mylcd` 节点生成 `platform_device`；
-
-  ``` c
-  // 平台设备结构体（硬件描述）
-  struct platform_device {
-      const char      *name;          // 设备名（传统name匹配用）
-      int             id;             // 设备编号（多实例时用，如i2c-0、i2c-1）
-      struct device   dev;            // 核心设备对象（继承Linux通用设备模型）
-      u32             num_resources;  // 硬件资源数量（寄存器、中断等）
-      struct resource *resource;      // 硬件资源数组（关键：描述寄存器地址、中断等）
-      const struct platform_device_id *id_entry; // 传统ID匹配表
-      struct device_node *of_node;    // 设备树节点指针（i.MX6ULL核心：关联DTS节点）
-  };
-  
-  
-  // 硬件资源结构体（描述寄存器、中断、DMA等资源）
-  struct resource {
-      resource_size_t start;          // 资源起始地址（如LCDIF寄存器起始0x021C8000）
-      resource_size_t end;            // 资源结束地址（如LCDIF寄存器结束0x021C8FFF）
-      const char      *name;          // 资源名
-      unsigned long   flags;          // 资源类型（IORESOURCE_MEM：内存/寄存器；IORESOURCE_IRQ：中断）
-  };
-  ```
-
-- **platform_driver**：硬件的驱动逻辑（描述 “怎么操作硬件”），编写并通过`module_init(lcd_drv_init);`入口注册，在`lcd_drv_init`中执行`ret = platform_driver_register(&mylcd_driver)`。
-
-| 匹配方式                   | 适用场景              | 核心匹配依据                                               | i.MX6ULL LCD 驱动示例                                        |
-| -------------------------- | --------------------- | ---------------------------------------------------------- | ------------------------------------------------------------ |
-| **设备树匹配（of_match）** | 主流（Linux 3.10+）   | 设备树节点的 `compatible` 字符串 ↔ 驱动的 `of_match_table` | 设备树中 `&lcdif` 的 `compatible = "fsl,imx6ull-lcdif"` ↔ `platform_driver.driver.of_match_table` 中的对应字符串 |
-| **传统 name 匹配**         | 老内核 / 无设备树场景 | `platform_device.name` ↔ `platform_driver.driver.name`     | 设备 `name = "imx6ull-lcdif"` ↔ `platform_driver.driver.name = "imx6ull-lcdif"` |
-
-留白
-
-### 模块
-
-Linux 驱动以 **模块（Module）**形式存在，每个驱动模块都以 `module_init` 和 `module_exit` 宏定义入口和出口函数，看一个驱动程序从注册函数开始看。
-
-在入口函数中：
-
-- 分配`fb_info`：`framebuffer_alloc()`
-
-- 设置`fb_info`：`var：xres，yres，fb_bitfiled`；`fix`：显存的起始地址，长度；fbops
-
-- 注册`fb_info`
-
-``` c
-#ifndef __LCD_DRV_H__
-#define __LCD_DRV_H__       
-
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/err.h>
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/slab.h>
-#include <linux/delay.h>
-#include <linux/fb.h>
-#include <linux/init.h>
-#include <linux/dma-mapping.h>
-#include <linux/interrupt.h>
-#include <linux/platform_device.h>
-#include <linux/clk.h>
-#include <linux/cpufreq.h>
-#include <linux/io.h>
-
-#include <asm/div64.h>
-
-#endif
-
-
-#include "lcd_drv.h"
-
-static struct fb_info *myfb_info = NULL;
-
-static struct fb_ops lcd_fb_ops = {
-     .owner = THIS_MODULE,
-    // .fb_read = lcd_fb_read,
-    // .fb_write = lcd_fb_write,
-    // .fb_mmap = lcd_fb_mmap,
-    // .fb_ioctl = lcd_fb_ioctl,
-};
-
-
-int __init lcd_drv_init(void)
-{
-    dma_addr_t phy_addr;
-    myfb_info = framebuffer_alloc(0, NULL);
-    if (myfb_info == NULL) {
-        printk("framebuffer_alloc failed\n");
-        return -ENOMEM;
-    }
-    // 可变参数：设置分辨率，RGB等信息
-    myfb_info->var.xres = 1024;
-    myfb_info->var.yres = 768;
-    myfb_info->var.bits_per_pixel = 16;
-
-    myfb_info->var.red.offset = 0;
-    myfb_info->var.red.length = 5;
-    myfb_info->var.green.offset = 5;
-    myfb_info->var.green.length = 6;
-    myfb_info->var.blue.offset = 11;
-    myfb_info->var.blue.length = 5;
-
-    // 固定参数：设置显存的大小（字节）
-    myfb_info->fix.smem_len = myfb_info->var.xres * myfb_info->var.yres * myfb_info->var.bits_per_pixel / 8;
-    // 固定参数：设置显存的物理地址
-    myfb_info->fix.smem_start = phy_addr;
-    // 设置fb（显存）的虚拟地址
-    myfb_info->screen_base = dma_alloc_wc(NULL, myfb_info->fix.smem_len, &phy_addr, GFP_KERNEL);
-    if (myfb_info->screen_base == NULL) {
-        printk("dma_alloc_wc failed\n");
-        return -ENOMEM;
-    }
-    // 固定参数：设置显存的类型（缓存一致性）
-    myfb_info->fix.type = FB_TYPE_PACKED_PIXELS;
-    // 固定参数：设置显存的可视化类型（真彩色）
-    myfb_info->fix.visual = FB_VISUAL_TRUECOLOR;
-
-    // 设置设备的操作函数指针
-    myfb_info->fbops = &lcd_fb_ops;
-
-    // 注册fb设备
-    register_framebuffer(myfb_info);
-
-    return 0;
-}
-
-static void __exit lcd_drv_exit(void)
-{
-    // 注销fb设备
-    unregister_framebuffer(myfb_info);
-    // 释放fb设备
-    framebuffer_release(myfb_info);
-    printk("lcd_drv_exit\n");
-}
-
-
-module_init(lcd_drv_init);
-module_exit(lcd_drv_exit);
-
-MODULE_AUTHOR("CJY");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("MY LCD Driver");
-```
-
-关于`__init`和`__exit`：
-
-`__attribute__`：GCC 扩展关键字，用于**给函数 / 变量附加编译属性**（比如段归属、优化级别、链接属性等）；
-
-``` c
-// GCC原生语法：给函数/变量指定所属的段
-__attribute__((section("section-name")))
-    
-// Linux 内核在include/linux/compiler_types.h中把这个原生语法封装成了__section宏，简化使用
-#define __section(S) __attribute__((__section__(#S)))
-    
-    
-// 简化版，核心是将函数放入.init.text段，并标记为"冷函数"（少执行）
-#define __init __section(".init.text") __cold notrace
-// 对应__init，将函数放入.exit.text段
-#define __exit __section(".exit.text") __cold notrace
-```
-
-
-
-硬件操作：寄存器相关：用ioremap：比如显存基地址啥的。
-
-### 内核相关函数/结构体
-
-- **`struct fb_info`**： 
-
-``` c
-struct fb_info {
-	refcount_t count;
-	int node;
-	int flags;
-	/*
-	 * -1 by default, set to a FB_ROTATE_* value by the driver, if it knows
-	 * a lcd is not mounted upright and fbcon should rotate to compensate.
-	 */
-	int fbcon_rotate_hint;
-	struct mutex lock;		/* Lock for open/release/ioctl funcs */
-	struct mutex mm_lock;		/* Lock for fb_mmap and smem_* fields */
-	struct fb_var_screeninfo var;	/* Current var */
-	struct fb_fix_screeninfo fix;	/* Current fix */
-	struct fb_monspecs monspecs;	/* Current Monitor specs */
-	struct work_struct queue;	/* Framebuffer event queue */
-	struct fb_pixmap pixmap;	/* Image hardware mapper */
-	struct fb_pixmap sprite;	/* Cursor hardware mapper */
-	struct fb_cmap cmap;		/* Current cmap */
-	struct list_head modelist;      /* mode list */
-	struct fb_videomode *mode;	/* current mode */
-
-#if IS_ENABLED(CONFIG_FB_BACKLIGHT)
-	/* assigned backlight device */
-	/* set before framebuffer registration,
-	   remove after unregister */
-	struct backlight_device *bl_dev;
-
-	/* Backlight level curve */
-	struct mutex bl_curve_mutex;
-	u8 bl_curve[FB_BACKLIGHT_LEVELS];
-#endif
-#ifdef CONFIG_FB_DEFERRED_IO
-	struct delayed_work deferred_work;
-	unsigned long npagerefs;
-	struct fb_deferred_io_pageref *pagerefs;
-	struct fb_deferred_io *fbdefio;
-#endif
-
-	const struct fb_ops *fbops;
-	struct device *device;		/* This is the parent */
-	struct device *dev;		/* This is this fb device */
-	int class_flag;                    /* private sysfs flags */
-#ifdef CONFIG_FB_TILEBLITTING
-	struct fb_tile_ops *tileops;    /* Tile Blitting */
-#endif
-	union {
-		char __iomem *screen_base;	/* Virtual address */
-		char *screen_buffer;
-	};
-	unsigned long screen_size;	/* Amount of ioremapped VRAM or 0 */
-	void *pseudo_palette;		/* Fake palette of 16 colors */
-#define FBINFO_STATE_RUNNING	0
-#define FBINFO_STATE_SUSPENDED	1
-	u32 state;			/* Hardware state i.e suspend */
-	void *fbcon_par;                /* fbcon use-only private area */
-	/* From here on everything is device dependent */
-	void *par;
-	/* we need the PCI or similar aperture base/size not
-	   smem_start/size as smem_start may just be an object
-	   allocated inside the aperture so may not actually overlap */
-	struct apertures_struct {
-		unsigned int count;
-		struct aperture {
-			resource_size_t base;
-			resource_size_t size;
-		} ranges[0];
-	} *apertures;
-
-	bool skip_vt_switch; /* no VT switch on suspend/resume required */
-	bool forced_out; /* set when being removed by another driver */
-};
-```
-
-- **注册核心逻辑**：
-
-``` c
-int register_framebuffer(struct fb_info *info) {
-    if (num_registered_fb >= FB_MAX) return -ENOSPC;
-    registered_fb[num_registered_fb] = info; // 存入数组
-    info->node = num_registered_fb++;       // 记录次设备号
-    // 创建设备文件（如/dev/fb0）
-    device_create(fb_class, NULL, MKDEV(FB_MAJOR, info->node), NULL, "fb%d", info->node);
-    return 0;
-}
-```
-
-- **应用层调用`open("/dev/fb0")`时**，触发内核态`fb_open`函数，核心逻辑：
-- 从设备号（`dev_t`类型）解析**次设备号**（如 fb0 的次设备号是 0）；Linux 中所有设备通过`dev_t`（设备号）标识，格式为`主设备号<<20 | 次设备号`，主设备号可通过`cat /proc/devices`查看。**主设备号**：标识设备所属的驱动程序（如所有同一个类型的设备主设备号都是 29，内核通过它找到 FB 驱动的 `file_operations`）；**次设备号**：区分同一驱动下的不同设备实例（如 `fb0` 对应 LCD1，`fb1` 对应 LCD2，通过次设备号索引 `registered_fb`）。
-	- 通过次设备号索引`registered_fb`数组，找到对应的 `fb_info`。
-- 将 `fb_info` 关联到`file->private_data`，后续读写 / 映射显存都基于此。
-
-``` c
-static int fb_open(struct inode *inode, struct file *file) {
-    int minor = iminor(inode); // 解析次设备号
-    struct fb_info *info;
-    if (minor >= FB_MAX || !registered_fb[minor]) return -ENODEV;
-    info = registered_fb[minor]; // 找到对应的fb_info
-    file->private_data = info;   // 关联到文件句柄
-    return 0;
-}
-```
-
-### 编写`fb_ops`
-
-本质是获取显存
-
-mmap，地址分离。vm_iomap_memory。建立映射关系。
-
-显存的数据如何到达LCD的？如何把BPP告诉LCD格式？如何在显存中保存数据
-
-转换为RGB888，和BBP呢？
-
-
-
-模组入口函数注册一个`platform_driver`，如何和`platform_dev`挂钩？
-
-
-
-驱动程序中如何写寄存器
-
-为什么适配不同的LCD只需要修改设备树？
-
-``` c
-static struct platform_driver mxsfb_driver = {
-	.probe = mxsfb_probe,
-	.remove = mxsfb_remove,
-	.shutdown = mxsfb_shutdown,
-	.id_table = mxsfb_devtype,
-	.driver = {
-		   .name = DRIVER_NAME,
-		   .of_match_table = mxsfb_dt_ids,
-		   .pm = &mxsfb_pm_ops,
-	},
-};
-
-
-struct platform_driver {
-	int (*probe)(struct platform_device *);
-
-	/*
-	 * Traditionally the remove callback returned an int which however is
-	 * ignored by the driver core. This led to wrong expectations by driver
-	 * authors who thought returning an error code was a valid error
-	 * handling strategy. To convert to a callback returning void, new
-	 * drivers should implement .remove_new() until the conversion it done
-	 * that eventually makes .remove() return void.
-	 */
-	int (*remove)(struct platform_device *);
-	void (*remove_new)(struct platform_device *);
-
-	void (*shutdown)(struct platform_device *);
-	int (*suspend)(struct platform_device *, pm_message_t state);
-	int (*resume)(struct platform_device *);
-	struct device_driver driver;
-	const struct platform_device_id *id_table;
-	bool prevent_deferred_probe;
-};
-```
-引脚设置
-
-
-
-
-
-时钟设置
-
-设备树中设置时钟：
-
-``` c
-lcdif: lcdif@021c8000 {
-        compatible = "fsl,imx6ul-lcdif", "fsl,imx28-lcdif";
-        reg = <0x021c8000 0x4000>;
-        interrupts = <GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>;
-        clocks = <&clks IMX6UL_CLK_LCDIF_PIX>,
-                 <&clks IMX6UL_CLK_LCDIF_APB>,
-                 <&clks IMX6UL_CLK_DUMMY>;
-        clock-names = "pix", "axi", "disp_axi";
-        status = "disabled";
-};
-
-```
-
-如何在函数中获取与设置时钟：
-
-
-
-控制器设置：
-
-依据LCD手册来设置设备树。
-
-内核如何来进行解析：mxsfb.c
-
-# 5.输入设备
-
-## 5.1输入设备概述
-​	输入设备指键盘，鼠标，遥控杆，触摸屏等，用户通过输入设备与linux系统进行数据交换。**linux提供统一的框架，驱动开发人员基于此框架开发出程序，应用开发人员使用统一的API来使用设备**。
+​	输入设备指键盘，鼠标，遥控杆，触摸屏等，用户通过输入设备与linux系统进行数据交换。linux提供**统一框架**，驱动开发人员基于此框架开发出程序，应用开发人员使用统一的API来使用设备。
 
 具体流程为：
 
@@ -1565,199 +5006,165 @@ struct timeval{//include/uapi/linux/time.h
 	__kernel_suseconds_t tv_usec;//毫秒
 }
 ```
-## 5.2 查看节点名与对应硬件与调试
+
+## 查看节点
+
 ``` bash
-查看输入设备节点
+#查看输入设备节点
 ls -l /dev/input/event*
-或
+#或
 ls -l /dev/event*
 
-查看输入设备节点对应的硬件
+#查看输入设备节点对应的硬件
 cat /proc/bus/input/devices
 
-打印出输入事件信息
+#打印出输入事件信息
 hexdump /dev/input/event0
 ```
-## 5.3 APP访问硬件(硬件的驱动)的四种方式
-  面向对象为**APP**。**1.查询 2.休眠-唤醒(类rtos中的任务挂起) 3.poll 4.异步通知(类rtos种的CPU)**
-  ``` c
-  #include <sys/types.h>
-  #include <sys/stat.h>
-  #include <fcntl.h>
-  #include <unistd.h>
-  int fd;
-  //APP为查询方式，若APP中调用read函数读取驱动程序中的数据，若无数据立即返回错误
-  fd = int open(const char *pathname, O_NONBLOCK,int mode)
-      
-  //不传入O_NONBLOCK,默认为休眠-唤醒模式。若APP中调用read函数读取驱动程序中的数据，若无则APP在内核中休眠    
-  fd = int open(const char *pathname, int flag, int mode)
-  
-  //poll方式进行数据读取
-  struct pollfd fds[1];
-  int timeout_ms = 5000;
-  int ret;
-  fds[0].fd = fd;
-  fds[0].events = POLLIN;//POLLIN:有数据可读 POLLOUT:可以写数据
-  ret = poll(fds, 1, timesout_ms);
-  if((ret == 1) && (fds[0].revents & POLLIN))
-  {
-      read(fd, &val, 4);
-  }
-  
-  //异步通知
-  //驱动程序通知APP时，会发出"SIGIO"信号，表示有"IO事件需要处理".
-  //1.编写信号处理函数
-  static void sig_func(int sig)
-  {
-      int val;
-      read(fd, &val, 4);
-  }
-  //2.注册信号处理函数
-  #include <signal.h>
-  singal(SIGIO, sig_func);
-  //3.打开驱动
-  fd = open(argv[1], O_RDWR);
-  //4.把进程ID告诉驱动,确定是哪个驱动给此APP发SIGIO信号
-  fcntl(fd, F_SETOWN, getpid());
-  //5.使能驱动的FASYNC功能：APP中的FASYNC位为1，“使能异步通知”，代表可以接受SIGIO.
-  flags = fcntl(fd, F_GETFL);
-  fcntl(fd, F_SETFL, flags|FASYNC);
-  ```
-# 6.网络通信
-## 6.1基本组成及概念
-  服务器依据**端口区别同一IP下的两个连接**，一般来说80端口为http服务，22端口为ssh服务。因此采用IP和端口表示源或目的。
-  两个对象：**server：被动响应请求，client:主动发起请求**。
-  两种传输方式：**TCP / UDP**。其中TCP面向连接的，能够提供可靠的数据交付，而UDP则相反。
 
-# 7.多线程编程
-## 7.1线程
-  线程是**操作系统所能调度的最小单位**。通过多线程编程使得**一个进程执行多个不同的任务**。**线程享有共享资源，即进程中的全局变量每个线程都可以去访问**。
-## 7.2线程API
+## APP访问硬件
 
-编译多线程代码时，无论 C/C++，都必须用`-pthread`覆盖编译 + 链接pthread 库，包含`-lpthread`的所有功能，还启用线程相关宏和特性；
+  面向对象为**APP**。
 
-``` bash
-gcc xxx.c -pthread
-```
-- **获取线程号：**Linux采用POSIX线程。进程有唯一对应的**PID**,线程有**TID**.本质是一个`pthread_t`变量,但对于线程号而言，在其所属的进程上下文中才有意义。
+**1.查询 2.休眠-唤醒(类rtos中的任务挂起)  3.poll 4.异步通知(类rtos种的CPU)**
 
   ``` c
-  #include <pthread.h>
-  int main()
-  {
-  	pthread_t pthread_self(void);//获取主线程的tid号
-  }
-  
-  typedef unsigned long int pthread_t;
-  pthread_t tid_1 = 0;
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+int fd;
+//APP为查询方式，若APP中调用read函数读取驱动程序中的数据，若无数据立即返回错误
+fd = int open(const char *pathname, O_NONBLOCK,int mode)
+    
+//不传入O_NONBLOCK,默认为休眠-唤醒模式。若APP中调用read函数读取驱动程序中的数据，若无则APP在内核中休眠    
+fd = int open(const char *pathname, int flag, int mode)
+
+//poll方式进行数据读取
+struct pollfd fds[1];
+int timeout_ms = 5000;
+int ret;
+fds[0].fd = fd;
+fds[0].events = POLLIN;//POLLIN:有数据可读 POLLOUT:可以写数据
+ret = poll(fds, 1, timesout_ms);
+if((ret == 1) && (fds[0].revents & POLLIN))
+{
+    read(fd, &val, 4);
+}
+
+//异步通知
+//驱动程序通知APP时，会发出"SIGIO"信号，表示有"IO事件需要处理".
+//1.编写信号处理函数
+static void sig_func(int sig)
+{
+    int val;
+    read(fd, &val, 4);
+}
+//2.注册信号处理函数
+#include <signal.h>
+singal(SIGIO, sig_func);
+//3.打开驱动
+fd = open(argv[1], O_RDWR);
+//4.把进程ID告诉驱动,确定是哪个驱动给此APP发SIGIO信号
+fcntl(fd, F_SETOWN, getpid());
+//5.使能驱动的FASYNC功能：APP中的FASYNC位为1，“使能异步通知”，代表可以接受SIGIO.
+flags = fcntl(fd, F_GETFL);
+fcntl(fd, F_SETFL, flags|FASYNC);
   ```
-- **线程的创建：**(传入多个参数使用**结构体**)
 
-``` c
-#include <pthread.h>
-int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine) (void*), void *arg);
-//argc[0]：线程号变量的指针
-//argc[1]：线程的属性，一般传入NULL表示默认
+# GPIO
 
-//argc[2]：函数指针，线程的执行函数
-//garc[3]：传入参数，不传入为NULL 传入多个参数则使用结构体 (注意void *可以直接传入变量，使用时将其数据类型强制转化回来就行)
-//如果为地址传入，则两个直接相关，变量传入则相互独立
+在 Linux 中，最常见的读写 GPIO 方式就是用 `GPIO sysfs interface`，是通过操作 `/sys/class/gpio` 目录下的 `export 、unexport 、gpio{N}/direction, gpio{N} /value` （用实际引脚号替代` {N}`）等文件实现，经常出现 shell 脚本里面。在 kernel 4.8 开始，加入了 libgpiod 的支持；而原有基于 sysfs 的访问方式，将被逐渐放弃。
 
-//注意线程运行顺序随机，因此需在主线程中加入sleep()函数，释放CPU，使其去执行子线程。当主线程伴随进程结束，所创建出来的子线程也会结束。
+---
+
+> Rockchip Pin 的 ID 按照 **控制器 (bank)+ 端口 (port)+ 索引序号 (pin)** 组成。
+>
+> - 控制器和 GPIO 控制器数量一致
+> - 端口固定 A、B、C 和 D，每个端口仅有 8 个索引号，(a=0,b=1,c=2,d=3)
+> - 索引序号固定 0、1、2、3、4、5、6、7
+
+## GPIO sysfs
+
+> 在 Linux 的设计哲学中，**“一切皆文件”**。GPIO sysfs 就是内核提供的一种**虚拟文件系统**机制，它将底层的硬件 GPIO（通用输入输出引脚）封装成了可以通过标准的读写文件操作（如 echo 和 cat）来控制的接口。这个接口默认挂载在 /sys/class/gpio/ 目录下。
+>
+> **优点**：Sysfs 方式极其简单，不需要交叉编译写 C 代码，不用专门的工具，**直接写 bash 脚本就能控制硬件**，非常适合做早期的硬件验证和简单的开关控制。
+>
+> **缺点**：性能较差。由于每次读写都需要打开文件、关闭文件、进行用户态到内核态的上下文切换，它的翻转速度最大通常在 KHz 级别，**不能用来做高频的软件模拟通信（如模拟 SPI/I2C）**。
+>
+> **⚠️ 现状注意**：从 Linux 内核 4.8 开始，基于 Sysfs 的 GPIO 接口已经被官方标记为 **“废弃 (Deprecated)”**。现代 Linux 推荐使用新的**基于字符设备的子系统（GPIO Character Device, /dev/gpiochip\*）**，并推荐使用 libgpiod 库及其命令行工具（如 gpioget, gpioset, gpioinfo）来操作硬件，以解决安全性和性能问题。不过，由于 Sysfs 太过经典，目前绝大多数现存的嵌入式系统和教程仍在大量使用它。
+
+通过操作 `/sys/class/gpio` 目录下的 `export 、unexport 、gpio{N}/direction, gpio{N} /value` （用实际引脚号替代` {N}`）等文件实现，经常出现 shell 脚本里面。
+
+``` shell
+# 申请/使能引脚 GPIO1_C4
+echo 52 > /sys/class/gpio/export
 ```
-- 线程退出：
+**原理**：默认情况下，Linux 系统为了防止冲突，不会把所有的 GPIO 开放给用户空间。如果你想在应用层（比如通过 shell 脚本）控制某个引脚，你需要先向内核“申请”这个引脚的使用权。
 
-``` c
-#include <pthread.h>
-//线程自身主动退出
-void pthread_exit(void *retval); //退出可以给主线程传递一个void *数据(主线程通过join函数获取)，
-                                 //不传为NULL 传出的数据需要用static修饰
+**操作**：将引脚的**全局编号**（这里是 52）写入 `export` 文件。
 
-//其他线程让其退出
-int pthread_cancel(pthread_t thread); //argc[0]:tid号 成功：返回0
+**现象**：执行成功后，内核会在 `/sys/class/gpio/` 目录下自动生成一个名为 `gpio52` 的文件夹。**后续对该引脚的所有配置都在这个新文件夹里进行**。
 
+---
 
-//线程资源回收，等待子线程都执行完毕再退出主线程
-int pthread_join(pthread_t thread, void **retval);       //阻塞方式,直到成功返回才返回
-int pthread_tryjoin_np(pthread_t thread, void **retval); //非阻塞,成功返回0
-//argv[0]:tid
-//argv[1]:接受传入数据(类型为地址)的变量的地址(万能指针)
+```shell
+# 设置引脚为输入模式
+echo in > /sys/class/gpio/gpio52/direction
 ```
-## 7.3信号量
-
-### 信号量创建与删除
-
-通过信号量来**解决线程的执行顺序**。
-``` c
-#include <semaphore.h>
-
-static sem_t g_sem;
-
-int sem_init(sem_t *sem, int pshared, unsigned int value);  // 信号量初始化
-//argv[0]:sem_t指针
-//argv[1]:0为线程控制，否则为进程控制
-//grav[2]:初始值，0表示阻塞(无)，1为运行(有)
-
-int sem_destory(sem_t *sem);  // 删除信号量
+```shell
+# 读取引脚的值
+cat /sys/class/gpio/gpio52/value
 ```
-### 7.3.1 P/V操作
-``` c
-#include <semaphore.h>
-
-int sem_wait(sem_t *sem);     // 尝试获取，检测此信号量是否有资源可用，没有则阻塞
-int sem_trywait(sem_t *sem);  // 非阻塞式申请信号量资源
-
-int sem_post(sem_t *sem); // 释放此信号量的资源
+```shell
+# 设置引脚为输出模式
+echo out > /sys/class/gpio/gpio52/direction
+# 设置引脚为低电平
+echo 0 > /sys/class/gpio/gpio52/value
+# 设置引脚为高电平
+echo 1 > /sys/class/gpio/gpio52/value
 ```
-## 7.4 互斥量
-  用来对**临界资源的保护**。对临界资源加锁保证其只被单个线程操作，待操作结束后其他线程才具有访问权限，**一般为全局变量。**
-``` c
-pthread_mutex_t mutex  // 互斥量的数据结构类型
-```
-### 7.4.1 互斥量创建与删除
-``` c
-int pthread_mutex_init(phtread_mutex_t *mutex, const pthread_mutexattr_t *restrict attr);
-//argv[0]: 该互斥量的地址
-//argv[1]: 互斥量的属性,一般为NULL
 
-int pthread_mutex_destory(pthread_mutex_t *mutex);
-```
-### 7.4.2 加锁与解锁
-当某一个线程获得了执行权后，执行 `lock` 函数一旦加锁成功后，**其余线程遇到 lock 函数时对互斥量尝试lock时会发生阻塞**，直至获取该互斥量的线程执行 `unlock` 函数后，`unlock` 函数会唤醒其他正在阻塞在此互斥量的线程。
-``` c
-int pthread_mutex_lock(pthread_mutex_t *mutex);
-int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
-int pthread_mutex_trylock(pthread_mutex_t *mutex);  // 非阻塞方式
-```
 
 # 串口
 
 ## TTY体系
 
-​	TTY的核心是：**为用户的交互式输入/输出提供一个统一的、分层的抽象模型**。它将物理的、多样的输入（键盘、串口）和输出（显示器、串口）设备，抽象成一个统一的“TTY设备文件”，供上层的Shell和应用进程读写。它隐藏了底层硬件（如 UART）或虚拟接口的差异，向上提供标准化的操作方式（读 / 写文件、配置参数），是 Linux 中串口通信、终端交互的基础。
+### TTY字符设备文件
 
-​	Linux 的核心思想是 “一切皆文件”，TTY 体系也遵循这一原则：**每个 TTY 设备都对应一个 “设备文件”，位于`/dev/`目录下**。应用程序无需直接操作硬件（如 UART 的寄存器），只需通过标准的文件操作（`open()`打开、`read()`读、`write()`写、`ioctl()`配置参数）操作这些设备文件，**系统内核会自动将文件操作转换为对硬件 / 虚拟设备的指令**。
+​	是 Linux 中串口通信、终端交互的基础，“TTY”是 Linux 内核中的**字符设备文件**（它代表一个 双向字节流通道，用户空间通过标准的 `open/read/write/ioctl` 系统调用与 TTY 设备交互）；**终端依靠 TTY 子系统工作**，但 TTY 还可以连接非终端设备（比如 GPS 模块、蓝牙串口）。
+
+​	TTY的核心是：为用户的交互式输入/输出提供一个统一的、分层的抽象模型，是应用程序与交互式设备之间的桥梁。TTY在底层整合了不同的输入途径（如 input 子系统管理的键盘、直接操作 UART 硬件的串口）和输出途径（如显卡驱动、串口），然后向上一层，将其**抽象成一个统一的双向“TTY设备文件”**，供上层的Shell和应用进程读写。**它隐藏了底层硬件（如 UART）或虚拟接口的差异，向上提供标准化的操作方式（读 / 写文件、配置参数）**。
+
+### 终端
 
 <img src="Linux开发/终端.png" alt="终端" style="zoom:50%;" />
 
----
+**物理终端：**最原始的终端形式，指的是 实际的硬件设备 ：早期：电传打字机 (Teletype, TTY)，后来：显示器 + 键盘组合的终端设备在现代个人电脑上，物理终端就是直接的显示器和键盘 ，没有经过软件虚拟化层。
 
-- `shell`进程需要通过 TTY 设备接收输入（比如键盘按键）、输出结果（比如命令执行反馈）；
-- 它的交互规则（比如回车换行、控制字符解析）都是基于 TTY 子系统的约定。
+**虚拟终端：**Linux 内核提供的软件模拟的终端 ，可以在一个物理显示器上运行多个独立的命令行会话，Ctrl + Alt + F1 ~ F6 切换到虚拟终端 1-6 (纯文本模式)；Ctrl + Alt + F7 切换回图形界面 (X11/Wayland)；
 
-而图形界面下的进程（`Ctrl+Alt+T`打开的 ）是**用户态的图形应用**，它本身不是内核管理的 TTY 设备 —— 如果没有伪终端，`shell`就找不到 “可交互的终端载体”，因此伪终端是内核提供的 **“主 - 从成对的软件设备”**：
+**伪终端**：图形界面下`Ctrl+Alt+T`打开的是**用户态的图形应用**，它本身不是内核管理的 TTY 设备 —— 如果没有**伪终端**，`shell`就找不到 “可交互的终端载体”，因此伪终端是内核提供的 “主 - 从成对的软件设备”：
+
+- **主端（图形窗口）**：由终端模拟器（ “一个可以输入输出的交互窗口”）控制，负责接收你在图形窗口里的输入、并显示`shell`的输出，是**应用程序**。
+
+- **从端（伪终端）**：关联`shell`，让`shell`以为自己在和真实的 TTY 设备交互，终端模拟器（图形应用）就能通过伪终端“伪装” 成`shell`能识别的 TTY 设备 。
+
+### Shell
+
+`shell`进程需要通过 TTY 设备接收输入（比如键盘按键）、输出结果（比如命令执行反馈）；`shell`的交互规则（比如回车换行、控制字符解析）都是基于 TTY 子系统的约定。
+
+而图形界面下的应用进程（`Ctrl+Alt+T`打开的 ）是**用户态的图形应用**，它本身不是内核管理的 TTY 设备 —— 如果没有伪终端，`shell`就找不到 “可交互的终端载体”，因此伪终端是内核提供的 “主 - 从成对的软件设备”：
 
 - **主端**：由终端模拟器（ “一个可以输入输出的交互窗口”）控制，负责接收你在图形窗口里的输入、并显示`shell`的输出，是**应用程序**。
-- **从端**：关联`shell`，让`shell`以为自己在和真实的 TTY 设备交互，**为一个伪终端**。终端模拟器（图形应用）就能通过伪终端“伪装” 成`shell`能识别的 TTY 设备 。
+- **从端**：关联`shell`，让`shell`以为自己在和真实的 TTY 设备交互，终端模拟器（图形应用）就能通过伪终端“伪装” 成`shell`能识别的 TTY 设备 。
 
 ``` shell
 a@cj:~$ tty # 显示当前用户当前正在使用的终端的名称
 /dev/pts/0  # pts：Pseudo Terminal Slave（伪终端从设备）
 ```
----
-
-同一个文件可以被同一个进程以不同权限打开多次，对应不同 fd。伪终端的从端就是这样：
+**同一个文件可以被同一个进程以不同权限打开多次**，对应不同 fd：
 
 - fd 0：以**只读**方式打开 `/dev/pts/0`：标准输入`stdin`，  从终端模拟器输入的。
 
@@ -1767,11 +5174,11 @@ a@cj:~$ tty # 显示当前用户当前正在使用的终端的名称
 
   这就是三个 fd 的本质！不是三个文件，是同一个文件的三个不同 “句柄”，权限不同。
 
-进程启动时，**默认继承父进程已经打开的 0、1、2 文件描述符**，包括它们指向的**文件 / 设备**。因此在终端里，由 shell 启动的进程（你敲命令跑起来的）0/1/2 确实指向启动它的那个伪终端从端 /dev/pts/x。
+进程启动时，**默认继承父进程已经打开的 0、1、2 文件描述符**，包括它们指向的**文件 / 设备**。因此在终端里，由 shell 启动的进程（你敲命令跑起来的）0/1/2 指向启动它的那个伪终端从端 /dev/pts/x。
 
 ## 应用开发
-
 ### `termios.h`
+#### `struct termios`
 
 **核心作用：** 提供串口(终端)的配置功能，主要是用来设置**行规程**。
 
@@ -1779,10 +5186,10 @@ a@cj:~$ tty # 显示当前用户当前正在使用的终端的名称
 #define NCCS 32
 struct termios {
     // 1. 控制标志字段
-    tcflag_t c_iflag;    // 输入模式标志 (Input mode flags)
-    tcflag_t c_oflag;    // 输出模式标志 (Output mode flags)
-    tcflag_t c_cflag;    // 控制模式标志 (Control mode flags)
-    tcflag_t c_lflag;    // 本地模式标志 (Local mode flags)：控制终端驱动程序的本地行为。
+    tcflag_t c_iflag;    // 输入模式标志 (接受数据时处理方式)
+    tcflag_t c_oflag;    // 输出模式标志 (发送数据时处理方式)
+    tcflag_t c_cflag;    // 控制模式标志 (硬件控制: 波特率、数据位、校验、流控 )
+    tcflag_t c_lflag;    // 本地模式标志 (本地模式: 回显、信号、规范/原始模式 )
     
     // 2. 线路规程和控制字符
     cc_t c_line;         // 线路规程 (Line discipline)
@@ -1796,44 +5203,64 @@ struct termios {
     #define _HAVE_STRUCT_TERMIOS_C_ISPEED 1
     #define _HAVE_STRUCT_TERMIOS_C_OSPEED 1
 };
-/---------------------------------------------------------------------------------/
-// c_cflag各标志位详解：
+
+    
+// 控制字符下标（c_cc数组索引）：
+VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSTART, VSTOP
+// 其中最重要的：
+VMIN      // 最小读取字符数（byte）
+VTIME     // 读取超时时间（ms）
+```
+#### `c_cflag`
+
+`c_cflag`各标志位详解：
+
+``` c
 // CSIZE   - 字符大小掩码，用这个将所有数据位全部清零
+
 //   CS5   - 5位数据位
 //   CS6   - 6位数据位
 //   CS7   - 7位数据位
 //   CS8   - 8位数据位（最常用）
 
-// PARENB  - 启用奇偶校验生成和检测
+// PARENB  - 是否启用奇偶校验
 // PARODD  - 奇校验（否则为偶校验）
     
 // CSTOPB  - 设置两个停止位（否则为1个）
     
     
-// HUPCL   - 最后关闭时挂断（降低 DTR）
-// CLOCAL  - 忽略调制解调器状态线
-// CREAD   - 启用接收器
-// CRTSCTS - 启用硬件流控制（RTS/CTS）
-/---------------------------------------------------------------------------------/
+// HUPCL   - 是否最后关闭时挂断（降低 DTR）
+// CLOCAL  - 是否忽略调制解调器状态线
+// CREAD   - 是否启用接收器
+// CRTSCTS - 是否启用硬件流控制（RTS/CTS）
+```
+
+#### `c_iflag`
+
+``` c
 // c_iflag各标志位详解：
 // IXON    - 启用输出软件流控制（XON/XOFF）
 // IXOFF   - 启用输入软件流控制
 // IXANY   - 允许任何字符重新启动输出（而不仅仅是 XON）
-    
+
 // ICRNL   - 将输入中的 CR 转换为 NL（回车转换为换行）
 // INLCR   - 将输入中的 NL（换行）转换为 CR（回车）
 // IGNCR   - 忽略输入中的 CR（回车）
 // IUCLC   - 将输入中的大写字母转换为小写（非POSIX）
-    
+
 // IGNBRK  - 忽略 BREAK 条件（线路中断）
 // BRKINT  - BREAK 产生中断信号
 // ISTRIP  - 剥离第8位（将8位数据转换为7位）
 // IMAXBEL - 当输入队列满时响铃
-    
+	
 // IGNPAR  - 忽略有奇偶校验错误的字符
 // PARMRK  - 标记奇偶校验错误
 // INPCK   - 启用输入奇偶校验检查
-/---------------------------------------------------------------------------------/
+```
+
+#### `c_oflag`
+
+``` c
 // c_oflag各标志位详解：
 // OPOST   - 启用输出处理
 // OLCUC   - 将输出中的小写字母转换为大写（非POSIX）
@@ -1853,304 +5280,32 @@ struct termios {
 // BSDLY   - 退格延迟选择
 // VTDLY   - 垂直制表符延迟选择
 // FFDLY   - 换页延迟选择
-    
-    
-// 控制字符下标（c_cc数组索引）：
-VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSTART, VSTOP
-// 其中最重要的：
-VMIN      // 最小读取字符数（byte）
-VTIME     // 读取超时时间（ms）
 ```
----
 
-**常用控制函数**：
+
+
+#### 终端控制函数
 
 ``` c
 // 控制函数："tc" = Terminal Control（终端控制）; attr" = Attributes（属性）
-int tcgetattr (int __fd, struct termios *__termios_p); // 从串口文件中获取终端的属性
+int tcgetattr (int __fd, struct termios *__termios_p); // 获取终端属性
+int tcsetattr (int __fd, int __optional_actions, const struct termios *__termios_p);
+                             // TCSANOW  立即生效（Now）
+                             // TCSADRAIN // 等待所有输出完成后再生效（Drain）
+                             // TCSAFLUSH // 等待输出完成，并清空输入缓冲区后再生效（Flush）
+	
 
-int tcsetattr (int __fd, int __optional_actions, const struct termios *__termios_p);  // 设置属性
-    					 // TCSANOW  立即生效（Now）
-						 // TCSADRAIN // 等待所有输出完成后再生效（Drain）
-						 // TCSAFLUSH // 等待输出完成，并清空输入缓冲区后再生效（Flush）
-		          
-    
+
+// 清空串口的输入/输出缓冲区，在配置新参数前清除旧数据    
 int tcflush(int fd, int queue_selector); // TCIFLUSH：刷新输入队列（接收缓冲区），即丢弃尚未读取的数据。
 										 // TCOFLUSH：刷新输出队列（发送缓冲区），即丢弃尚未发送的数据。
 										 // TCIOFLUSH：同时刷新输入和输出队列。
 
-int tcdrain(int fd);       // 等待所有输出完成 - 确保数据全部发送完毕
+int tcdrain(int fd);  // 等待所有输出完成 - 确保数据全部发送完毕
+
 
 int cfsetispeed (struct termios *__termios_p, speed_t __speed);   // 设置输入波特率
 int cfsetospeed (struct termios *__termios_p, speed_t __speed);   // 设置输出波特率
-```
-
-### 示例程序
-
-#### 打开与配置串口
-
-``` c
-/**
- * serial_basic.c - Linux串口基础操作示例
- * 编译: gcc -o serial_basic serial_basic.c
- * 运行: ./serial_basic /dev/ttyUSB0
- */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <errno.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <sys/types.h>
-
-// 串口配置结构体
-typedef struct {
-    int fd;                     // 文件描述符
-    char port[64];              // 串口设备路径
-    struct termios old_options; // 保存的原始配置
-} serial_port_t;
-
-/**
- * 打开并配置串口
- * @param port 串口设备路径，如 "/dev/ttyUSB0"
- * @param baud 波特率，如 115200
- * @return 成功返回串口结构体指针，失败返回NULL
- */
-serial_port_t* serial_open(const char *port, int baud) {
-    serial_port_t *serial = malloc(sizeof(serial_port_t));  // 使用堆分配，需要返回出去
-    if (!serial) return NULL;
-    
-    strncpy(serial->port, port, sizeof(serial->port) - 1);  // 减去`\0`
-    
-    // 1. 以可读可写、非阻塞方式打开串口
-    serial->fd = open(port, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (serial->fd < 0) {
-        perror("打开串口失败");
-        free(serial);
-        return NULL;
-    }
-    
-    // 2. 保存原始串口设置（用于恢复）
-    if (tcgetattr(serial->fd, &serial->old_options) < 0) {
-        perror("获取串口原始设置失败");
-        close(serial->fd);
-        free(serial);
-        return NULL;
-    }
-    
-    // 3. 创建新的配置
-    struct termios options;
-    memset(&options, 0, sizeof(options));
-    
-    // 4. 获取当前配置
-    tcgetattr(serial->fd, &options);
-    
-    // 5. 设置波特率
-    speed_t speed;
-    switch (baud) {
-        case 9600:   speed = B9600;   break;
-        case 19200:  speed = B19200;  break;
-        case 38400:  speed = B38400;  break;
-        case 57600:  speed = B57600;  break;
-        case 115200: speed = B115200; break;
-        case 230400: speed = B230400; break;
-        default:     speed = B115200; break;
-    }
-    cfsetispeed(&options, speed);
-    cfsetospeed(&options, speed);
-    
-    // 6. 设置数据位、停止位、校验位
-    options.c_cflag |= (CLOCAL | CREAD);  // 本地连接，启用接收
-    options.c_cflag &= ~CSIZE;            // 清除数据位掩码
-    options.c_cflag |= CS8;               // 8位数据位
-    options.c_cflag &= ~PARENB;           // 无校验位
-    options.c_cflag &= ~CSTOPB;           // 1位停止位
-    options.c_cflag &= ~CRTSCTS;          // 禁用硬件流控
-    
-    // 7. 设置输入模式
-    options.c_iflag &= ~(IXON | IXOFF | IXANY);     // 禁用软件流控
-    options.c_iflag &= ~(INLCR | ICRNL | IGNCR);    // 禁用特殊字符处理
-    
-    // 8. 设置输出模式
-    options.c_oflag &= ~OPOST;  // 原始输出（非规范模式）
-    options.c_oflag &= ~ONLCR;  // 不将\n转换为\r\n
-    
-    // 9. 设置本地模式
-    options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG); // 非规范模式，禁用回显
-    
-    // 10. 设置超时和最小读取字符数
-    options.c_cc[VMIN]  = 1;   // 读取的最小字符数
-    options.c_cc[VTIME] = 10;  // 超时时间（0.1秒单位）
-    
-    // 11. 清空缓冲区并应用设置
-    tcflush(serial->fd, TCIOFLUSH);
-    if (tcsetattr(serial->fd, TCSANOW, &options) < 0) {
-        perror("设置串口参数失败");
-        close(serial->fd);
-        free(serial);
-        return NULL;
-    }
-    
-    printf("串口 %s 打开成功，波特率: %d\n", port, baud);
-    return serial;
-}
-```
-#### 写入与读取
-``` c
-/**
- * 写入数据到串口
- * @param serial 串口结构体
- * @param data 要写入的数据
- * @param len 数据长度
- * @return 实际写入的字节数
- */
-int serial_write(serial_port_t *serial, const unsigned char *data, size_t len) {  // 使用系统调用write即可
-    if (!serial || serial->fd < 0) return -1;
-    
-    ssize_t written = write(serial->fd, data, len);
-    if (written < 0) {
-        perror("串口写入失败");
-        return -1;
-    }
-    
-    // 确保数据完全发送
-    tcdrain(serial->fd);
-    return written;
-}
-
-/**
- * 从串口读取数据（阻塞方式）
- * @param serial 串口结构体
- * @param buffer 接收缓冲区
- * @param max_len 缓冲区最大长度
- * @param timeout_ms 超时时间（毫秒）
- * @return 实际读取的字节数
- */
-int serial_read(serial_port_t *serial, unsigned char *buffer, size_t max_len, int timeout_ms) {
-    if (!serial || serial->fd < 0) return -1;
-    
-    fd_set read_fds;
-    struct timeval tv;
-    
-    FD_ZERO(&read_fds);
-    FD_SET(serial->fd, &read_fds);
-    
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    
-    // 使用select实现超时读取
-    int ret = select(serial->fd + 1, &read_fds, NULL, NULL, &tv);
-    if (ret < 0) {
-        perror("select错误");
-        return -1;
-    } else if (ret == 0) {
-        // 超时
-        return 0;
-    }
-    
-    // 有数据可读
-    if (FD_ISSET(serial->fd, &read_fds)) {
-        ssize_t bytes = read(serial->fd, buffer, max_len);
-        if (bytes < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                perror("串口读取失败");
-            }
-            return -1;
-        }
-        return bytes;
-    }
-    
-    return 0;
-}
-
-/**
- * 关闭串口并恢复原始设置
- * @param serial 串口结构体
- */
-void serial_close(serial_port_t *serial) {
-    if (!serial) return;
-    
-    if (serial->fd >= 0) {
-        // 恢复原始设置
-        tcsetattr(serial->fd, TCSANOW, &serial->old_options);
-        // 清空缓冲区
-        tcflush(serial->fd, TCIOFLUSH);
-        // 关闭文件描述符
-        close(serial->fd);
-    }
-    
-    free(serial);
-    printf("串口已关闭\n");
-}
-
-```
-#### 测试函数
-```c
-// 测试函数
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("用法: %s <串口设备>\n", argv[0]);
-        printf("示例: %s /dev/ttyUSB0\n", argv[0]);
-        return 1;
-    }
-    
-    // 1. 打开串口
-    serial_port_t *serial = serial_open(argv[1], 115200);
-    if (!serial) {
-        return 1;
-    }
-    
-    // 2. 测试写入
-    printf("测试: 发送 'AT\\r\\n' 到串口...\n");
-    const char *test_cmd = "AT\r\n";
-    int written = serial_write(serial, (unsigned char*)test_cmd, strlen(test_cmd));
-    printf("发送了 %d 字节\n", written);
-    
-    // 3. 测试读取
-    printf("等待响应(超时3秒)...\n");
-    unsigned char buffer[256];
-    memset(buffer, 0, sizeof(buffer));
-    
-    int total_bytes = 0;
-    for (int i = 0; i < 10; i++) {
-        int bytes = serial_read(serial, buffer + total_bytes, 
-                               sizeof(buffer) - total_bytes - 1, 300);
-        if (bytes > 0) {
-            total_bytes += bytes;
-            printf("收到 %d 字节\n", bytes);
-            
-            // 如果收到完整响应，提前退出
-            if (strstr((char*)buffer, "OK") || strstr((char*)buffer, "ERROR")) {
-                break;
-            }
-        } else if (bytes == 0) {
-            printf("读取超时\n");
-            break;
-        } else {
-            break;
-        }
-    }
-    
-    if (total_bytes > 0) {
-        buffer[total_bytes] = '\0';
-        printf("收到数据: %s\n", buffer);
-        
-        // 十六进制显示
-        printf("十六进制: ");
-        for (int i = 0; i < total_bytes; i++) {
-            printf("%02X ", buffer[i]);
-        }
-        printf("\n");
-    }
-    
-    // 4. 关闭串口
-    serial_close(serial);
-    
-    return 0;
-}
 ```
 
 ## 驱动开发
@@ -2204,7 +5359,7 @@ static struct platform_driver serial_imx_driver = {
 
 在 Linux 中，I2C 被抽象为 **“适配器（Controller）- 设备（Device）- 驱动（Driver）”** 三层模型，这是所有开发的基础：
 
-1. **I2C 适配器（I2C Controller）**：对应硬件上的 I2C 控制器（比如 SOC 的 I2C 外设），Linux 内核为其提供`i2c_adapter`结构体，负责物理层的时序生成。系统中每个适配器会被分配一个编号（如`i2c-0`、`i2c-1`）。
+1. **I2C 适配器（I2C Controller）**：对应硬件上的 I2C 控制器（比如 SOC 的 I2C 外设），Linux 内核为其提供`i2c_adapter`结构体，负责物理层的时序生成。系统中每个适配器会被分配一个编号在`/dev`中可以进行查看：如`i2c-0`、`i2c-1`。
 2. **I2C 设备（I2C Device）**：挂在 I2C 总线上的从设备（比如温湿度传感器 SHT30、EEPROM AT24C02），内核用`i2c_client`结构体描述，包含设备地址、关联的适配器等信息。
 3. **I2C 驱动（I2C Driver）**：针对具体 I2C 设备的驱动程序，内核用`i2c_driver`结构体描述，核心是实现`probe`（设备匹配成功时执行）、`remove`（设备移除时执行）等函数，以及和设备的通信逻辑。
 
@@ -2237,11 +5392,14 @@ i2cdetect -y 1
 i2cdump -y 1 0x44
 # 写入数据到设备（比如向0x44设备的0x01寄存器写入0x02）
 i2cset -y 1 0x44 0x01 0x02
+# 查看通信对应的芯片
+cat /sys/bus/i2c/devices/1-0022/name
+cat /sys/bus/i2c/devices/1-0042/name
 ```
 
 ## 应用层开发
 
-内核将`/dev/i2c-X`封装为**文件**，通过标准的`open/read/write/ioctl`系统调用即可通信，核心是用`ioctl`设置从设备地址、执行读写操作。
+内核将`/dev/i2c-*`封装为**文件**，通过标准的`open/read/write/ioctl`系统调用即可通信，核心是用`ioctl`设置从设备地址、执行读写操作。
 
 ``` c
 #ifndef __MY_IIC_H__
@@ -2302,7 +5460,929 @@ int main(){
 
 ```
 
-# 同步与互斥
+# RT-Linux
+
+对于你现在的 **RK3588 + EtherCAT 1 kHz 控制器**，`mlockall()` 是应该考虑的基础实时措施之一，但更关键的是把它和 **预分配（preallocation）+ prefault/touch + SCHED_FIFO + CPU affinity + RT 线程禁止动态分配/日志 I/O** 作为一个整体来做。
+
+## `mlockall()`（锁内存页）
+
+### 为什么实时程序会怕内存？
+
+核心作用：**把进程的内存页锁在物理内存RAM中，避免被换出到swap**。它最主要的目的**不是“让内存访问更快”**，而是：**降低不可预测的 page falut / paging 延迟**。
+
+普通 Linux 程序看到的是**虚拟内存（virtual memory）**。例如：
+
+```c
+double joint_pos[32];
+```
+
+从进程角度看，它有一个虚拟地址：
+
+```
+0x7f123456...
+```
+
+但这个虚拟地址对应的物理内存页，并不一定始终存在于 RAM。大概可以理解成：
+
+```
+程序虚拟地址
+     │
+     ▼
+Virtual Page
+     │
+     ├── RAM 中       ← 快
+     │
+     └── swap / 尚未装入
+```
+
+如果 CPU 访问一个当前不在 RAM 中的页面，就可能产生：$$\boxed{\text{page fault}}$$，然后内核需要处理：
+
+```
+CPU access
+   ↓
+page fault
+   ↓
+进入 kernel
+   ↓
+找到 / 分配 physical page
+   ↓
+必要时从磁盘 swap 读取
+   ↓
+更新 page table
+   ↓
+恢复程序运行
+```
+
+这个过程对普通程序没什么。但对于：
+
+```
+EtherCAT RT thread
+1000 Hz
+period = 1 ms
+```
+
+如果某个周期理论预算是：$T=1 ms,T=1\text{ ms}$,却突然因为 page fault 卡：$50μs, 200μs, 1ms$，实时周期就可能 miss deadline。
+
+### 如何使用？
+
+#### 函数定义
+
+```c
+#include <sys/mman.h>
+
+int mlockall(int flags);
+```
+
+Linux 手册定义的是：它可以把调用进程地址空间中全部或部分页面锁入 RAM，阻止这些页面被换出到 swap；**以完整的 `memory page` 为单位**。
+
+```c
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+可以理解为：
+
+```
+           process virtual memory
+                    │
+       ┌────────────┴─────────────┐
+       ▼                          ▼
+currently mapped            future mappings
+     pages                       pages
+       │                          │
+ MCL_CURRENT                 MCL_FUTURE
+       │                          │
+       └────────────┬─────────────┘
+                    ▼
+              locked in RAM
+```
+
+#### `MCL_CURRENT`
+
+```c
+mlockall(MCL_CURRENT);
+```
+
+意思是：$\boxed{\text{锁住当前已经映射进进程地址空间的所有页面}}$，包括很多东西，Linux 手册明确说明，**`mlockall()` 可以覆盖代码段、数据段、栈、共享库、共享内存以及 mmap 文件等当前映射**。
+
+关键词是：
+
+> **CURRENT**
+
+假设：
+
+```c
+mlockall(MCL_CURRENT);
+
+std::vector<double> x;
+x.resize(10000000);
+```
+
+后面这次 `resize()` 新分配出来的内存：$\boxed{不一定被锁定}$，因为它是之后产生的 mapping。
+
+#### `MCL_FUTURE`
+
+所以实时程序经常还加：$\boxed{MCL\_FUTURE}$，即：
+
+```c
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+含义是：$\boxed{\text{当前 + 将来映射的内存都进行锁定}}$，例如以后出现：
+
+```c
+malloc();
+new;
+mmap();
+stack growth;
+```
+
+对应的新页面也进入 memory locking 范围。Linux 文档特别列出了 heap / stack growth、`mmap()`、`malloc()` 等后续映射场景。
+
+所以实时程序里最常见的是：
+
+```
+if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+    perror("mlockall");
+}
+```
+
+而不是单独：
+
+```
+MCL_CURRENT
+```
+
+#### `MCL_ONFAULT`
+
+Linux 4.4 起还有$\boxed{MCL\_ONFAULT}$，例如：
+
+```c
+mlockall(
+    MCL_CURRENT |
+    MCL_FUTURE  |
+    MCL_ONFAULT
+);
+```
+
+它和普通模式稍微不同。普通是现在就把需要的页面弄 resident 并 lock，而`MCL_ONFAULT`的思想是：
+
+```
+先标记 mapping
+        ↓
+页面第一次真正 fault in
+        ↓
+再 lock
+```
+
+因此**对于地址空间很大，但只会用其中一小部分的程序**，`ONFAULT` 可以避免一上来锁大量实际上不会访问的页面。Linux 文档也说明 `MCL_ONFAULT` 是为了高效处理大型映射、但实际只使用少量页面的场景。
+
+#### `munlockall()`（解除锁页）
+
+对应的解除操作：
+
+```
+munlockall();
+```
+
+意思是：$\boxed{\text{解除当前进程所有 locked pages}}$，之后这些页面重新允许被内核换出。不过进程退出时锁也会自动解除，所以很多长期运行的 RT daemon 不一定显式调用。
+
+### 为什么会失败？
+
+典型代码应该永远检查返回值：
+
+```c
+if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+    perror("mlockall");
+    return -1;
+}
+```
+
+成功：`0`；失败：`-1`。同时设置：`errno`。
+
+Linux 上最常见的原因之一就是：$\boxed{\texttt{RLIMIT\_MEMLOCK}}$，**它限制普通进程最多能锁多少 RAM**。当前 Linux 对非特权进程会根据 `RLIMIT_MEMLOCK` 限制可锁内存，而具有 `CAP_IPC_LOCK` capability 的特权进程不受这一限制。
+
+#### `ulimit`命令
+
+可以看：
+
+```
+ulimit -l
+```
+
+也可以看：
+
+```
+ulimit -a
+```
+
+#### `CAP_IPC_LOCK`
+
+Linux 还存在 capability：
+
+```
+CAP_IPC_LOCK
+```
+
+它允许进程进行 memory locking。
+
+所以一些实时程序会通过：
+
+- systemd service；
+- limits.conf；
+- capabilities；
+
+给进程合适的权限，而不是简单粗暴：
+
+```
+sudo ./robot
+```
+
+例如 systemd 服务里经常能看到类似配置：
+
+```
+LimitMEMLOCK=infinity
+```
+
+其目标就是允许实时进程锁住需要的 RAM。
+
+#### 查看进程锁了多少？
+
+Linux 可以通过：
+
+```shell
+cat /proc/<pid>/status
+```
+
+查看`VmLck:`这一项。
+
+例如：
+
+```
+grep VmLck /proc/12345/status
+```
+
+可能得到：
+
+```
+VmLck:    82432 kB
+```
+
+它表示该进程目前锁住了多少内存。Linux man page 也明确指出 `/proc/PID/status` 中的 `VmLck` 字段可以观察 `mlock()`、`mlockall()` 等锁定的内存量。
+
+你也可以：
+
+```
+grep VmLck /proc/$(pidof your_program)/status
+```
+
+### 深入理解
+
+#### 是提高实时确定性
+
+你可以把：
+
+```
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+直接记成：
+
+> **把这个实时进程现在和以后使用的内存尽可能钉在 RAM 里，避免实时循环因为 paging 突然卡住。**
+
+即：
+
+$\boxed{ \texttt{mlockall} \rightarrow \text{memory residency} \rightarrow \text{减少 paging/page-fault latency} \rightarrow \text{提高实时确定性} }$
+
+而不是：
+
+$\boxed{ \texttt{mlockall} \rightarrow \text{程序整体运行更快} }$
+
+后者是常见误解。
+
+#### 注意`fork()`
+
+Linux 文档特别警告实时进程：
+
+> 在 `mlockall()` 之后应避免 `fork()`。
+
+原因是 `fork()` 会为地址空间准备：$\text{Copy-on-Write}$，之后一旦写：
+
+```
+write
+ ↓
+COW page fault
+ ↓
+allocate/copy page
+```
+
+可能出现明显 latency。
+
+Linux man page 甚至明确指出，在 `mlockall()` / `mlock()` 后，对实时进程来说不应调用 `fork()`，即使是进程中的低优先级线程调用也应避免。
+
+所以：
+
+```
+初始化
+ ↓
+fork / daemonize（如果需要）
+ ↓
+初始化资源
+ ↓
+mlockall
+ ↓
+进入 realtime
+```
+
+通常比：
+
+```
+mlockall
+ ↓
+RT running
+ ↓
+fork()
+```
+
+合理得多。
+
+## 设置实时线程调度优先级
+
+### 核心作用
+
+**告诉 Linux scheduler，当多个 runnable thread 同时竞争 CPU 时，哪一个线程应该优先运行。**它最主要的目的**不是“让线程计算得更快”**，而是：
+
+> **让时间敏感的实时线程在需要运行时，能够尽快抢到 CPU，从而降低 scheduling latency 和 jitter。**
+
+### 调度策略
+
+Linux 常见 scheduling policy 包括：
+
+```text
+SCHED_OTHER       普通 Linux 调度
+
+SCHED_BATCH       batch workload
+
+SCHED_IDLE        极低优先级普通任务
+
+SCHED_FIFO        实时 FIFO
+SCHED_RR          实时 Round-Robin
+
+SCHED_DEADLINE    deadline-based RT scheduling
+```
+
+### 如何使用
+
+#### `pthread_setschedparam()`（设置策略和优先级）
+
+你的 C++ pthread 程序里最常见的是：
+
+```c++
+#include <pthread.h>
+
+int pthread_setschedparam(
+    pthread_t thread,					// 线程
+    int policy,							// 调度策略
+    const struct sched_param *param		// 优先级
+);
+
+
+struct sched_param {
+    int sched_priority;
+};
+```
+
+`pthread_setschedparam()` 同时设置：$\boxed{ \text{scheduling policy} + \text{scheduling priority} }$。
+
+#### `pthread_setschedprio()`（设置优先级）
+
+如果线程已经是$\boxed{SCHED\_FIFO}$，只是想修改优先级，可以：
+
+```c++
+pthread_setschedprio(thread, 80);
+```
+
+#### 查询系统支持的优先级
+
+``` c
+int min_priority =
+    sched_get_priority_min(SCHED_FIFO);
+
+
+
+int max_priority =
+    sched_get_priority_max(SCHED_FIFO);
+```
+
+### `chrt`（查看线程优先级）
+
+例如查看进程：
+
+```shell
+chrt -p <pid>
+```
+
+可能得到：
+
+```shell
+pid 1234's current scheduling policy: SCHED_FIFO
+pid 1234's current scheduling priority: 80
+```
+
+`chrt` 可以查看或设置 `SCHED_OTHER`、`SCHED_FIFO`、`SCHED_RR` 等调度策略。也可以直接启动：
+
+```
+sudo chrt -f 80 ./robot_controller
+```
+
+意思：
+
+```
+-f
+ ↓
+SCHED_FIFO
+
+80
+ ↓
+priority 80
+```
+
+### 注意事项
+
+#### 解决锁带来的优先级翻转
+
+解决经典 priority inversion 的一个办法是：$\boxed{\text{Priority Inheritance}}$，mutex 可以配置：
+
+```c++
+PTHREAD_PRIO_INHERIT
+```
+
+例如：
+
+```c++
+pthread_mutexattr_t attr;
+
+pthread_mutexattr_init(&attr);
+
+pthread_mutexattr_setprotocol(
+    &attr,
+    PTHREAD_PRIO_INHERIT
+);
+
+
+pthread_mutex_init(&mutex, &attr);
+```
+
+现在：
+
+```
+L priority 40
+持有 mutex
+```
+
+H开始等待这个 mutex，系统临时把 L 提升：
+
+```
+L:
+
+40
+ ↓
+80 temporarily
+```
+
+于是 M priority 60 无法再抢占 L。
+
+L 可以赶快：
+
+```
+finish critical section
+      ↓
+unlock
+      ↓
+H 获取 mutex
+```
+
+然后 L 再恢复原来的：
+
+```
+priority 40
+```
+
+POSIX 定义的 `PTHREAD_PRIO_INHERIT` 正是通过让 mutex owner 临时继承等待者的更高优先级，来限制这类 priority inversion。PREEMPT_RT 内核中的 `rtmutex` 也大量利用 priority inheritance。
+
+#### 注意中断饿死
+
+和MCU中的中断可以永远打断FreeRTOS的调度不同，PREEMPT_RT 很重要的一项改造是：$\boxed{\text{大多数 IRQ handler 被线程化}}$​，即：
+
+```
+NIC hardware interrupt
+       ↓
+minimal hard IRQ
+       ↓
+wake IRQ thread
+       ↓
+IRQ thread 由 scheduler 调度
+```
+
+内核当前文档说明，**PREEMPT_RT 中默认 threaded IRQ handler 使用**：
+
+```
+SCHED_FIFO
+priority = 50
+```
+
+（具体系统仍应实际检查配置。）
+
+于是你的系统可能实际存在：
+
+```
+EtherCAT RT thread      FIFO 80
+
+EtherCAT NIC IRQ        FIFO 50
+```
+
+这时候就出现**用户 RT priority 太高可能反过来饿死设备 IRQ**。假设：
+
+```
+EtherCAT RT  = FIFO 80
+NIC IRQ      = FIFO 50
+```
+
+如果 EtherCAT RT thread：
+
+```
+while (...) {
+    busy_wait();
+}
+```
+
+因为：80>50那么 IRQ thread甚至可能无法运行。于是出现：
+
+```
+RT thread 等 NIC 数据
+       ↑
+       │
+NIC IRQ thread 想处理数据
+       │
+       └── 被 RT 80 抢占
+```
+
+变成：$\boxed{\text{自己把自己依赖的 producer 饿死}}$所以 realtime priority 设计绝不能只看：
+
+> “谁最重要？”
+
+而应该看：$\boxed{\text{dependency graph}}$即：
+
+> 谁依赖谁先完成工作？
+
+以EtherCAT电机控制为例，现在大致是：
+
+```
+EtherCAT / motor RT    1 kHz
+Policy                 50 Hz
+IMU
+diagnostics
+logger
+```
+
+类似这样的优先级关系通常比较合理：
+
+```
+时间敏感程度
+
+EtherCAT RT
+    │
+    │ high
+    ▼
+Policy
+    │
+    ▼
+IMU / auxiliary RT
+    │
+    ▼
+monitor
+    │
+    ▼
+logger
+```
+
+例如作为初始实验配置：
+
+```
+EtherCAT RT       FIFO 80
+Policy            FIFO 70
+IMU               FIFO 60 或普通
+Monitor           SCHED_OTHER
+Logger            SCHED_OTHER
+```
+
+
+## CPU affinity（绑核）
+
+### 核心作用
+
+​								$\boxed{CPU \  affinity = 限制某个线程在哪些CPU \ core上运行}$
+
+比如一台 8 核机器逻辑 CPU 编号为：
+
+```
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+```
+
+默认情况下，一个普通 Linux 线程可能这一毫秒在 CPU2：下一次被调度时又跑到 CPU5：RT thread ──> CPU5。如果设置：`affinity = {CPU6}`，那么：
+
+```
+RT thread
+    │
+    └────────> CPU6 only
+```
+
+Linux scheduler 以后只能在 CPU6 上调度它。
+
+---
+
+> 我的 RT thread 已经是 `SCHED_FIFO + priority 80` 了，为什么还需要 affinity？
+
+因为这是**完全不同的问题**。`SCHED_FIFO + priority` 决定：$\boxed{\text{同一个 CPU 上，谁优先运行}}$；而 CPU affinity 决定：$\boxed{\text{这个线程允许去哪些 CPU 上运行}}$。
+
+例如：
+
+```
+Thread A: RT EtherCAT, FIFO 80
+Thread B: policy, FIFO 70
+Thread C: logging
+Thread D: ROS
+Thread E: kernel worker
+```
+
+如果不绑核，可能出现：
+
+```
+           t0        t1        t2        t3
+
+RT       CPU3      CPU5      CPU2      CPU5
+Policy   CPU1      CPU3      CPU4      CPU2
+Logger   CPU5      CPU1      CPU6      CPU4
+```
+
+RT thread 在 CPU 之间迁移。这种行为叫：$\boxed{\text{CPU migration}}$，对于普通软件问题不大，但对实时系统不够理想。
+
+### CPU migration 为什么会增加 jitter？
+
+这是 affinity 最关键的意义之一。假设 RT thread 原来跑在 CPU3：
+
+```text
+CPU3:
+L1 cache
+L2 cache
+TLB
+branch predictor state
+```
+
+RT thread 最近使用的数据，例如：
+
+```
+motor_state
+pdo_buffer
+controller_state
+setpoint
+```
+
+可能已经大量进入 CPU3 的 cache。下一周期 Linux 把线程迁移到 CPU6：
+
+```
+CPU3                    CPU6
+
+L1: motor_state         L1: ???
+L2: controller          L2: ???
+     ↓
+ RT thread migrates ────────>
+```
+
+CPU6 的本地 cache 中很可能没有这些数据。
+
+于是要重新：
+
+```
+L1 miss
+   ↓
+L2 miss
+   ↓
+LLC
+   ↓
+memory
+```
+
+这会增加执行时间的不确定性。实时系统最怕的其实不一定是：平均执行时间稍微长，而是：$\boxed{\text{最坏执行时间 / jitter 不稳定}}$。所以希望：
+
+```
+cycle 1      RT → CPU6
+cycle 2      RT → CPU6
+cycle 3      RT → CPU6
+...
+cycle 10000  RT → CPU6
+```
+
+而不是到处漂。
+
+### 如何使用
+
+#### 本质是 CPU mask
+
+Linux 内核里，CPU affinity 通常不是 cpu = 6 这种单个数字概念。而是$\boxed{CPU \ mask}$，比如：
+
+```c++
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+ 0    0    0    0    0    0    1    0
+```
+
+意思是：
+
+```c++
+allowed CPUs = {6}
+```
+
+也可以写：
+
+```c++
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+ 0    0    0    0    1    0    1    0
+```
+
+代表：
+
+```c++
+allowed CPUs = {4, 6}
+```
+
+因此 affinity 并不一定是“绑死一个核”。它真正的含义是：
+
+> scheduler 只能从这个 allowed CPU set 中选。
+
+具体代码（**相关操作宏的参数都是先CPU序号，再集合**）：
+
+``` c++
+#include<pthread.h>
+int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
+
+#include<sched.h>
+
+cpu_set_t expected;
+CPU_ZERO(&expected);
+
+for (const int cpu : options.cpu_ids) {  // options.cpu_ids 是一个 vector 容器
+    CPU_SET(cpu, &expected);
+}
+
+result = pthread_setaffinity_np(self, sizeof(expected), &expected);
+
+
+cpu_set_t actual;
+CPU_ZERO(&actual);
+
+result = pthread_getaffinity_np(self, sizeof(actual), &actual);
+
+if (result != 0) {
+    return thread_setup_error("pthread_getaffinity_np", result);
+}
+if (!CPU_EQUAL(&expected, &actual)) {
+    return thread_setup_error("thread affinity verification", 0);
+}
+```
+
+
+
+#### `lscpu`（查看核分布）
+
+``` shell
+cat@lubancat:~/robot_deploy$ lscpu -e
+CPU SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ       MHZ
+  0      0    0 0:0:0:0          yes 1800.0000 408.0000 1008.0000
+  1      0    1 1:1:1:0          yes 1800.0000 408.0000 1008.0000
+  2      0    2 2:2:2:0          yes 1800.0000 408.0000 1008.0000
+  3      0    3 3:3:3:0          yes 1800.0000 408.0000 1800.0000
+  4      0    0 4:4:4:0          yes 2304.0000 408.0000 1416.0000
+  5      0    1 5:5:5:0          yes 2304.0000 408.0000 1416.0000
+  6      0    2 6:6:6:0          yes 2304.0000 408.0000  600.0000
+  7      0    3 7:7:7:0          yes 2304.0000 408.0000  600.0000
+```
+
+#### `pthread_setaffinity_np()`
+
+对于 C++ pthread 实时线程，最常见的是：
+
+``` c++
+pthread_setaffinity_np()
+```
+
+例如：
+
+``` c++
+cpu_set_t cpuset;
+CPU_ZERO(&cpuset);		// 先清空 mask
+CPU_SET(6, &cpuset);	// 允许 CPU6
+
+int ret = pthread_setaffinity_np(	// 把当前 thread 限制到 CPU6
+    pthread_self(),
+    sizeof(cpu_set_t),
+    &cpuset
+);
+```
+
+但只意味着：
+
+> **这个 RT thread 只能跑在 CPU6。**
+
+它**不意味着**：
+
+> CPU6 只能运行这个 RT thread。
+
+也就是说，可能仍然有：
+
+```
+CPU6
+│
+├── your RT thread
+├── kworker
+├── softirq
+├── timer
+├── other process
+├── kernel thread
+└── random userspace task
+```
+
+所以：$\boxed{ \text{CPU affinity} \neq \text{CPU isolation} }$，这是非常重要的概念。
+
+### 深入理解
+
+#### 绑核是"线程级"理解
+
+假设：
+
+```
+robot_controller process
+│
+├── EtherCAT RT thread
+├── Policy thread
+├── Monitor thread
+├── IMU thread
+└── Logger thread
+```
+
+它们虽然属于同一个 process，但 Linux scheduler 真正调度的是：$\boxed{\text{task / thread}}$，所以完全可以：
+
+```
+EtherCAT RT      → CPU6
+Policy           → CPU4
+IMU              → CPU3
+Monitor          → CPU2
+Logger           → CPU1
+```
+
+而不是：
+
+```
+整个 robot_controller process → CPU6
+```
+
+这也是为什么实时程序通常在线程创建后，对每个关键线程单独配置 affinity。
+
+#### 真正的 RT CPU 通常是“绑核 + 隔离”
+
+真正追求低 jitter 时，一般不是只做：
+
+```
+RT thread → CPU6
+```
+
+还希望：
+
+```
+                CPU6
+
+RT thread ─────────────→ CPU6
+
+normal process ──X─────→ CPU6
+kworker        ──X─────→ CPU6
+IRQ            ──X─────→ CPU6   （视配置而定）
+```
+
+这才接近：$\boxed{\text{dedicated realtime CPU}}$，Linux 中常见手段包括：
+
+```
+isolcpus
+nohz_full
+rcu_nocbs
+cpuset
+IRQ affinity
+```
+
+这些和 thread affinity 是配套关系。可以先把它理解成三个层级：
+
+$\boxed{Thread \ affinity→CPU \ isolation→IRQ \ | \ kernel \ housekeeping \  isolation}$
+
+
+
+# 同步与互斥(内核)
 
 ## 内联汇编
 
@@ -2357,8 +6437,6 @@ int main(void) {
 ``` c
 #define barrier() _asm_ _volatile_("": : :"memory")
 ```
-
-
 
 ## 互斥
 
@@ -2467,9 +6545,18 @@ test_and_change_bit(nr, addr)
 
 
 
-## 锁
+## 内核锁
 
-### 自旋锁`(spin lock)`
+### `<linux/spinlock.h>` 
+
+它**不是**任何我们在应用层（C/C++）能用的标准库（如 glibc 或 C++ stdlib）。
+
+它是 **Linux 内核源码树 (Linux Kernel Source Tree)** 提供的一个头文件。
+
+- **绝对界限：** 你**不能**在普通的 C++ 应用程序（比如你的电机控制应用层进程）中 `#include <linux/spinlock.h>`。如果你这么做，编译器会直接报错找不到文件。
+- **使用场景：** 它只能在编写 **Linux 内核模块 (Kernel Modules)**、**底层设备驱动 (Device Drivers)** 或修改 Linux 内核本身源码时使用。
+
+### 自旋锁
 
 自旋锁是Linux内核中用于**短期保护共享数据**的同步原语，在**读取 改写共享数据之前都尝试进行自旋锁的获取动作**，如果没有成功的获取到自旋锁，则一直在原地打转尝试获取。
 

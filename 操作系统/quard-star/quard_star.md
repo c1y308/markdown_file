@@ -1,8 +1,2246 @@
- 
+# RISCV 指令集
 
-# 0. 文件类型
+> RISC-V 基本思想：数据先放寄存器，计算在寄存器之间进行；访问内存主要靠 `load`/`store`；控制流程靠 `branch`/`jump`。
+>
+> 看到一段陌生的 RISC-V 汇编时，优先把每条指令分类：
+>
+> ```
+> 这是在搬数据？
+> 这是在算？
+> 这是在访问内存？
+> 这是在判断？
+> 还是在跳转？
+> ```
+>
+> 绝大部分普通裸机代码很快就可以读懂。
 
-## 0.1 .sh文件
+## 数据移动
+
+### `li`：将立即数装入寄存器
+
+> load immediate
+
+```assembly
+li sp, 0x80100000
+
+/* sp = 0x80100000 */
+```
+
+`li` 的作用非常直观：
+
+> 把一个常数（立即数）放入寄存器。
+
+例如：
+
+```assembly
+li a0, 10
+
+/* a0 = 10 */
+```
+
+这里的 `10` 就称为 **立即数（Immediate）**。
+
+需要注意：
+
+> `li` 是伪指令，而不是 RISC-V 基础 ISA 中真正的一条机器指令。
+
+因为一条 RISC-V 指令能够直接容纳的立即数位数有限，如果数字比较大，汇编器会自动拆成多条指令。例如：
+
+```assembly
+li sp, 0x80100000
+```
+
+可能被汇编器转换为 `lui`、`addi` 等真正的机器指令。现阶段只需要记住：
+
+```assembly
+li rd, value
+
+/* rd = value */
+```
+
+#### ARM64：`mov`
+
+ARM64 中通常使用：
+
+```assembly
+mov x0, #10
+```
+
+所以可以这样记：
+
+```assembly
+RISC-V             ARM64
+
+li a0, 10      ≈    mov x0, #10
+```
+
+对于较大的立即数，ARM64 同样可能需要 `movz`、`movk` 等多条指令组合完成。
+
+### `mv`：寄存器之间复制数据
+
+> move
+
+```assembly
+mv a0, a1
+
+/* a0 = a1 */
+```
+
+即：
+
+> 把 `a1` 中的数据复制到 `a0`。
+
+注意，这并不会改变 `a1`。例如：
+
+```assembly
+a0 = 1
+a1 = 5
+
+mv a0, a1
+```
+
+执行之后：
+
+```
+a0 = 5
+a1 = 5
+```
+
+`mv` 同样是伪指令。
+
+```
+mv a0, a1
+```
+
+实际上会转换为：
+
+```assembly
+addi a0, a1, 0
+
+/* a0 = a1 + 0 */
+```
+
+因此实现了寄存器复制。
+
+#### ARM64：`mov`
+
+ARM64 中：
+
+```
+mov x0, x1
+```
+
+因此：
+
+```
+RISC-V          ARM64
+
+mv a0, a1   ≈   mov x0, x1
+```
+
+### `la`：加载地址
+
+> load address
+
+例如：
+
+```assembly
+la a0, uart_base
+
+/* a0 = &uart_base */
+```
+
+`la` 的作用是：
+
+> 将**某个符号**对应的**地址**放入寄存器。
+
+例如 C 语言中：
+
+```c
+a0 = &variable;
+```
+
+对应汇编可以理解为：
+
+```assembly
+la a0, variable
+```
+
+需要特别区分：
+
+```
+li   → 加载一个数值
+la   → 加载一个地址
+lw   → 从一个地址中读取数据
+```
+
+再执行：
+
+```assembly
+lw a1, 0(a0)
+```
+
+才是：
+
+```assembly
+a1 = variable
+```
+
+`la` 也是伪指令，汇编器通常会根据地址位置展开成 `auipc`、`addi` 等指令。
+
+### `lla`：无条件使用PC相对寻址算
+
+`lla rd, symbol` 的作用是**使用 PC 相对寻址（PC-relative addressing）**，将符号 `symbol` 的地址加载到寄存器 `rd` 中。
+
+- **`lla`**：**无条件**使用 PC 相对寻址。它直接计算符号相对于当前指令的偏移量，生成 `auipc + addi` 的指令序列。
+- **`la`**：行为取决于汇编时的选项。在 **非 PIC** 模式下，`la` 会作为 `lla` 的别名；但在 **PIC 模式**（如 `-fPIC`）下，`la` 会改用**全局偏移表（GOT）** 来加载地址，展开为 `auipc` 加一条加载指令（如 `lw`/`ld`）。
+
+## 算术运算
+
+RISC-V 中算术运算通常采用：
+
+```
+操作 目标寄存器, rs1, rs2
+```
+
+所以：**RISC-V 通常是“目标寄存器写在最前面”**。
+
+### `add`：加法
+
+> add
+
+```assembly
+add a0, a1, a2
+
+/* a0 = a1 + a2 */
+```
+
+例如：
+
+```
+a1 = 3
+a2 = 5
+```
+
+执行：
+
+```assembly
+add a0, a1, a2
+```
+
+之后：
+
+```
+a0 = 8
+```
+
+#### ARM64：`add`
+
+```assembly
+add x0, x1, x2
+```
+
+因此：
+
+```
+RISC-V                 ARM64
+
+add a0, a1, a2     ≈   add x0, x1, x2
+```
+
+二者写法几乎完全一样。
+
+### `addi`：寄存器加立即数
+
+> add immediate
+
+```assembly
+addi a0, a1, 5
+
+/* a0 = a1 + 5 */
+```
+
+区别是：
+
+```
+add   → 寄存器 + 寄存器
+addi  → 寄存器 + 立即数
+```
+
+例如：
+
+```
+add a0, a1, a2
+```
+
+是：
+
+```
+a0 = a1 + a2
+```
+
+而：
+
+```
+addi a0, a1, 5
+```
+
+是：
+
+```
+a0 = a1 + 5
+```
+
+**其中结尾的`i`，就可以理解成`immediate`。**因此以后看到：
+
+```
+andi
+ori
+xori
+slli
+```
+
+也可以用类似方式理解。
+
+#### ARM64：`add`
+
+ARM64 不需要额外把指令命名为 `addi`：
+
+```assembly
+add x0, x1, #5
+```
+
+因此：
+
+```assembly
+RISC-V                 ARM64
+
+addi a0, a1, 5     ≈   add x0, x1, #5
+```
+
+### `sub`：减法
+
+> subtract
+
+```assembly
+sub a0, a1, a2
+
+/* a0 = a1 - a2 */
+```
+
+而不是反过来。
+
+#### ARM64：`sub`
+
+```assembly
+sub x0, x1, x2
+```
+
+因此：
+
+```
+RISC-V                 ARM64
+
+sub a0, a1, a2     ≈   sub x0, x1, x2
+```
+
+### `mul`：乘法
+
+> multiply
+
+```assembly
+mul a0, a1, a2
+
+/* a0 = a1 * a2 */
+```
+
+例如：
+
+```
+a1 = 3
+a2 = 4
+```
+
+执行：
+
+```
+mul a0, a1, a2
+```
+
+得到：
+
+```
+a0 = 12
+```
+
+`mul` 属于 RISC-V 的 **M 扩展（Integer Multiplication and Division）**,现代处理器一般都会支持。
+
+#### ARM64：`mul`
+
+```assembly
+mul x0, x1, x2
+```
+
+因此二者基本完全相同。
+
+### `div`：有符号除法
+
+> divide
+
+```assembly
+div a0, a1, a2
+
+/* a0 = a1 / a2 */
+```
+
+例如：
+
+```
+a1 = 10
+a2 = 2
+```
+
+得到：
+
+```
+a0 = 5
+```
+
+**无符号除法则使用`divu`**，其中：
+
+```
+u = unsigned
+```
+
+#### ARM64：`sdiv/udiv`
+
+ARM64：
+
+```assembly
+sdiv x0, x1, x2
+```
+
+表示有符号除法。
+
+```assembly
+udiv x0, x1, x2
+```
+
+表示无符号除法。因此：
+
+```assembly
+RISC-V         ARM64
+
+div        ≈   sdiv
+divu       ≈   udiv
+```
+
+## 逻辑运算
+
+### `and`：按位与
+
+> bitwise AND
+
+```assembly
+and a0, a1, a2
+
+/* a0 = a1 & a2 */
+```
+
+例如：
+
+```
+a1 = 1100
+a2 = 1010
+```
+
+则：
+
+```
+1100
+1010
+----
+1000
+```
+
+因此：
+
+```
+a0 = 1000
+```
+
+常见用途：
+
+> 屏蔽某些 bit、检查寄存器中的某个位。
+
+#### ARM64: `and`
+
+``` assembly
+and x0, x1, x2
+```
+
+### `andi`：与立即数
+
+```assembly
+andi a0, a1, 0xff
+
+/* a0 = a1 & 0xff */
+```
+
+例如：
+
+```
+andi a0, a1, 1
+```
+
+可以**用来检查最低位**：
+
+```
+a1 & 1
+```
+
+如果结果：
+
+```
+0 → 偶数
+1 → 奇数
+```
+
+### `or`：按位或
+
+> bitwise OR
+
+```assembly
+or a0, a1, a2
+
+/* a0 = a1 | a2 */
+```
+
+常见用途：
+
+> 把某些 bit 设置为 1。
+
+#### ARM64: `orr`
+
+```assembly
+orr a0, a1, a2
+
+/* a0 = a1 | a2 */
+```
+
+### `xor`：按位异或
+
+> exclusive OR
+
+```
+xor a0, a1, a2
+
+/* a0 = a1 ^ a2 */
+```
+
+异或规则：
+
+```
+0 ^ 0 = 0
+0 ^ 1 = 1
+1 ^ 0 = 1
+1 ^ 1 = 0
+```
+
+即：
+
+> 相同为 0，不同为 1。
+
+#### ARM64: `eor`
+
+```assembly
+RISC-V        ARM64
+
+xor       ≈   eor
+```
+
+## 移位
+
+### `sll(i)`：逻辑左移
+
+> Shift Left Logical
+
+```assembly
+sll a0, a1, a2
+```
+
+表示：
+
+```
+a0 = a1 << a2
+```
+
+如果移动位数是**立即数**，则：
+
+```assembly
+slli a0, a1, 2
+
+/* a0 = a1 << 2 */
+```
+
+例如：
+
+```
+a1 = 3
+```
+
+二进制：
+
+```
+0011
+```
+
+左移两位：
+
+```
+1100
+```
+
+即：
+
+```assembly
+3 << 2 = 12
+```
+
+可以粗略理解：
+
+> 左移 n 位 ≈ 乘以 2ⁿ。
+
+#### ARM：`lsl`
+
+> Logical Shift Left
+
+### `srl(i)`：逻辑右移
+
+> Shift Right Logical
+
+```assembly
+srl a0, a1, a2
+```
+
+立即数版本：
+
+```assembly
+srli a0, a1, 2
+```
+
+**右边移出的 bit 被丢弃，左侧补**：
+
+```
+0
+```
+
+主要用于：
+
+> 无符号数。
+
+#### ARM：`lsr`
+
+> Logical Shift Right
+
+### `sra`：算术右移
+
+> Shift Right Arithmetic
+
+```
+sra a0, a1, a2
+```
+
+立即数版本：
+
+```assembly
+srai a0, a1, 2
+```
+
+和 `srl` 最大区别是：
+
+> `sra` 会保留符号位，因此主要用于有符号数。
+
+可以简单记：
+
+```
+SRL → 逻辑右移 → 左边补 0
+
+SRA → 算术右移 → 保留符号
+```
+
+#### ARM：`asr`
+
+> Arithmetic Shift Right
+
+```
+RISC-V          ARM64
+
+sra / srai  ≈   asr
+```
+
+## 内存访问
+
+RISC-V 属于典型的：
+
+> Load-Store Architecture（加载—存储架构）
+
+即：
+
+> 算术运算通常只操作寄存器，访问内存主要通过 `load` 和 `store`。
+
+因此通常是：
+
+```assembly
+内存
+ ↓ load
+寄存器
+ ↓ 运算
+寄存器
+ ↓ store
+内存
+```
+
+### `lb` / `lh` / `lw` / `ld`：从内存读取数据装入寄存器
+
+> load
+
+最常见的：
+
+```assembly
+lb   → Load Byte       → 8 bit
+lh   → Load Halfword   → 16 bit
+lw   → Load Word       → 32 bit
+ld   → Load Doubleword → 64 bit
+```
+
+例如：
+
+```assembly
+lw a0, 0(a1)
+```
+
+表示：
+
+```
+a0 = *(int32_t *)(a1 + 0)
+```
+
+也就是：
+
+> 从 `a1` 保存的内存地址中读取 32 bit 数据，放进 `a0`。
+
+例如：
+
+```assembly
+lw a0, 8(a1)
+```
+
+表示：
+
+```assembly
+a0 = *(int32_t *)(a1 + 8)
+```
+
+所以 RISC-V **内存寻址常见形式**：
+
+```
+offset(base)
+```
+
+即：
+
+```
+偏移量(基地址寄存器)
+```
+
+#### ARM64：`ldrb/ldr`
+
+``` assembly
+RISC-V                    ARM64
+lb                    ≈   ldrb
+
+
+lw a0, 8(a1)          ≈   ldr w0, [x1, #8]
+ld a0, 8(a1)          ≈   ldr x0, [x1, #8]
+```
+
+### `sb` / `sh` / `sw` / `sd`：寄存器向内存写数据
+
+> store
+
+对应：
+
+```assembly
+sb   → Store Byte       → 8 bit
+sh   → Store Halfword   → 16 bit
+sw   → Store Word       → 32 bit
+sd   → Store Doubleword → 64 bit
+```
+
+例如：
+
+```assembly
+sw a0, 8(a1)
+```
+
+表示：
+
+```
+*(int32_t *)(a1 + 8) = a0
+```
+
+一定要记住方向：
+
+```
+load：
+
+内存 → 寄存器
+store：
+
+寄存器 → 内存
+```
+
+#### ARM64：`strb/str`
+
+``` assembly
+sb                    ≈   strb
+
+sw a0, 8(a1)          ≈   str w0, [x1, #8]
+sd a0, 8(a1)          ≈   str x0, [x1, #8]
+```
+
+
+
+### 一个 MMIO 的典型例子
+
+假设 UART 地址：
+
+```assembly
+0x10000000
+```
+
+需要写字符 `'A'`：
+
+```assembly
+li t0, 0x10000000
+li t1, 'A'
+sb t1, 0(t0)
+```
+
+逐句解释：
+
+```assembly
+t0 = 0x10000000
+t1 = 'A'
+*(uint8_t *)t0 = t1
+```
+
+相当于 C：
+
+```assembly
+*(volatile uint8_t *)0x10000000 = 'A';
+```
+
+这就是：
+
+> MMIO（Memory-Mapped I/O，内存映射 I/O）
+
+的基本原理。
+
+**CPU 看起来像是在写内存`0x10000000`，实际上是在向 UART 外设寄存器写数据**。
+
+## 控制流程
+
+### `beq`：相等则跳转
+
+> branch if equal
+
+```assembly
+beq a0, a1, label
+
+/* if (a0 == a1)
+       goto label; */
+```
+
+### `bne(z)`：不相等则跳转
+
+> branch if not equal
+
+```assembly
+bne a0, a1, label
+
+/* if (a0 != a1)
+       goto label; */
+```
+
+你前面看到的：
+
+```assembly
+bnez a0, label
+```
+
+其实就是：
+
+```assembly
+bne a0, x0, label
+```
+
+### `blt(u)`：小于则跳转
+
+> branch if less than
+
+```assembly
+blt a0, a1, label
+
+/* if (a0 < a1)
+       goto label; */
+```
+其中：
+
+```assembly
+u = unsigned
+```
+### `bge(u)`：大于等于则跳转
+
+> branch if greater than or equal
+
+```assembly
+bge a0, a1, label
+
+/* if (a0 >= a1)
+       goto label; */
+```
+
+其中：
+
+```assembly
+u = unsigned
+```
+
+所以：这是查看驱动、地址和长度相关代码时比较常见的区别。
+
+### RISC-V 与 ARM 条件跳转的重要区别
+
+ARM64 经常使用：
+
+```assembly
+cmp x0, x1
+b.eq label
+```
+
+逻辑是：
+
+```
+cmp
+ ↓
+设置 condition flags
+ ↓
+根据 flags 判断是否跳转
+```
+
+而 RISC-V 通常直接：
+
+```assembly
+beq a0, a1, label
+```
+
+即：
+
+```
+直接比较寄存器
++
+直接决定是否跳转
+```
+
+所以可以记：
+
+```assembly
+ARM：
+
+cmp x0, x1
+b.eq label
+```
+
+对应：
+
+```
+RISC-V：
+
+beq a0, a1, label
+```
+
+RISC-V 没有 ARM 那种通用的 condition flags 设计。
+
+### `j`：无条件跳转
+
+> jump
+
+```assembly
+j label
+
+/* goto label; */
+```
+
+例如：
+
+```assembly
+.Lpark:
+    wfi
+    j .Lpark
+```
+
+就是：
+
+```
+while (1) {
+    wfi();
+}
+```
+
+注意：
+
+> `j` 是伪指令。
+
+实际上：
+
+```assembly
+j label
+```
+
+等价于：
+
+```assembly
+jal x0, label
+```
+
+原因：**`x0`是恒为 0 的特殊寄存器，对它写入的值会直接丢弃。**
+
+因此：
+
+```assembly
+jal x0, label
+```
+
+相当于：
+
+> 只跳转，不保存返回地址。
+
+#### ARM64：`b`
+
+```assembly
+RISC-V          ARM64
+
+j label     ≈   b label
+```
+
+## 函数调用
+
+### `jal`：跳转并保存返回地址
+
+> Jump And Link
+
+```assembly
+jal ra, uart_main
+```
+
+主要完成两件事情：
+
+```assembly
+① ra = 返回地址
+② PC = uart_main
+```
+
+因此可以理解为：
+
+```
+调用 uart_main()
+```
+
+> 其中：`ra(x1)`是 RISC-V 中专门用于保存 Return Address（函数返回地址）的寄存器。
+>
+
+### `call`：调用函数
+
+```assembly
+call uart_main
+```
+
+可以理解为：
+
+```
+uart_main();
+```
+
+本质上也是：
+
+> 跳转到函数，同时保存返回地址。
+
+`call` 是伪指令。如果目标函数距离比较近，可以展开为类似：
+
+```assembly
+jal ra, uart_main
+```
+
+如果距离比较远，汇编器可能使用：
+
+```assembly
+auipc
+jalr
+```
+
+组合实现。
+
+现阶段记住：
+
+```
+call function
+
+=
+
+调用 function
+```
+
+即可。
+
+#### ARM64：`bl`
+
+```assembly
+bl uart_main
+```
+
+其中：
+
+> BL = Branch with Link
+
+ARM 将返回地址放入：
+
+```
+x30
+```
+
+也称：
+
+```assembly
+LR = Link Register
+```
+
+因此：
+
+```assembly
+RISC-V                 ARM64
+
+ra = x1            ≈   lr = x30
+
+call uart_main     ≈   bl uart_main
+```
+
+### `jalr`：跳转到寄存器保存的地址
+
+> Jump And Link Register
+
+`jal` 通常跳向一个直接给出的目标：
+
+```assembly
+jal ra, function
+```
+
+而 `jalr` 的目标地址来自：
+
+> 寄存器。
+
+因此 `jalr` 常用于：
+
+- 函数返回
+- 函数指针
+- 间接函数调用
+
+
+### `ret`：函数返回
+
+> return
+
+```
+ret
+```
+
+表示**回到调用当前函数之前的位置**。
+
+本质上`ret`是伪指令，大致等价于：
+
+```
+jalr x0, 0(ra)
+```
+
+因为`ra`保存的是返回地址。所以`PC = ra`就可以回到调用者。
+
+又因为不需要再次保存返回地址，所以目标寄存器使用：
+
+```
+x0
+```
+
+直接将新产生的返回地址丢弃。
+
+#### ARM64：`ret`
+
+ARM64 同样`ret`。
+
+因此常见函数调用流程：
+
+```assembly
+RISC-V：
+
+call foo
+    ↓
+foo:
+    ...
+    ret
+```
+
+ARM64：
+
+```assembly
+bl foo
+    ↓
+foo:
+    ...
+    ret
+```
+
+## CPU 控制
+
+### `wfi`：等待中断
+
+> Wait For Interrupt
+
+**让当前 hart 等待中断，而不是一直执行空循环**。
+
+例如：
+
+```assembly
+.Lpark:
+    wfi
+    j .Lpark
+```
+
+即：
+
+```
+while (1) {
+    wait_for_interrupt();
+}
+```
+
+启动代码中：
+
+```assembly
+csrr a0, mhartid
+bnez a0, .Lpark
+```
+
+意味着：
+
+```assembly
+hart0 → 继续启动程序
+
+hart1
+hart2
+hart3
+ ↓
+.Lpark
+ ↓
+wfi
+```
+
+这样其他 CPU 核不会参与 UART 初始化和输出。
+
+#### ARM64：`wfi`
+
+ARM64 同样具有：
+
+```assembly
+wfi
+```
+
+因此：
+
+```assembly
+RISC-V        ARM64
+
+wfi       =   wfi
+```
+## CSR 寄存器
+
+> Control and Status Register
+
+普通通用寄存器`x0 ~ x31`用于：
+
+```c
+加减乘除
+函数参数
+返回值
+临时变量
+地址
+```
+
+而 CSR 用于：
+
+```c
+当前是哪个 CPU 核？
+    
+现在在哪个特权级？
+    
+中断有没有开启？
+异常发生在哪里？
+    
+页表地址是什么？
+    
+异常入口在哪里？
+    
+当前时间/周期数是多少？
+```
+
+### 寄存器
+
+#### `mhartid`（CPU的 id）
+
+> Machine Hart ID
+
+表示**当前 CPU hart 编号**；例如：
+
+```assembly
+csrr a0, mhartid
+```
+
+**常用于：多核启动区分； boot hart；让其他核 park。**
+
+##### ARM：`MPIDR_EL1`
+
+#### `m(s)status`（模式总状态控制）
+
+> Machine Status Register
+
+这是非常重要的一个 CSR。可以把它理解成 **CPU M 模式的总状态控制寄存器**。
+
+里面有很多 bit，例如控制：
+
+- **全局中断是否开启（`MIE`）；**
+- **进入异常前的中断状态；**
+- **之前属于什么特权级（`MPP`：Machine Previous Privilege，执行`mret`后会回到这个权限级）；**
+
+例如其中最常见的`MIE`，即：
+
+> Machine Interrupt Enable
+
+##### ARM：``SPSR_ELx` 等`
+
+---
+
+#### `m(s)epc`（异常时的`PC`值）
+
+> Machine Exception Program Counter
+
+这个非常重要。**记录出问题时的`PC`**。例如 CPU 正在执行：`0x20000100`然后发生异常。那么：
+
+```
+mepc ≈ 0x20000100
+```
+
+**异常处理结束之后执行`mret`，CPU 会根据 `mepc`回到原来的程序继续执行。**
+
+##### ARM：`ELR_ELx`
+
+#### `m(s)cause`（异常/中断原因）
+
+> Machine Cause Register
+
+表示**为什么进入异常/中断。**例如：
+
+```
+非法指令
+
+访问错误
+
+定时器中断
+外部中断
+软件中断
+```
+
+发生 trap 后，经常：
+
+```assembly
+csrr a0, mcause
+```
+
+然后判断到底发生了什么。所以：
+
+```
+mepc   → 在哪里出事
+mcause → 为什么出事
+```
+
+这两个经常一起看。
+
+##### ARM：`ESR_ELx`
+
+#### `m(s)tval`（异常额外信息）
+
+> Machine Trap Value
+
+它通常用于**提供异常的额外信息**。例如出现非法地址访问：
+
+```
+访问了 0xDEADBEEF
+```
+
+那么`mtval`可能保存`0xDEADBEEF`；因此：
+
+```
+mcause → 什么错误
+mtval  → 错误相关的附加值
+```
+
+例如：
+
+```
+mcause = Load Access Fault
+mtval  = 出错地址
+```
+
+####  `m(s)tvec`（中断向量入口）
+
+> Machine(Supervisor) Trap-Vector Base-Address Register
+
+**M(S) 模式异常/中断入口地址。**例如：
+
+```assembly
+la a0, trap_handler
+csrw mtvec, a0
+```
+
+就是：
+
+```
+mtvec = &trap_handler
+```
+
+**以后发生异常或者中断CPU 就会按照 `m(s)tvec` 指定的位置去处理。**
+
+可以类比：“中断向量入口”。
+
+##### ARM：`VBAR_ELx`
+
+#### 四个寄存器一起理解异常
+
+假设程序执行：
+
+```assembly
+lw a0, 0(t0)
+```
+
+但`t0 = 一个非法地址`发生异常。CPU 可能自动保存：
+
+```
+mepc   = 出错的 lw 指令地址
+mcause = Load Access Fault
+mtval  = 非法访问的内存地址
+```
+
+然后：
+
+```
+PC → mtvec
+```
+
+所以整个过程：
+
+```
+正常程序
+   ↓
+发生异常
+   ↓
+mepc   = 出错 PC
+mcause = 异常原因
+mtval  = 附加信息
+   ↓
+PC = mtvec
+   ↓
+进入 trap_handler
+```
+
+这个流程非常重要。
+
+#### `m(s)ie`（中断子开关）
+
+> Machine Interrupt Enable
+
+它控制**哪些类型的 M Mode 中断允许触发**。
+
+注意`mstatus.MIE`和`mie`不是同一个东西。
+
+可以理解：
+
+```
+mstatus.MIE = 总开关
+
+mie = 各类中断的分开开关
+```
+
+例如：
+
+```text
+总开关：允许中断吗？
+
+子开关：
+定时器中断允许吗？
+软件中断允许吗？
+外部中断允许吗？
+```
+
+类似：
+
+```
+mstatus.MIE = 总电闸
+
+mie = 每个房间自己的开关
+```
+
+**只有两者都允许，相关中断才能正常工作。**
+
+####  `m(s)ip`（哪些中断待处理）
+
+> Machine Interrupt Pending
+
+表示**当前有哪些中断正在等待处理。**例如：
+
+```
+timer interrupt pending
+external interrupt pending
+software interrupt pending
+```
+
+所以：
+
+```
+mie → Enable
+mip → Pending
+```
+
+可以这样记：
+
+```
+mie = 我允许哪些中断
+mip = 哪些中断已经来了
+```
+
+#### `satp`（地址转换和保护）
+
+> Supervisor Address Translation and Protection
+
+它在 S Mode 非常重要。主要负责：
+
+- 虚拟内存；
+- 页表；
+- 地址翻译；
+
+Linux 启动以后会大量涉及这个 CSR。
+
+#### `m(s)scratch`（指向每个 hart 的`sbi_scratch`）
+
+`mscratch` 是每个 hart 独有的一个 Machine-mode CSR；OpenSBI 把“指向该 hart 的 `sbi_scratch` 内存区域的指针”放进 `mscratch`。
+
+``` assembly
+hart0 的 mscratch
+┌──────────────────┐
+│ 0x81234000       │──────────┐
+└──────────────────┘          │
+                              ▼
+                       hart0 scratch
+                      ┌──────────────┐
+                      │ fw_start     │
+                      │ fw_size      │
+                      │ next_arg1    │
+                      │ next_addr    │
+                      │ next_mode    │
+                      │ warmboot_addr│
+                      │ platform     │
+                      │ ...          │
+                      └──────────────┘
+```
+
+
+
+#### CSR 与特权级
+
+RISC-V 有几个主要特权级：
+
+```assembly
+M Mode
+S Mode
+U Mode
+```
+
+分别可以简单理解：
+
+```assembly
+M Mode
+Machine Mode
+最高权限
+固件 / SBI / early boot
+
+S Mode
+Supervisor Mode
+操作系统内核
+Linux kernel
+
+U Mode
+User Mode
+普通用户程序
+```
+
+因此 CSR 名字经常有前缀：
+
+```
+mxxx
+sxxx
+```
+
+例如：
+
+```assembly
+mstatus
+mtvec
+mepc
+mcause
+```
+
+这里：
+
+```
+m = Machine
+```
+
+而：
+
+```
+sstatus
+stvec
+sepc
+scause
+```
+
+这里：
+
+```
+s = Supervisor
+```
+
+你会发现它们基本是成套出现的：
+
+```
+M Mode               S Mode
+
+mstatus               sstatus
+mtvec                 stvec
+mepc                  sepc
+mcause                scause
+mie                   sie
+mip                   sip
+```
+
+非常规律。M Mode 和 S Mode CSR 对照，这个很值得记：
+
+```assembly
+M Mode                  S Mode
+
+mstatus                 sstatus
+状态                     状态
+
+mtvec                   stvec
+异常入口                 异常入口
+
+mepc                    sepc
+异常 PC                  异常 PC
+
+mcause                  scause
+异常原因                 异常原因
+
+mie                     sie
+中断使能                 中断使能
+
+mip                     sip
+中断 pending             中断 pending
+```
+
+所以以后你如果已经懂：
+
+```
+mtvec
+mepc
+mcause
+```
+
+再看到：
+
+```
+stvec
+sepc
+scause
+```
+
+基本不用重新学。只是：
+
+> 从 Machine Mode 换成 Supervisor Mode。
+
+### 操作指令
+
+#### `csrr`：读取 CSR
+
+> CSR Read
+
+例如：
+
+```assembly
+csrr a0, mhartid
+```
+
+就是：
+
+```
+a0 = mhartid
+```
+
+再例如：
+
+```assembly
+csrr a0, mstatus
+```
+
+就是：
+
+```assembly
+a0 = mstatus
+```
+
+即**把 CPU 当前机器模式状态读出来**。
+
+##### ARM：`mrs`
+
+``` assembly
+mrs x0, MPIDR_EL1
+```
+
+#### `csrw`：写入 CSR
+
+> CSR write
+
+```assembly
+csrw mtvec, a0
+```
+
+可以理解为：
+
+```assembly
+mtvec = a0
+```
+
+例如 `mtvec` 是：
+
+> Machine Trap-Vector Base-Address Register
+
+用于**指定 M Mode 异常和中断入口地址**。所以：
+
+```assembly
+la a0, trap_handler
+csrw mtvec, a0
+```
+
+可以理解成：
+
+```c
+mtvec = &trap_handler
+```
+
+即**告诉 CPU发生异常或中断之后跳到 `trap_handler`。**
+
+##### ARM：`msr`
+
+ARM64 中写系统寄存器通常使用`msr`。例如：
+
+```assembly
+msr VBAR_EL1, x0
+```
+
+所以：
+
+```assembly
+RISC-V          ARM64
+
+csrr        ≈   mrs
+csrw        ≈   msr
+```
+
+可以直接成对记忆：
+
+```assembly
+RISC-V：
+
+csrr → read CSR
+csrw → write CSR
+ARM：
+
+mrs → read system register
+msr → write system register
+```
+#### `csrs`：置某些位
+
+> CSR Set
+
+例如：
+
+```assembly
+csrs mstatus, a0
+```
+
+其逻辑近似：
+
+```
+mstatus = mstatus | a0;
+```
+
+也就是将 `a0` 中为 1 的那些 bit，在 `mstatus` 中设为 1。
+
+例如：
+
+```assembly
+mstatus 原来：
+
+00100000
+
+a0：
+
+00001000
+```
+
+执行：
+
+```assembly
+csrs mstatus, a0
+```
+
+得到：`00101000`。
+
+#### `csrrw`：原子读 - 写
+
+> Atomic Read/Write CSR。
+
+一句话概括：`csrrw rd, csr, rs1`：把 CSR 的旧值读入 `rd`，同时把 `rs1` 的值写入 CSR，整个过程原子完成。
+
+##### 原子交换
+
+``` assembly
+csrrw tp, mscratch, tp
+```
+
+含义：
+
+- 把 `mscratch` 的旧值读到 `tp`
+- 把 `tp` **原来的值**写到 `mscratch`
+
+**一条指令完成“读取旧值并写入新值”**，中间不会被中断打断。这在 trap handler 保存上下文时非常有用。
+
+#### `csrc`：清除某些位
+
+> CSR Clear
+
+```assembly
+csrc mstatus, a0
+```
+
+近似：
+
+```
+mstatus = mstatus & (~a0);
+```
+
+即：
+
+> `a0` 中哪些位是 1，就把 CSR 对应的 bit 清零。
+
+## 普通寄存器
+
+RISC-V 有：
+
+```assembly
+x0 ~ x31
+```
+
+共 32 个整数寄存器。
+
+但是编写汇编时通常使用：
+
+> ABI 名称。
+
+几个最值得记忆的：
+
+```
+x0   = zero
+x1   = ra
+x2   = sp
+
+x5   = t0
+x6   = t1
+x7   = t2
+
+x8   = s0
+
+x10  = a0
+x11  = a1
+x12  = a2
+...
+```
+
+### `zero(x0)`：零寄存器
+
+> 永远读取为 0。
+
+如果写数据：
+
+```
+addi x0, a0, 1
+```
+
+计算结果会：
+
+> 直接丢弃。
+
+因此 RISC-V 很多伪指令都会巧妙使用 `x0`。
+
+例如：
+
+```assembly
+bnez a0, label
+```
+
+实际：
+
+```assembly
+bne a0, x0, label
+```
+
+又如：
+
+```assembly
+j label
+```
+
+实际：
+
+```assembly
+jal x0, label
+```
+
+### `ra(x1)`：返回地址寄存器
+
+> Return Address
+
+**保存函数调用后的返回地址**。
+
+例如：
+
+```assembly
+call foo
+```
+
+会将返回位置保存进`ra`，之后`ret`利用 `ra` 回到调用者。
+
+#### ARM64：`LR`
+
+```
+LR = x30
+```
+
+### `sp(x2)`：栈指针
+
+> Stack Pointer
+
+保存当前栈顶地址.例如启动代码：
+
+```assembly
+li sp, 0x80100000
+```
+
+表示`sp = 0x80100000`；即：
+
+> 为后面的 C 函数准备可用的栈。
+
+#### ARM64：`sp`
+
+ARM架构中同样叫做 `sp` 寄存器。
+
+### `gp(x3)`：全局指针
+
+> `gp` = Global Pointer，全局指针。
+
+### `tp(x4)`：线程指针
+
+> `tp` = Thread Pointer，中文一般叫“线程指针”。
+
+硬件上 `tp` 只是一个普通通用寄存器；软件/ABI 约定它保存“当前线程的线程指针”，通常指向 `TCB`，用来访问线程局部存储 TLS（**Thread-Local Storage**）。多线程程序里，每个线程可以有自己独立的 `thread_local` / `__thread` 变量。
+
+> 解决的核心问题是：**多线程程序里，有些数据不能所有线程共享，必须每个线程一份。**普通全局变量和静态变量是所有线程共享的：
+>
+> ```c
+> int counter;   // 所有线程共用同一个 counter
+> ```
+>
+> 如果两个线程同时改 `counter`，就需要加锁，否则会有数据竞争。但有些场景天然就是“每线程一份”：
+>
+> - `errno`：每个线程的错误码应该独立；
+> - 线程 ID、线程名；
+> - 线程私有的随机数种子；
+> - 线程私有的缓存、连接池、日志上下文；
+> - 某些库函数内部的状态。
+>
+> 这些数据如果做成全局变量，就会互相干扰；如果每次手动传结构体指针，又很麻烦。TLS 就是让编译器/运行时自动帮你做到“每线程一份”。
+
+---
+
+典型关系：
+
+- `tp` 指向当前线程的 **TCB**，Thread Control Block；
+- TCB 附近存放该线程的 TLS 数据；
+- 访问 TLS 变量时，用 `tp + 偏移` 或 `tp - 偏移` 来寻址；
+- 偏移由链接器或动态加载器确定。
+
+---
+
+线程切换时，必须切换 `tp`：
+
+- 保存当前线程的 `tp` 到它的上下文/TCB；
+- 恢复下一个线程的 `tp`；
+- 这样新线程才能访问自己的 TLS。
+
+---
+
+在 Linux/RISC-V 中：
+
+- 用户态 `tp` 通常指向用户线程的 TCB/TLS；
+- 进入内核时，内核会保存用户态 `tp`；
+- 内核态中，Linux/RISC-V 常用 `tp` 保存当前 `task_struct` 指针，也就是 `current`；
+- 返回用户态前，再恢复用户态 `tp`。
+
+这是操作系统实现细节，不是 RISC-V 硬件强制规定。
+
+### `a0 ~ a7(x10 ~ x17)`：函数参数寄存器
+
+> `a` = argument
+
+```assembly
+a0 = x10
+a1 = x11
+...
+a7 = x17
+```
+
+通常用于传递函数参数。例如 C：
+
+```c
+foo(1, 2, 3);
+```
+
+调用前通常类似：
+
+```assembly
+a0 = 1
+a1 = 2
+a2 = 3
+
+call foo
+```
+
+**同时`a0`通常还负责保存函数返回值。**例如：
+
+```c
+int foo()
+{
+    return 5;
+}
+```
+
+最终一般：
+
+```assembly
+a0 = 5
+ret
+```
+
+#### ARM64：`x0 ~ x7`
+
+```assembly
+RISC-V        ARM64
+
+a0        ≈   x0
+a1        ≈   x1
+a2        ≈   x2
+...
+```
+
+### `t0 ~ t6`：临时寄存器（caller-saved）
+
+> temporary registers
+
+用于临时计算。例如：
+
+```assembly
+li t0, 0x10000000
+li t1, 'A'
+sb t1, 0(t0)
+```
+
+这里：
+
+```
+t0 → 临时保存 UART 地址
+t1 → 临时保存字符
+```
+
+它们的特点是：
+
+> 函数调用之后不能假定其原值仍然存在。
+
+即属于`caller-saved`寄存器，调用者保留寄存器。
+
+### `s0 ~ s11`：保存寄存器（callee-saved）
+
+> saved registers
+
+如果一个函数修改了这些寄存器，通常需要先保存，在函数返回前使用修改了这些寄存器的数据，**函数调用后这些寄存器的值会恢复。**
+
+因此称为`callee-saved`寄存器。
+
+## 一个典型函数调用
+
+例如：
+
+```c
+int add_num(int x, int y)
+{
+    return x + y;
+}
+```
+
+RISC-V 中可能非常简单：
+
+```assembly
+add_num:
+    add a0, a0, a1
+    ret
+```
+
+因为进入函数时：
+
+```assembly
+a0 = x
+a1 = y
+```
+
+执行：
+
+```assembly
+add a0, a0, a1
+```
+
+得到：
+
+```
+a0 = x + y
+```
+
+而 `a0` 同时就是返回值寄存器。因此直接`ret`即可。调用它：
+
+```assembly
+li a0, 3
+li a1, 5
+call add_num
+```
+
+执行之后`a0 = 8`。对应 C：
+
+```
+int result = add_num(3, 5);
+```
+
+## 常见伪指令总结
+
+RISC-V 中很多日常使用的汇编指令其实都是：
+
+> Pseudo Instruction（伪指令）
+
+即：
+
+> 为了方便程序员书写，由汇编器转换成真正的机器指令。
+
+常见的：
+
+```assembly
+li
+mv
+la
+j
+call
+ret
+bnez
+beqz
+```
+
+例如`mv a0, a1`，实际：
+
+```assembly
+addi a0, a1, 0
+bnez a0, label
+```
+
+## RISC-V 与 ARM64 常用指令对照
+
+| 功能           | RISC-V         | ARM64           |
+| -------------- | -------------- | --------------- |
+| 加载立即数     | `li a0, 1`     | `mov x0, #1`    |
+| 寄存器复制     | `mv a0, a1`    | `mov x0, x1`    |
+| 加法           | `add`          | `add`           |
+| 加立即数       | `addi`         | `add ..., #imm` |
+| 减法           | `sub`          | `sub`           |
+| 乘法           | `mul`          | `mul`           |
+| 有符号除法     | `div`          | `sdiv`          |
+| 无符号除法     | `divu`         | `udiv`          |
+| 按位与         | `and`          | `and`           |
+| 按位或         | `or`           | `orr`           |
+| 按位异或       | `xor`          | `eor`           |
+| 左移           | `sll/slli`     | `lsl`           |
+| 逻辑右移       | `srl/srli`     | `lsr`           |
+| 算术右移       | `sra/srai`     | `asr`           |
+| 读 8 bit       | `lb`           | `ldrb`          |
+| 写 8 bit       | `sb`           | `strb`          |
+| 读 32 bit      | `lw`           | `ldr w`         |
+| 写 32 bit      | `sw`           | `str w`         |
+| 读 64 bit      | `ld`           | `ldr x`         |
+| 写 64 bit      | `sd`           | `str x`         |
+| 相等跳转       | `beq`          | `cmp + b.eq`    |
+| 不相等跳转     | `bne`          | `cmp + b.ne`    |
+| 等于 0 跳转    | `beqz`         | `cbz`           |
+| 不等于 0 跳转  | `bnez`         | `cbnz`          |
+| 无条件跳转     | `j`            | `b`             |
+| 函数调用       | `call` / `jal` | `bl`            |
+| 间接跳转       | `jalr`         | `br / blr`      |
+| 函数返回       | `ret`          | `ret`           |
+| 读取系统寄存器 | `csrr`         | `mrs`           |
+| 写系统寄存器   | `csrw`         | `msr`           |
+| 等待中断       | `wfi`          | `wfi`           |
+
+#  文件类型
+
+## .sh文件
 
 `.sh` 文件是 **Shell 脚本文件**（Shell Script），**用于在 Unix/Linux 系统中运行一系列命令**。它是由 **Bash（Bourne Again Shell）** 或其他 Shell（如 `sh`、`zsh`、`ksh` 等）解释执行的纯文本文件。
 
@@ -64,7 +2302,7 @@ dd of=fw.bin bs=1k count=32k if=/dev/zero
 dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
 ```
 
-## 0.2 makefile
+## makefile
 
 每个规则定义了一个目标（target）及其依赖关系，以及如何生成该目标：
 
@@ -110,7 +2348,7 @@ write: write.c $(LIB)/*.c
 time: time.c 
 	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/time.bin $^
 ```
-## 0.3 .ld文件
+## .ld文件
 
 `.ld` 文件**用于控制程序的内存布局，指定代码、数据、堆栈等段（Sections）在内存中的存放位置**。它通常用于嵌入式开发或操作系统引导程序，确保程序在编译后能正确加载到目标硬件的特定地址，**依据`.ld`文件的规则合并所有的`.o`文件生成可执行文件**。
 
@@ -182,7 +2420,157 @@ SECTIONS                /*定义段域*/
   } > flash              /*段域的地址(LMA和VMA相同)位于名为flash内存域*/
 }
 ```
-#  1.qemu中自定义开发板
+# 配置工具链
+
+## 交叉编译器
+
+### 命名规则
+
+GNU 交叉编译器名字格式：**`arch-vendor-os-gcc`**
+
+> `arch`：架构；`vendor`：厂商 / 维护方；`os`：目标系统 / ABI；`gcc`就是编译器本身
+
+1. `riscv64-linux-gnu-gcc`：**运行在 Linux 系统，使用 GNU libc**，编译跑 Linux 用户态应用程序，**动态链接，依赖 glibc 库**。
+2. `riscv64-unknown-elf-gcc`：`elf`：不是操作系统，代表裸机（bare-metal）环境，输出 ELF 格式二进制无操作系统，**不带 libc**（一般用 newlib），用途：编写 Bootloader、RTOS、内核代码，裸机固件，静态编译，**没有 Linux 系统调用**。
+3. `riscv64-unknown-linux-gnu-gcc`：目标 Linux + glibc，**动态链接，依赖 glibc 库**。
+
+> 为什么会有`unknown`？ GNU 三元组里`vendor`是可选字段，当这个工具链不是某个芯片厂商定制打包，社区通用构建，就填`unknown`；很多时候简写会直接省略`unknown`，所以就出现 `riscv64-linux-gnu`。
+
+| 字段               | 含义                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| `riscv64`          | 目标 CPU 架构：RISC-V 64 位                                  |
+| `vendor`（中间段） | 厂商标记：`linux` / `unknown`。`unknown` = 无特定厂商，通用版本 |
+| `os`               | 目标操作系统 / ABI：`elf` / `linux-gnu`                      |
+
+> 三元组完整标准：**`arch-vendor-system`**，后面追加 `-gcc` 构成编译器文件名。
+
+| 编译器                        | 目标环境     | C 库             | 典型用途                                     |
+| ----------------------------- | ------------ | ---------------- | -------------------------------------------- |
+| riscv64-linux-gnu-gcc         | Linux 用户态 | glibc            | Linux 应用，动态链接程序                     |
+| riscv64-unknown-elf-gcc       | 裸机 / RTOS  | newlib（精简库） | U-Boot、RTOS、内核、裸机固件                 |
+| riscv64-unknown-linux-gnu-gcc | Linux 用户态 | glibc            | Linux 应用，和第一个等价，只是三元组写法完整 |
+
+1. **`elf` 后缀 = 裸机编译器**： 不能编译 Linux 下带系统调用的用户程序；输出 elf 给无操作系统环境，没有 glibc。
+
+2. `linux-gnu` = Linux glibc 编译器
+
+   专门编译 Linux 用户程序，可以调用 Linux 系统调用，链接 glibc。
+
+   - `riscv64-linux-gnu` 是简写
+   - `riscv64-unknown-linux-gnu` 是完整三元组写法 这两个编译出来的程序**二进制可以通用**，只是构建时三元组命名差异。
+
+> 写 Linux 下跑的应用程序：`riscv64-linux-gnu-gcc` / `riscv64-unknown-linux-gnu-gcc`，两个随便选。
+>
+> 写 U-Boot、RTOS、裸机驱动、RISC-V 内核前期代码：`riscv64-unknown-elf-gcc`
+
+#  自定义开发板
+
+## `Kconfig`配置
+
+### 基本语法
+
+最基本单元，定义一个配置符号：
+
+```Kconfig
+config QUARD_STAR
+    bool
+    default y
+    depends on RISCV64
+    select RISCV_NUMA
+    select SERIAL_MM
+    select PFLASH_CFI01
+    select RISCV_ACLINT
+    select RISCV_APLIC
+    select SIFIVE_PLIC
+    select GOLDFISH_RTC
+```
+
+- 类型：
+  - `bool`：布尔型，取值 `y`/`n`；
+  - `tristate`：三态型（Linux 特有），取值 `y`（编译进内核）/ `m`（编译为可加载模块）/ `n`（不编译），是内核模块化的核心；
+  - `int` / `hex`：整数 / 十六进制数值配置；
+  - `string`：字符串配置。
+
+- `depends on`：**前置依赖**，只有依赖项满足时，该配置项才可见、可选中；
+- `select`： **反向强制依赖**，选中当前项时，自动强制选中依赖项（无法手动取消）；
+
+> **`depends on` 和 `select` 后面跟随的，本质上都是其他 `config`（或 `menuconfig`）语句定义的**配置符号 （也叫配置项、Kconfig 符号）。
+
+- `default`：默认值，可附加条件（如 `default y if X86_64`）；
+- `help`：帮助文档，需缩进书写。
+
+### 配置宏
+
+**Kconfig 本身不需要 “编译”**，它是一套「配置描述语言」，由专门的解析工具读取、处理依赖关系、最终生成配置产物。整个过程叫**配置解析**，不是编译。QEMU 中采用自研的 Python 解析脚本 + `scripts/create_config` 生成工具。
+
+Kconfig 最终会输出两类产物：**纯文本配置文件**（给构建系统读）和 **C 语言头文件**（给源代码读）。
+
+> Kconfig 就是告诉 QEMU：编译时，开启 QUARD_STAR 这块开发板，需要满足什么条件、自动带上哪些外设。
+
+## Meson构建
+
+Meson 是一款**开源、跨平台、高性能的元构建系统**（Meta Build System），由 Jussi Pakkanen 于 2013 年发布，核心设计目标是解决传统构建系统（Autotools、CMake）语法晦涩、配置慢、上手难的痛点，主打「速度快、语法易、构建正确」三大特性。
+
+它本身不直接调用编译器，而是先生成底层构建工具（默认是 **Ninja**）的输入文件，再由 Ninja 执行实际的编译、链接动作，定位和 CMake 类似，但语法更简洁、构建速度更快。
+
+### 两个核心文件
+
+| 文件名              | 作用                                           | 类比 Kconfig             |
+| ------------------- | ---------------------------------------------- | ------------------------ |
+| `meson.build`       | 构建描述文件，每个目录一个，顶层文件为项目入口 | 各级 Kconfig 文件        |
+| `meson_options.txt` | 自定义构建选项，定义开关、参数及默认值         | Kconfig 的 config 配置项 |
+
+
+```meson
+# 顶层 meson.build
+project('hello_demo', 'c')
+executable('hello', 'hello.c')
+```
+
+- `project()`：每个项目的入口，声明项目名和使用的编程语言；
+- `executable()`：定义一个可执行文件目标，指定源文件。
+
+
+
+- **目标定义**：`executable()`（可执行文件）、`shared_library()`（动态库）、`static_library()`（静态库）；
+- **依赖检测**：`dependency('glib-2.0')` 自动通过 pkg-config、系统包管理器查找依赖；
+- **条件分支**：`if` / `elif` / `else`，根据平台、配置选项切换构建逻辑；
+- **子目录包含**：`subdir('src')` 加载子目录的 `meson.build`；
+- **读取选项**：`get_option('enable_gui')` 获取用户配置的自定义选项。
+
+### 添加编译
+
+``` meson
+riscv_ss = ss.source_set()
+riscv_ss.add(files('aia.c'))
+riscv_ss.add(files('boot.c'))
+riscv_ss.add(files('fdt-common.c'))
+riscv_ss.add(when: 'CONFIG_RISCV_NUMA', if_true: files('numa.c'))
+riscv_ss.add(files('riscv_hart.c'))
+riscv_ss.add(when: 'CONFIG_OPENTITAN', if_true: files('opentitan.c'))
+riscv_ss.add(when: 'CONFIG_RISCV_VIRT', if_true: files('virt.c'))
+riscv_ss.add(when: 'CONFIG_SHAKTI_C', if_true: files('shakti_c.c'))
+riscv_ss.add(when: 'CONFIG_SIFIVE_E', if_true: files('sifive_e.c'))
+riscv_ss.add(when: 'CONFIG_SIFIVE_U', if_true: files('sifive_u.c'))
+riscv_ss.add(when: 'CONFIG_SPIKE', if_true: files('spike.c'))
+riscv_ss.add(when: 'CONFIG_MICROCHIP_PFSOC', if_true: files('microchip_pfsoc.c'))
+riscv_ss.add(when: 'CONFIG_TENSTORRENT', if_true: files('tt_atlantis.c'))
+riscv_ss.add(when: 'CONFIG_ACPI', if_true: files('virt-acpi-build.c'))
+riscv_ss.add(when: 'CONFIG_RISCV_IOMMU', if_true: files(
+	'riscv-iommu.c', 'riscv-iommu-pci.c', 'riscv-iommu-sys.c', 'riscv-iommu-hpm.c'))
+riscv_ss.add(when: 'CONFIG_MICROBLAZE_V', if_true: files('microblaze-v-generic.c'))
+riscv_ss.add(when: 'CONFIG_XIANGSHAN_KUNMINGHU', if_true: files('xiangshan_kmh.c'))
+riscv_ss.add(when: 'CONFIG_RISCV_MIPS_CPS', if_true: files('cps.c'))
+riscv_ss.add(when: 'CONFIG_MIPS_BOSTON_AIA', if_true: files('boston-aia.c'))
+riscv_ss.add(when: 'CONFIG_K230', if_true: files('k230.c'))
+
+riscv_ss.add(when: 'CONFIG_QUARD_STAR', if_true: files('quard_star.c'))
+
+hw_arch += {'riscv': riscv_ss}
+```
+
+
+
 
 ![板载资源](quard-star/板载资源.png)
 
@@ -198,7 +2586,100 @@ typedef struct QuardStarState{
 }
 ```
 
-## 1.1 内存分配表
+## 自定义文件
+
+### `quard-star.h`
+
+#### 枚举定义外设索引和中断号
+
+通过`enum`来对内存分配表数组的索引进行枚举，方便访问：
+
+``` c
+enum {
+    QUARD_STAR_MROM,
+    QUARD_STAR_SRAM,
+    QUARD_STAR_CLINT,
+    QUARD_STAR_PLIC,
+    QUARD_STAR_UART0,
+    QUARD_STAR_UART1,
+    QUARD_STAR_UART2,
+    QUARD_STAR_RTC,
+    QUARD_STAR_FLASH,
+    QUARD_STAR_DRAM,
+};
+
+
+enum {
+    QUARD_STAR_UART0_IRQ = 10,  //定义了串口中断号为10
+    QUARD_STAR_UART1_IRQ = 11,
+    QUARD_STAR_UART2_IRQ = 12,
+    QUARD_STAR_RTC_IRQ   = 13,
+};
+```
+
+#### 定义 PLIC 相关属性
+
+``` c++
+#define QUARD_STAR_PLIC_NUM_SOURCES    127      //PLIC 支持的中断源的最大数量
+#define QUARD_STAR_PLIC_NUM_PRIORITIES 7        //PLIC 支持的中断优先级的数量
+#define QUARD_STAR_PLIC_PRIORITY_BASE  0x04     //PLIC 中断优先级寄存器的基址偏移值，用于访问中断优先级信息
+#define QUARD_STAR_PLIC_PENDING_BASE   0x1000   //PLIC 中断挂起寄存器的基址偏移值，用于访问中断挂起状态
+#define QUARD_STAR_PLIC_ENABLE_BASE    0x2000   //PLIC 中断使能寄存器的基址偏移值，用于控制中断使能状态
+#define QUARD_STAR_PLIC_ENABLE_STRIDE  0x80     //PLIC 中断使能寄存器之间的地址间隔
+#define QUARD_STAR_PLIC_CONTEXT_BASE   0x200000 //PLIC 上下文保存寄存器的基址偏移值，用于保存中断处理程序的上下文信息
+#define QUARD_STAR_PLIC_CONTEXT_STRIDE 0x1000   //PLIC 上下文保存寄存器之间的地址间隔
+#define QUARD_STAR_PLIC_SIZE(__num_context) \
+    (QUARD_STAR_PLIC_CONTEXT_BASE + (__num_context) * QUARD_STAR_PLIC_CONTEXT_STRIDE)
+```
+
+#### 设备硬件结构体(`MachineState`)
+
+**QOM 继承机制**：第一个成员 `MachineState parent` 表示 `QuardStarState` **继承** 自 `MachineState`。这是 QEMU 对象模型（QOM）的核心 —— 通过 C 结构体嵌套实现面向对象继承。
+
+`RISCVHartArrayState` 是 QEMU 内置的 RISC-V CPU 核数组设备，管理一组 hart（硬件线程）。
+
+`PFlashCFI01` 是 CFI01 标准的并行 Flash 设备模型。
+
+``` c
+#define QUARD_STAR_SOCKETS_MAX 8
+
+struct QuardStarState {
+    /*< private >*/
+    MachineState parent;  // 一种仿继承的手法
+
+    /*< public >*/
+    RISCVHartArrayState soc[QUARD_STAR_SOCKETS_MAX];	// CPU 核数组（最多8个socket）
+    PFlashCFI01 *flash;									// Flash 设备指针
+    DeviceState *plic[QUARD_STAR_SOCKETS_MAX];			// 每个socket一个PLIC
+};
+```
+
+#### 开发板的类描述(`MachineClass`)
+
+`MachineClass` 是 QEMU 中所有开发板的**类描述**，最后通过这个类来注册一个开发板。其关键字段包括：
+
+``` c
+// include/hw/core/boards.h (第266-336行) 关键字段：
+struct MachineClass {
+    const char *desc;              // 开发板描述文字
+    
+    void (*init)(MachineState *);  // ★ 核心回调：硬件初始化函数
+    
+    int max_cpus;                  // 最大 CPU 数
+    
+    const char *default_cpu_type;  // 默认 CPU 类型
+    
+    // ... NUMA 相关回调 ...
+    const CPUArchIdList *(*possible_cpu_arch_ids)(MachineState *);
+    CpuInstanceProperties (*cpu_index_to_instance_props)(MachineState *, unsigned);
+    int64_t (*get_default_cpu_node_id)(const MachineState *, int);
+    bool numa_mem_supported;       // 是否支持 NUMA 内存
+};
+```
+
+### `quard-star.c`
+
+#### 硬件内存分配表
 
 **S(static)RAM**不需要时常刷新（CPU中的cache，内存）。
 
@@ -206,13 +2687,20 @@ typedef struct QuardStarState{
 
 **MASK-ROM**数据一旦写入，便无法修改或擦除，常用于Bootloader。
 
-``` c
-typedef uint64_t hwaddr;
-typedef struct MenMapEntry{
-    hwaddr base;
-    hwaddr size;
-}MenMapEntry;
+---
 
+**`MemMapEntry`** 是 QEMU 定义的结构体：
+
+```c
+typedef struct MemMapEntry {
+    hwaddr base;   // 物理基地址
+    hwaddr size;   // 映射大小
+} MemMapEntry;
+```
+
+这个表相当于**开发板的地址空间规划蓝图**，后续创建每个外设时都从此表取地址。因此完整的内存分配表为：
+
+``` c
 static const MemMapEntry quard_star_memmap[] = {  // 使用了enum，因此不需要指定数组大小
     [QUARD_STAR_MROM]  = {        0x0,        0x8000 },   
     [QUARD_STAR_SRAM]  = {     0x8000,        0x8000 },
@@ -227,74 +2715,201 @@ static const MemMapEntry quard_star_memmap[] = {  // 使用了enum，因此不�
 };
 ```
 
-## 1.2 创建CPU
+#### 注册板卡
+##### 创建注册信息
 
 ``` c
-/* create cpu func */
-static void quard_star_cpu_create(MachineState *machine){
+// QOM 类型描述结构，定义了类型的名称、父类、初始化回调、实例大小等
+struct TypeInfo
+{
+    const char *name;
+    const char *parent;
+
+    size_t instance_size;  // 告诉 QOM 为每个实例分配多大的内存
+    size_t instance_align;
+    void (*instance_init)(Object *obj);  // 函数指针，该函数用于初始化子类的成员
+    void (*instance_post_init)(Object *obj);
+    void (*instance_finalize)(Object *obj);
+
+    bool abstract;
+    size_t class_size;
+	
+    // 函数指针，该函数在所有父类初始化完成后调用，允许类设置其默认的虚拟方法指针。也可以使用该函数覆盖父类的虚拟方法。
+    void (*class_init)(ObjectClass *klass, void *data);  
+    void (*class_base_init)(ObjectClass *klass, void *data);
+    void *class_data;
+
+    InterfaceInfo *interfaces;
+};
+
+
+
+static const TypeInfo quard_star_machine_typeinfo = {
+    .name = MACHINE_TYPE_NAME("quard-star"),
+    .parent = TYPE_MACHINE,
+    
+    .class_init = quard_star_machine_class_init,  		// 函数指针指向 quard-star-class初始化函数
+    .instance_init = quard_star_machine_instance_init,  // 指向运行实例（对象）创建函数
+    
+    .instance_size = sizeof(QuardStarState),  // 每个实例分配多大内存
+    .interfaces = (InterfaceInfo[]){
+        { TYPE_HOTPLUG_HANDLER },
+        {}
+    },
+};
+
+
+static void quard_star_machine_init_register_types(void){  // 进行注册
+    type_register_static(&quard_star_machine_typeinfo);
+}
+```
+
+##### 创建`MachineClass`
+
+``` c
+static void quard_star_machine_class_init(ObjectClass *oc, void *data){  // 创建quard_star_class
+    
+    // MACHINE_CLASS(oc) 是 QOM 的类型安全转换宏，将 ObjectClass 转为 MachineClass
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "RISC-V Quard Star board";
+    mc->init = quard_star_machine_init;  // 函数指针指向硬件初始化函数
+    mc->max_cpus = QUARD_STAR_CPUS_MAX;  // 最大CPU数量
+    mc->default_cpu_type = TYPE_RISCV_CPU_BASE;  // 默认CPU类型
+    mc->pci_allow_0_address = true;
+    mc->possible_cpu_arch_ids = riscv_numa_cpu_index_to_props;
+    mc->get_default_cpu_node_id = riscv_numa_get_default_cpu_node_id;
+    mc->numa_mem_supported = true;
+}
+
+
+/* quard-star 初始化各种硬件 */
+static void quard_star_machine_init(MachineState *machine)
+{
+    //创建CPU
+    quard_star_cpu_create(machine);
+   // 创建主存
+    quard_star_memory_create(machine);
+    //创建flash
+    quard_star_flash_create(machine);
+    //创建PLIC
+    quard_star_plic_create(machine);
+    //创建RISCV_ACLINT
+    quard_star_aclint_create(machine);
+    // 创建串口设备
+    quard_star_serial_create(machine);
+    // 创建 RTC
+    quard_star_rtc_create(machine);
+}
+```
+
+#### 创建CPU
+
+核心API：
+
+``` c
+// QOM API，在 parent 下创建一个名为 name 的子对象，类型为 type，状态存储在 ptr 中
+object_initialize_child(parent, name, ptr, type);
+
+// 设置 QOM 对象的属性（类似面向对象的 setter）
+object_property_set_str/int()
+    
+// 实例化（realize）设备。QOM 分两步：先 initialize（分配内存），再 realize（真正初始化硬件逻辑）
+sysbus_realize()
+    
+// 预定义的 RISC-V CPU 数组类型，管理一组 CPU hart
+TYPE_RISCV_HART_ARRAY
+```
+
+
+
+``` c
+/*创建CPU */
+static void quard_star_cpu_create(MachineState *machine)
+{
     int i, base_hartid, hart_count;
     char *soc_name;
     QuardStarState *s = RISCV_VIRT_MACHINE(machine);
 
-    if(QUARD_STAR_SOCKETS_MAX < riscv_socket_count(machine)){
-        error_report("number of socket/nodes should be less than %d", QUARD_STAR_SOCKETS_MAX);
+    if (QUARD_STAR_SOCKETS_MAX < riscv_socket_count(machine)) {
+        error_report("number of sockets/nodes should be less than %d",
+            QUARD_STAR_SOCKETS_MAX);
         exit(1);
     }
 
-    for(i = 0; i < riscv_socket_count(machine); i++){
-        if(!riscv_socket_check_hartids(machine, i)){
+    for (i = 0; i < riscv_socket_count(machine); i++) {
+        if (!riscv_socket_check_hartids(machine, i)) {
             error_report("discontinuous hartids in socket%d", i);
             exit(1);
         }
-    }
 
-    base_hartid = riscv_socket_first_hartid(machine, i);
-    if(base_hartid < 0){
-        error_report("cant find hartid base for socket%d", i);
-        exit(1);
+        base_hartid = riscv_socket_first_hartid(machine, i);
+        if (base_hartid < 0) {
+            error_report("can't find hartid base for socket%d", i);
+            exit(1);
+        }
+
+        hart_count = riscv_socket_hart_count(machine, i);
+        if (hart_count < 0) {
+            error_report("can't find hart count for socket%d", i);
+            exit(1);
+        }
+
+        soc_name = g_strdup_printf("soc%d", i);
+        
+        object_initialize_child(OBJECT(machine), soc_name, &s->soc[i],
+                                TYPE_RISCV_HART_ARRAY);
+        g_free(soc_name);
+        object_property_set_str(OBJECT(&s->soc[i]), "cpu-type",
+                                machine->cpu_type, &error_abort);
+        
+        object_property_set_int(OBJECT(&s->soc[i]), "hartid-base",
+                                base_hartid, &error_abort);
+        
+        object_property_set_int(OBJECT(&s->soc[i]), "num-harts",
+                                hart_count, &error_abort);
+        
+        sysbus_realize(SYS_BUS_DEVICE(&s->soc[i]), &error_abort);
     }
-    
-    soc_name = g_strdup_printf("soc%d", i);
-    object_initialize_child(OBJECT(machine), soc_name, &s->soc[i], TYPE_RISCV_HART_ARRAY);
-    g_free(soc_name);
-    object_property_set_str(OBJECT(&s->soc[i]), "cpu-type",    machine->cpu_type, &error_abort);
-    object_property_set_int(OBJECT(&s->soc[i]), "hartid-base", base_hartid,       &error_abort);
-    object_property_set_int(OBJECT(&s->soc[i]), "num-harts",   hart_count,        &error_abort);
-    sysbus_realize(TYPE_SYS_BUS_DEVICE(&s->soc[i]), &error_abort);
-    
 }
 ```
 
-## 1.3 创建内存/复位向量
-
-### 1.3.1 创建RAM/ROM
+#### 创建内存/指定复位向量
 
 依据前文定义的内存映射表创建内存。
 
 ``` c
-/* create memory func */
-static void quard_star_memory_create(MachineState *machine){
+/* 创建内存 */
+static void quard_star_memory_create(MachineState *machine)
+{
+    // 依据基类指针获取派生类的地址
     QuardStarState *s = RISCV_VIRT_MACHINE(machine);
+    
+    // 获取 QEMU 的全局物理地址空间根节点
     MemoryRegion *system_memory = get_system_memory();
-    MemoryRegion *dram_mem = g_new(MemoryRegion, 1);
-    MemoryRegion *sram_mem = g_new(MemoryRegion, 1);
-    MemoryRegion *mask_rom = g_new(MemoryRegion, 1);
+    
+    //分配三片存储空间 dram sram mrom
+    MemoryRegion *dram_mem = g_new(MemoryRegion, 1);  //DRAM
+    MemoryRegion *sram_mem = g_new(MemoryRegion, 1);  //SRAM
+    MemoryRegion *mask_rom = g_new(MemoryRegion, 1);  //MROM  
+
 
     memory_region_init_ram(dram_mem, NULL, "riscv_quard_star_board.dram",
-                            quard_star_memmap[QUARD_STAR_DRAM].size, &error_fatal);
-    memory_region_add_subregion(system_memory,
-                            quard_star_memmap[QUARD_STAR_DRAM].base,dram_mem);
+                           quard_star_memmap[QUARD_STAR_DRAM].size, &error_fatal);
+    memory_region_add_subregion(system_memory, 
+                                quard_star_memmap[QUARD_STAR_DRAM].base, dram_mem);
 
     memory_region_init_ram(sram_mem, NULL, "riscv_quard_star_board.sram",
-                            quard_star_memmap[QUARD_STAR_SRAM].size, &error_fatal);
-    memory_region_add_subregion(system_memory,
-                            quard_star.memmap[QUARD_STAR_SRAM].base, sram_mem);
+                           quard_star_memmap[QUARD_STAR_SRAM].size, &error_fatal);
+    memory_region_add_subregion(system_memory, 
+                                quard_star_memmap[QUARD_STAR_SRAM].base, sram_mem);
 
     memory_region_init_rom(mask_rom, NULL, "riscv_quard_star_board.mrom",
-                            quard_star_memmap[QUARD_STAR_MROM].size, &error_fatal);
-    memory_region_add_subregion(system_memory,
-                            quard_star_memmap[QUARD_STAR_MROM].base,  mask_rom);
-
+                           quard_star_memmap[QUARD_STAR_MROM].size, &error_fatal);
+    memory_region_add_subregion(system_memory, 
+                                quard_star_memmap[QUARD_STAR_MROM].base, mask_rom);
+    
+    /* 这个 API 在 MROM 中写入一段跳转指令，CPU 复位时从地址 0x0 开始执行，跳转 Flash 地址 0x20000000 执行固件。 */
     riscv_setup_rom_reset_vec(machine, &s->soc[0], 
                               quard_star_memmap[QUARD_STAR_FLASH].base,
                               quard_star_memmap[QUARD_STAR_MROM].base,
@@ -303,20 +2918,24 @@ static void quard_star_memory_create(MachineState *machine){
 }
 ```
 
-### 1.3.2 复位向量 *
-
 `fw_dynamic_info`存储程序下一阶段启动的地址、魔数、下一阶段CPU处于S态**信息**。
 
 ![reset-vec](quard-star/reset-vec.png)
 
 实现功能：
 
-- 初始化`t0`寄存器的值为`0x0000 0000`。**0**
-- 将`fw_dynamic_info`的地址存储到`a2`寄存器。**1**
-- 将处理器的`hartid`存储到 `a0`寄存器中。（如果禁用了Zicsr扩展则将其替换为 `nop`指令）**2**
-- 如果是64位系统的话获取`start_addr_hi32`与`fdt_loader_addr_hi32`，将`reset_vec`的`[6][7][8][9]`用来存储`start_addr`与`fdt_loader_addr`。
-- 依据64/32位的不同，将`start_addr`加载到`t0`寄存器，将`fdt_loader_addr`加载到`a1`寄存器。**3、4**
-- 跳转到`t0`寄存器中保存的地址。**5**
+1. 初始化`t0`寄存器的值为`0x0000 0000`。
+
+2. 将`fw_dynamic_info`的地址存储到`a2`寄存器。
+
+3. 将处理器的`hartid`存储到 `a0`寄存器中。（如果禁用了Zicsr扩展则将其替换为 `nop`指令）
+
+4. 如果是64位系统的话获取`start_addr_hi32`与`fdt_loader_addr_hi32`，将`reset_vec`的`[6][7][8][9]`用来存储`start_addr`与`fdt_loader_addr`。
+
+5.依据64/32位的不同，将`start_addr`加载到`t0`寄存器，将`fdt_loader_addr`加载到`a1`寄存器。
+
+6. 跳转到`t0`寄存器中保存的地址。
+
 ---
 **最终`t0`保存`start_addr`，`a0`保存`hartid`、`a1`保存`fdt_loader_addr`、`a2`保存`fw_dynamic_info`地址。**
 
@@ -446,7 +3065,7 @@ void riscv_rom_copy_firmware_info(MachineState *machine, hwaddr rom_base,
 }
 ```
 
-## 1.4 创建Flash
+#### 创建Flash
 
 ```c
 /* 创建flash并映射 */
@@ -454,8 +3073,8 @@ static void quard_star_flash_create(MachineState *machine)
 {
     #define QUARD_STAR_FLASH_SECTOR_SIZE (256 * KiB)  //0x40000
     QuardStarState *s = RISCV_VIRT_MACHINE(machine);
-    MemoryRegion *system_memory = get_system_memory();
-    DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
+    MemoryRegion   *system_memory = get_system_memory();
+    DeviceState    *dev = qdev_new(TYPE_PFLASH_CFI01);
 
     qdev_prop_set_uint64(dev, "sector-length", QUARD_STAR_FLASH_SECTOR_SIZE);
     qdev_prop_set_uint8(dev, "width", 4);
@@ -488,9 +3107,7 @@ static void quard_star_flash_create(MachineState *machine)
 }
 ```
 
-## 1.5 创建中断控制器
-
-### 1.5.1 创建PLIC
+#### 创建PLIC
 
 platform-level interrupt controller（PLIC）负责**全局外部中断**。负责将全局中断源（通常是I/O设备：UART, SPI, GPIO）连接到中断目标（通常是处理器的上下文）。它并不涉及任何实际硬件的具体实现。
 
@@ -503,22 +3120,6 @@ platform-level interrupt controller（PLIC）负责**全局外部中断**。负�
 - **中断响应和完成**：中断目标可以通过读取claim寄存器来获取最高优先级的中断ID，并通过写入complete寄存器来完成中断处理。
 
 ---
-
-首先对中断控制器的**参数**以及**寄存器的地址**进行定义：
-
-``` c
-#define QUARD_STAR_PLIC_NUM_SOURCES     127      //PLIC 支持的中断源最大数量
-#define QUARD_STAR_PLIC_NUM_PRIORITIES  7        //PLIC 支持的中断优先级数量
-
-/* 就是寄存器的地址 */
-#define QUARD_STAR_PLIC_PRIORITY_BASE   0x04     //PLIC 中断优先级寄存器的基址偏移值（用于访问中断优先级信息）
-#define QUARD_STAR_PLIC_PENDING_BASE    0x1000   //PLIC 中断挂起寄存器的基址偏移值  （用于访问中断挂起状态）
-#define QUARD_STAR_PLIC_ENABLE_BASE     0X2000   //PLIC 中断使能寄存器的基址偏移值  （用于控制中断使能状态）
-#define QUARD_STAR_PLIC_CONTEXT_BASE    0x200000 //PLIC 上下文保存寄存器的基址偏移值（用于保存中断处理时的上下文信息）
-
-#define QUARD_STAR_PLIC_ENABLE_STRIDE   0x80     //PLIC 中断使能寄存器之间的地址间隔
-#define QUARD_STAR_PLIC_CONTEXT_STRIDE  0x1000   //PLIC 上下文保存寄存器之间的地址间隔
-```
 
 对**每个CPU**创建各自的PLIC：
 
@@ -552,9 +3153,9 @@ static void quard_star_plic_create(MachineState *machine)
 }
 ```
 
-### 1.5.2 创建 Aclint
+#### 创建 ACLINT
 
-advance-core-local-interrupt,是RISC-V架构中的一种高级**本地**中断控制器。主要功能为提供**多处理器(HART)之间的中断**与**定时器及中断/软件中断**功能。
+advance-core-local-interrupt,是RISC-V架构中的一种高级**本地**中断控制器。主要功能为提供**多处理器(HART)之间的中断**与**定时器中断/软件中断**功能。
 
 - IPI功能允许一个HART向另一个HART发送中断信号。
 
@@ -587,196 +3188,53 @@ static void quard_star_aclint_create(MachineState *machine)
 }
 ```
 
-## 1.6 创建/注册板卡
+# 制作测试固件验证UART打印
 
-### 1.6.1 父类-MachineState
-
-继承关系：
-
-**ObjectClass → MachineClass → VirtMachineClass
-Object → MachineState → VirtMachineState**
-
-通过**结构体和函数指针来模拟实现类似继承的行为**。在QEMU中，通常会定义一个基础的 `MachineState` 结构体，然后让不同的机器类型的**实例状态（对象）**继承这个基础**实例状态（对象）**。比如`QuardStarState`类，将其定义在`quard_star.h`文件。
-
-``` C
-struct MachineState {
-    /*< private >*/
-    Object parent_obj;
-
-    /*< public >*/
-
-    void *fdt;
-    char *dtb;
-    char *dumpdtb;
-    int phandle_start;
-    char *dt_compatible;
-    bool dump_guest_core;
-    bool mem_merge;
-    bool usb;
-    bool usb_disabled;
-    char *firmware;
-    bool iommu;
-    bool suppress_vmdesc;
-    bool enable_graphics;
-    ConfidentialGuestSupport *cgs;
-    HostMemoryBackend *memdev;
-    /*
-     * convenience alias to ram_memdev_id backend memory region
-     * or to numa container memory region
-     */
-    MemoryRegion *ram;
-    DeviceMemoryState *device_memory;
-
-    ram_addr_t ram_size;
-    ram_addr_t maxram_size;
-    uint64_t   ram_slots;
-    BootConfiguration boot_config;
-    char *kernel_filename;
-    char *kernel_cmdline;
-    char *initrd_filename;
-    const char *cpu_type;
-    AccelState *accelerator;
-    CPUArchIdList *possible_cpus;
-    CpuTopology smp;
-    struct NVDIMMState *nvdimms_state;
-    struct NumaState *numa_state;
-};
-```
-
-### 1.6.2 子类-QuardStarState
-
-`QuardStarState` 继承 `MachineState` 父类，此外**每一种硬件定义为一种结构体**，为子类的独有属性。
-
-``` C
-struct  QuardStarState{
-    /* private */
-    MachineState parent;
-    
-	/* public */
-    RISCVHartArrayState soc[QUARD_STAR_SOCKETS_MAX];  // 描述hart的结构体数组
-    PFlashCFI01 *flash;  // flash
-    DeviceState *plic[QUARD_STAR_SOCKETS_MAX];  // 定义一个plic设备数组（有8个CPU）
-};
-```
-在此完成**类**与**运行实例（对象）**的模拟继承的操作。
-
-``` c
-static void quard_star_machine_instance_init(Object *obj){
-
-}
-
-static void quard_star_machine_class_init(ObjectClass *oc, void *data){  // 创建quard_star_class
-    MachineClass *mc = MACHINE_CLASS(oc);
-
-    mc->desc = "RISC-V Quard Star board";
-    mc->init = quard_star_machine_init;  // 函数指针指向硬件初始化函数
-    mc->max_cpus = QUARD_STAR_CPUS_MAX;  // 最大CPU数量
-    mc->default_cpu_type = TYPE_RISCV_CPU_BASE;  // 默认CPU类型
-    mc->pci_allow_0_address = true;
-    mc->possible_cpu_arch_ids = riscv_numa_cpu_index_to_props;
-    mc->get_default_cpu_node_id = riscv_numa_get_default_cpu_node_id;
-    mc->numa_mem_supported = true;
-}
-```
-
-### 1.6.3 创建注册信息并注册
-
-- `quard_star_machine_init_register_types(void)`调用`type_register_static(&quard_star_machine_typeinfo)`函数使用注册结构体内的函数指针/信息进行板卡创建。
-- 其中`.class_init`函数指针指向`quard_star_machine_class_init()`初始化并创建`quard_star_class`类：类中存储此板卡的硬件信息：`mc->desc`板子名称、`mc->init`硬件创建函数、`mc->max_cpus`最大CPU数量、`mc->default_cpu_type`CPU类型。
-- 其中`.instance_init`函数指针指向`quard_star_machine_instance_init()`初始化并创建`QuardStarState`运行实例（对象）。
-
-需要定义一个`TypeInfo`(**结构体变量**),然后调用`type_register_static(&quard_star_machine_typeinfo)`.最后调用`type_init`这个宏。
-
-``` c
-static const TypeInfo quard_star_machine_typeinfo = {
-    .name = MACHINE_TYPE_NAME("quard-star"),
-    .parent = TYPE_MACHINE,
-    .class_init = quard_star_machine_class_init,  // 函数指针指向 quard-star-class初始化函数
-    .instance_init = quard_star_machine_instance_init,  // 指向运行实例（对象）创建函数
-    .instance_size = sizeof(QuardStarState),  // 对象大小
-    .interfaces = (InterfaceInfo[]){
-        { TYPE_HOTPLUG_HANDLER },
-        {}
-    },
-};
-
-
-struct TypeInfo
-{
-    const char *name;
-    const char *parent;
-
-    size_t instance_size;  // 对象的大小
-    size_t instance_align;
-    void (*instance_init)(Object *obj);  // 函数指针，该函数用于初始化子类的成员
-    void (*instance_post_init)(Object *obj);
-    void (*instance_finalize)(Object *obj);
-
-    bool abstract;
-    size_t class_size;
-
-    void (*class_init)(ObjectClass *klass, void *data);  // 函数指针，该函数在所有父类初始化完成后调用，允许类设置其默认的虚拟方法指针。也可以使用该函数覆盖父类的虚拟方法。
-    void (*class_base_init)(ObjectClass *klass, void *data);
-    void *class_data;
-
-    InterfaceInfo *interfaces;
-};
-
-
-static void quard_star_machine_init_register_types(void){  // 进行注册
-    type_register_static(&quard_star_machine_typeinfo);
-}
-```
-
-# 2.使用测试固件验证UART打印
-
-## 2.1 mhartid寄存器
-
-**唯一标识硬件线程**：在多核系统中，`mhartid`用于唯一标识每个硬件线程（核心）。至少有一个硬件线程的`hartid`为0，且每个硬件线程的`hartid`必须是唯一的。
-
-**支持多核编程**：操作系统和多核程序可以通过读取`mhartid`来**判断当前代码运行在哪个硬件线程上**，从而实现多核任务调度和管理。
-
-**只读寄存器**：`mhartid`是一个只读寄存器，其位宽为MXLEN（取决于RISC-V的实现，如32位或64位），且在机器模式（M-mode）下可读。
-
-## 2.2 汇编的段
+## `.section`（段）
 
 在汇编语言中，`.section` 指令用于指定接下来的代码或数据应该被放置在程序的哪个内存段（section）中。不同的段可能对应于不同的内存区域和属性，例如：
 
-- 代码段（.text）。
+- 代码段（`.text`）。
 
-- 数据段（.data）。
+- 数据段（`.data`）。
 
-- 只读数据段（.rodata）：用于存放只读数据，如字符串常量。位于 ROM 中。
+- 只读数据段（`.rodata`）：用于存放只读数据，如字符串常量。位于 ROM 中。
 
-- 未初始化数据段（.bss）：存放**未初始化**的全局和静态变量，它们在程序启动时会被自动清零。
+- 未初始化数据段（`.bss`）：存放**未初始化**的全局和静态变量，它们在程序启动时会被自动清零。
 
-- 代码段通常位于 ROM 中，数据段（存储全局变量以及静态变量）位于 RAM 中。
+- 代码段通常位于 ROM 中；数据段（存储全局变量以及静态变量）位于 RAM 中。
 
-## 2.3 汇编文件如何运行
+## 测试固件
+
+
 
 <img src="quard-star/测试固件内存布局.png" alt="测试固件内存布局" style="zoom:50%;" />
 
-`start.s`在`build.sh`文件中先通过只编译不链接生成`start.o`文件，后指定通过`./boot.lds`链接脚本输出`lowlevel_fw.elf`（`.lds`文件指定`start`文件的程序入口为`_start`，以及程序运行的虚拟地址）；再通过GNU工具的`objcopy`工具生成`lowlevel_fw.bin`文件。
+`start.S`在`build.sh`文件中先通过只编译不链接生成`start.o`文件；
+
+然后通过`./boot.lds`链接脚本输出`lowlevel_fw.elf`（`.lds`文件通过`ENTRY( _start )`指定`start.S`文件的程序入口为`_start`函数以及程序运行时的虚拟地址）；
+
+再通过GNU工具的`objcopy`工具生成`lowlevel_fw.bin`文件。以下为`start.S`汇编代码：
 
 ```assembly
-.section .text       // 定义数据段名为.text
-.globl _start        // 定义全局符号_start 可被其他文件识别
-.type _start,@function  // _start为函数
+.section .text       	/* 声明数据段.text */
+.globl _start        	/* 声明 _start 为全局符号，可被其他文件识别 */
+.type _start,@function  /* 声明 _start 符号为函数 */
 
 _start:
-    csrr a0, mhartid  // 从mhartid寄存器读取硬件线程ID到a0寄存器
-    li t0, 0x0  // 将立即数0加载到t0寄存器
-	beq a0, t0, _core0  // 如果a0（核心ID）等于0，则跳转到_core0标签
+    csrr a0, mhartid  	/* 从mhartid寄存器读取硬件线程ID到a0寄存器 */
+    li t0, 0x0  		/* 将立即数0加载到t0寄存器 */
+	beq a0, t0, _core0  /* 如果a0（核心ID）等于0，则跳转到_core0标签 */
 	
 _loop:
-    j _loop  // 无限循环，等待核心0执行
+    j _loop  /* 无限循环，等待核心0执行 */
     
 _core0:
-    li t0, 0x100  // 将立即数0x100加载到t0寄存器
-    slli t0, t0, 20  // 将t0左移20位，得到0x10000000(uart0的地址)
+    li t0, 0x100  /* 将立即数0x100加载到t0寄存器 /*
+    slli t0, t0, 20  /*将t0左移20位，得到0x10000000(uart0的地址)  */
     
-    li t1, 'H'  // 将字符'H'的ASCII码加载到t1寄存器
-    sb t1, 0(t0)  // 将t1的值存储到t0指向的地址，即UART寄存器
+    li t1, 'H'  	/* 将字符'H'的ASCII码加载到t1寄存器  */
+    sb t1, 0(t0)  	/* 将t1的值存储到t0指向的地址，即UART寄存器  */
     li t1, 'e'
     sb t1, 0(t0)
     li t1, 'l'
@@ -785,16 +3243,16 @@ _core0:
     sb t1, 0(t0)
     li t1, 'o'
     sb t1, 0(t0)
-    li t1, '\n'  // 换行符
+    li t1, '\n'  /* 换行符 */
     sb t1, 0(t0)
 	j _loop
 	
 .end
 ```
 
-## 2.4 编写boot.lds
+## 链接脚本
 
-链接脚本指定`start`文件的程序入口为`_start`，以及程序运行的虚拟地址;**确保** `lowlevel_fw.elf` 的代码和数据被链接到 `0x20000000`。
+编写`boot.lds`链接脚本指定`start`文件的程序入口为`_start`，以及程序运行的虚拟地址;**确保** `lowlevel_fw.elf` 的代码和数据被链接到 `0x20000000`。
 
 ``` assembly
 OUTPUT_ARCH( "riscv" )  /*输出可执行文件平台*/
@@ -816,7 +3274,7 @@ SECTIONS                /*定义段域*/
 }
 ```
 
-## 2.5 编写build.sh
+## 编写build.sh
 
 `lowlevle_fw_bin`在内存中烧录的地址在`run.sh`中决定。
 
@@ -844,7 +3302,7 @@ dd of=fw.bin bs=1k count=32k if=/dev/zero
 dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
 ```
 
-## 2.6 编写run.sh
+## 编写run.sh
 
 `fw_bin`在内存中烧录的地址在`run.sh`中决定。
 
@@ -862,35 +3320,20 @@ $SHELL_FOLDER/output/qemu/bin/qemu-system-riscv64 \
 --serial vc:$DEFAULT_VC --serial vc:$DEFAULT_VC --serial vc:$DEFAULT_VC --monitor vc:$DEFAULT_VC --parallel none \
 # -nographic --parallel none \
 ```
-# 3.移植openSBI
+# 移植openSBI
 
-## 3.1 RSICV的多级启动流程*
 
-<img src="quard-star/启动流程.jpg" alt="启动流程"  />
+## SBI
 
-​	实心箭头表示加载操作，虚箭头表示跳转操作。
+### 作用（解耦）
 
-**启动流程是从`ROM`上的代码开始**，负责把`LOADER(start.s)`的代码加载到`SRAM`里然后跳转到`LOADER`处执行（本项目通过qemu的`-drive`命令直接将`loader固件(start.s)`加载到了`flash`的地方，所以`ROM`上的代码不用执行加载`loader`操作。）。
+> **SBI 是一套接口规范（Specification），OpenSBI 是这套接口规范的开源实现（Implementation）。**
 
-`LOADER`的代码会初始化`DDR`然后加载`openSBI`固件到`DDR`，然后跳转到`openSBI`处执行；（如果没有`openSBI`）则直接加载`BootLOADER`，然后跳转到`BootLOADER`处执行（也可以直接是内核，本项目中直接跳转到内核），最后`BootLOADER`会加载 OS 然后跳转到OS处启动操作系统。
+OpenSBI ：它是 RISC-V **Supervisor Binary Interface（SBI）规范的开源参考实现**，主要运行于 **M-mode**，为运行于 **S-mode/HS-mode** 的 bootloader、hypervisor 或 OS 提供服务。这些接口服务由`SBI`规范定义。如运行在S模式的操作系统通过`SBI`来调试`M`模式的硬件资源。是**M模式与S模式之间的桥梁**。
 
----
+openSBI为OS提供接口（不同的SBI函数）其**通过`ecall`指令进行调用。**
 
-![quardstar启动流程](quard-star/quardstar启动流程.jpg)
-
-​	第一阶段为ZSBL，运行在M模式下，对应到本项目ROM上的代码就是复位向表`reset_vec[10]`内的代码。本项目通过qemu的`-drive`命令直接将固件(`loader`)加载到了`flash`的地方，所以`ROM`上的代码不用执行加载`loader`操作。
-
-​	第二阶段为FSBL，运行在M模式下，对应到本项目就是`flash`上的代码，这段代码**加载openSBI固件，加载设备树**，然后跳转到openSBI处执行。
-
-​	第三阶段就是openSBI了，openSBI是运行在M模式下的一段运行时代码，简单来说就是RISCV官方定义了一个规范接口，运行在S模式的软件例如OS可以使用这些标准接口使得能够在不同的硬件平台上具有良好的移植性而不用去适配。
-
-​	第四阶段为U-Boot，负责**初始化各种硬件**，然后拉起Linux kernel，然后跳转到kernel处执行。
-
-​	第五阶段为OS。
-
-## 3.2 SBI/openSBI简介
-
- `openSBI`是运行在`M`模式下的**程序**，但能够为`S`模式提供一些特定的规范接口服务，这些接口服务由`SBI`规范定义。如运行在S模式的操作系统通过`SBI`来调试`M`模式的硬件资源。是**M模式与S模式之间的桥梁**。
+> `ecall` 是 **RISC-V 指令（instruction）**，不是“调用 SBI 的专用命令”。`ecall` 的含义是“向当前执行环境的上层环境发起调用”，当 Linux 在 S-mode 下执行它时，会产生一次 **Environment Call from S-mode** 的异常，随后进入更高特权级处理；在我们讨论的典型 OpenSBI 场景里，这个处理者就是 M-mode 下的 OpenSBI。
 
 ![opensbi的作用](quard-star/opensbi的作用.png)
 
@@ -900,29 +3343,2806 @@ SBI分为两种架构：1.CPU未启动虚拟化扩展，2.CPU启动了虚拟化�
 
 ![SBI架构](quard-star/SBI架构.png)
 
-`Guest Applications`是运行在虚拟化U模式下的应用程序；`Guest Kernel`是操作系统的一部分：提供基本的系统服务、处理系统调用等，例如进程管理、内存管理、设备驱动。openSBI为OS提供接口（不同的SBI函数）其通过`ecall`指令进行调用。
+`Guest Applications`是运行在虚拟化U模式下的应用程序；`Guest Kernel`是操作系统的一部分：提供基本的系统服务、处理系统调用等，例如进程管理、内存管理、设备驱动。
+
+### OS 执行 `ecall` 后，发生了什么？
+
+> SBI 调用，本质上是 Linux 把“我要什么服务、参数是什么”放进寄存器，然后执行 `ecall`，CPU 陷入 M-mode，由 OpenSBI 根据这些寄存器完成服务，最后再返回 Linux。
+
+完整路径：
+
+``` c
+                                        Linux
+                                        S-mode
+                                          │
+                                          │ // 设置 a0~a7
+                                          │
+                                          │ // ecall
+                                          ▼
+                                        CPU 产生异常
+                                          │
+                                          │ // mcause / mepc / mstatus
+                                          ▼
+                                        OpenSBI trap handler
+                                        M-mode
+                                          │
+                                          │ // 根据 a7 / a6 找 SBI 服务
+                                          │ // 根据 a0~a5 取得参数
+                                          │ // 执行服务
+                                          ▼
+                                  // 返回值放 a0/a1
+                                          │
+                                          │ // mret
+                                          ▼
+                                        Linux
+                                        S-mode
+```
+
+#### 如何告诉 SBI 我要干什么？
+
+> 假设 Linux 想调用某个 SBI 服务。总不能只执行`ecall`，然后 OpenSBI 猜：你是想设置定时器？启动 CPU？关机？
+
+##### 标准调用约定
+
+所以**在执行 `ecall` 之前，Linux 要把请求编码在寄存器中。**现代 SBI 的标准调用约定是：
+
+```c
+a7 = EID // Extension ID = 我要调用哪一类 SBI 服务
+a6 = FID // Function ID  = 这一类服务里的哪一个函数
+
+a0
+a1
+a2
+a3
+a4
+a5 = 参数
+```
+
+SBI 官方规范明确规定：`a7` 保存 EID，`a6` 保存 FID，`a0~a5` 用于传递参数。先把它类比成普通 C 函数。
+
+假设`timer_set(1000);`概念上可以理解为：
+
+```
+Extension：
+TIME
+
+Function：
+SET_TIMER
+
+Argument：
+1000
+```
+
+在 SBI 世界里：
+
+```
+a7 = TIME
+a6 = SET_TIMER
+a0 = 1000
+```
+
+然后`ecall`。
 
 ---
 
-`openSBI`有三种 `Firmware`（固件，也就是软件）类型:
+SBI 规范规定返回值主要使用：
 
-- `FW_PAYLOAD`:此类型固件**直接包含了**在 OpenSBI 固件执行之后要运行的引导阶段的二进制代码，通常是引导加载程序（U-Boot）或操作系统内核（Liunx）。通常是U-Boot或者Linux。这是兼容Linux的RISC-V硬件所默认的`firmware`.
+```
+a0 = error
+a1 = value
+```
 
-- `FW_JUMP`:该固件假定下一级引导阶段入口（如引导加载程序或操作系统内核）具有固定地址，跳转到此地址。
+概念上类似：
 
-- `FW_DYNAMIC`:根据前一个阶段传入的信息加载下一个阶段。通常是U-Boot SPL使用它。（qemu默认的`firmware`）
+```c
+struct sbiret {
+    long error;
+    long value;
+};
+```
 
-  ---
+例如`a0 = 0`通常表示：`SBI_SUCCESS`；如果服务有额外返回值：
 
-- 采用的openSBI为`FW_JUMP`类型，其`opensbi_fw.bin` 文件存储在`flash`内，初始化时会被加载到`DRAM 0x80000000`；**OpenSBI 的程序运行地址在`objects.mk`文件中指定，因此就不需要使用.lds文件指定程序的运行地址。**
+```
+a1 = 返回的数据
+```
 
-- 需自行编写设备树编译，将设备树的地址传递给openSBI（通过`a1`寄存器传递），`ROM`内的`fw_dynamic_info`用不到。
+所以调用前：
 
-- 需要编写在`flash`上运行的代码将OpenSBI 的固件加载到`DRAM`起始处然后跳转执行。
+```
+a0~a5 = arguments
+```
 
-## 3.3 OpenSBI函数解析
+调用后：
 
-### 3.3.1 platform结构体
+```
+a0 = error
+a1 = value
+```
+
+##### EID 和 FID
+
+SBI 把服务分组：
+
+```
+TIME Extension
+    └── set_timer
+
+IPI Extension
+    └── send_ipi
+
+HSM Extension
+    ├── hart_start
+    ├── hart_stop
+    ├── hart_get_status
+    └── hart_suspend
+
+SRST Extension
+    └── system_reset
+```
+
+OpenSBI 当前源码里就能看到这些 Extension ID，例如：
+
+```c
+SBI_EXT_TIME
+SBI_EXT_IPI
+SBI_EXT_HSM
+SBI_EXT_SRST
+SBI_EXT_PMU
+...
+```
+
+以及各自的 Function ID。所以：
+
+```
+a7：先找哪个“部门”
+
+a6：再找这个部门里的哪个“业务”
+```
+
+这个类比非常好记。例如：
+
+```assembly
+a7 = HSM
+a6 = HART_START
+```
+
+意思就是：
+
+> 找 HSM 部门，执行 HART_START 业务。
+
+#### `ecall`的本质（Trap）
+
+> `ecall` 本身并不知道 SBI。`ecall` 是 RISC-V ISA 里的：**Environment Call**。它做的事情只是：“我要向执行环境发起调用。”至于**是谁处理，由当前特权级和 trap 配置决定**。
+
+**`ecall` 其实会产生一个异常**，这是理解 OpenSBI 的第一个大转折点：**SBI call 不是普通函数调用。**不是：`jal opensbi_function`
+
+，而是：
+
+```
+ecall
+↓
+产生 synchronous exception
+```
+
+如果 `ecall` 是从 S-mode 执行的，它的异常原因是：
+
+```c
+Environment call from S-mode
+// 对应 exception code：9
+```
+
+RISC-V 特权规范明确规定了这个异常码。所以 CPU 实际发生的是：
+
+```
+Linux：
+
+ecall
+  ↓
+CPU：
+
+“发生了异常，原因 = S-mode ECALL”
+```
+
+#### CPU 去哪里处理异常？(`mtvec`)
+
+> 这里出现一个新的 CSR：mtvec（Machine Trap-Vector Base-Address Register）
+
+现在可以简单理解为：**M-mode trap handler 的入口地址。**比如 OpenSBI 初始化的时候设置：
+
+```
+mtvec = OpenSBI_trap_entry
+```
+
+假设`mtvec = 0x80001000`，那么发生一个需要 M-mode 处理的 trap 后：
+
+```
+PC
+↓
+跳到
+0x80001000
+```
+
+那里就是 OpenSBI 的 trap 入口代码。
+
+```assembly
+mepc  = “返回以后去哪”
+mtvec = “发生 M-mode trap 以后去哪处理”
+```
+
+#### `ecall` 发生时 CPU 自动保存什么？(`mepc、mcause、mstatus`)
+
+> 其他（所有？）寄存器需要 OS 手动保存。
+
+这一段非常重要。假设执行 `ecall` 之前：
+
+```
+mode = S
+
+PC = 0x80201234
+```
+
+发生 trap，进入 M-mode 时，CPU 会更新一系列 CSR。最重要的是三个：
+
+```
+mepc
+mcause
+mstatus
+```
+
+##### `mcause`（告诉是什么异常）
+
+`mcause`CPU 保存：
+
+```
+mcause = 9
+```
+
+意思：Environment call from S-mode。`mcause` 的作用就是：
+
+> 告诉 trap handler：“你为什么被叫过来了？”区分出这是一个 SBI 调用，转发给 SBI 处理。
+
+因此 OpenSBI 可以：
+
+```c
+switch (mcause) {
+
+case supervisor_ecall:
+    ...
+    break;
+
+case illegal_instruction:
+    ...
+    break;
+
+case timer_interrupt:
+    ...
+    break;
+}
+```
+
+概念上就是这样。
+
+##### `mepc`（处理完毕在哪继续执行）
+
+CPU 保存`mepc = 0x80201234`也就是**谁导致了这次 trap**？对于 ECALL，就是：
+
+```
+ECALL 指令本身的地址
+```
+
+RISC-V 规范明确说明，当 trap 进入 M-mode 时，`mepc` 会记录被中断或者导致 exception 的指令地址，方便`mret`之后回来继续执行。
+
+注意为了避免死循环，在返回之前需要让返回地址跳过 `ecall`。`ecall` 是**一条 32-bit 指令**，所以：
+
+```
+mepc = mepc + 4
+```
+
+于是：
+
+```
+原来：
+
+mepc = ECALL地址
+
+修改为：
+
+mepc = ECALL下一条指令
+```
+
+返回之后：
+
+```
+Linux：
+
+ecall
+      ← 不再执行
+
+下一条指令
+      ← 从这里继续
+```
+
+这一步特别重要。
+
+##### `mstatus.MPP`（处理完毕回到什么特权级）
+
+CPU还需要记住：**刚才是谁调用我的？**
+
+刚刚 Linux 在`S-mode`，所以：
+
+```
+mstatus.MPP = S
+```
+
+这样将来：`mret`CPU 才知道：
+
+> “处理完以后应该回 S-mode。”
+
+#### 完整链路
+
+``` c
+                    Linux
+                   S-mode
+                      │
+                      │ a7 = EID
+                      │ a6 = FID
+                      │ a0~a5 = args
+                      │
+                      │ ECALL
+                      ▼
+              ┌───────────────┐
+              │      CPU      │
+              │               │
+              │ mepc=ecall PC │
+              │ mcause=9      │
+              │ MPP=S         │
+              └───────┬───────┘
+                      │
+                      │ PC = mtvec
+                      ▼
+                 OpenSBI
+                  M-mode
+                      │
+                      │ 保存上下文
+                      │
+                      ▼
+                 检查 mcause
+                      │
+                      │ Supervisor ECALL
+                      ▼
+                   读 a7
+                      │
+                  找 Extension
+                      │
+                      ▼
+                   读 a6
+                      │
+                  找 Function
+                      │
+                      ▼
+                 读 a0~a5
+                      │
+                   执行服务
+                      │
+                      ▼
+             a0 = error
+             a1 = value
+                      │
+             mepc = mepc + 4
+                      │
+                     mret
+                      ▼
+                    Linux
+                   S-mode
+```
+
+### Linux 不直接管所有硬件
+
+在 RISC-V 中：**S-mode 并不是最高权限。**一些事情属于 M-mode 管理。比如举几个典型例子：
+
+```
+设置某些 machine-level timer
+跨 hart 发送 IPI
+启动 / 停止其他 hart
+系统 reset / shutdown
+访问某些 M-mode CSR
+管理某些底层机器资源
+```
+
+S-mode Linux **不能随便访问所有 M-mode CSR**，因为权限不够。对于 Linux 这种 rich OS 来说把 M-mode firmware 和 S-mode OS 分开有明显好处。第一是**权限隔离**：
+
+```
+M-mode
+  ↓
+管理机器最底层资源
+
+S-mode
+  ↓
+运行 OS
+
+U-mode
+  ↓
+运行用户程序
+```
+
+形成清晰的 privilege hierarchy。
+
+第二是**硬件抽象**：
+
+```
+Linux
+  ↓
+统一 SBI
+  ↓
+不同机器实现
+```
+
+第三是**OS 可移植性**。Linux 不需要知道每个平台 machine-level 的所有实现细节。这也正是 SBI 这种接口存在的意义。
+
+这也产生了一个问题：
+
+```
+Linux
+   ↓
+想：帮我启动 CPU 1
+   ↓
+但我运行在 S-mode
+   ↓
+没权限
+```
+
+怎么办？找 M-mode 帮忙。于是：
+
+```
+Linux(S-mode)
+      |
+      | “请帮我启动 hart 1”
+      |
+      ↓
+   OpenSBI
+   (M-mode)
+      |
+      ↓
+操作底层硬件
+```
+
+这就是 **SBI** 存在的重要原因。SBI 全称：
+
+> **Supervisor Binary Interface**
+
+可以翻译成：监管者级二进制接口，你可以把它理解成：**S-mode 软件向更高权限环境请求服务的一套标准协议。**比如 Linux 想设置 timer，**不应该要求 Linux 针对每一家 RISC-V SoC 都自己写**：
+
+```c
+if (sifive)
+    ...
+else if (thead)
+    ...
+else if (starfive)
+    ...
+else if (...)
+```
+
+更好的方式是统一规定：
+
+```
+SBI：设置 timer
+SBI：发送 IPI
+SBI：启动 hart
+SBI：停止 hart
+SBI：reset system
+...
+```
+
+Linux 只需要知道：“我要调用 SBI。”至于下面是什么芯片，可以由 M-mode firmware 处理。没有 SBI 时：
+
+```
+Linux
+ │
+ ├── 知道 SoC A 的 timer
+ ├── 知道 SoC B 的 timer
+ ├── 知道 SoC A 的 IPI
+ ├── 知道 SoC B 的 IPI
+ └── 各种 machine-specific 细节
+```
+
+很混乱。有 SBI 以后：
+
+```
+                   ┌── SoC A
+Linux ── SBI ── firmware
+                   ├── SoC B
+                   └── SoC C
+```
+
+Linux 只面对：SBI 标准接口，下面的平台差异由 firmware/OpenSBI 消化。
+
+## openSBI
+
+### 本质是协议的实现
+
+OpenSBI是：**用 C + RISC-V Assembly 写出来的一套 SBI 实现。**所以：
+
+```
+SBI = 标准 / 协议 / specification
+
+OpenSBI = SBI 的一种具体 implementation
+```
+
+**Linux 不是运行在 OpenSBI “里面”。**OpenSBI 也不是一个操作系统。更准确地说：
+
+> OpenSBI 是驻留在更高特权级 M-mode 中的 firmware/runtime，Linux 在需要某些 machine-level 服务时向它发出 SBI call。
+
+### 架构思想
+
+> OpenSBI 自己也不是所有东西都知道。
+
+OpenSBI 分成了两部分思想：
+
+```
+              OpenSBI
+
+        ┌─────────────────┐
+        │  通用 SBI 逻辑   │
+        │    libsbi.a     │
+        └────────┬────────┘
+                 │
+          platform hooks
+                 │
+        ┌────────▼────────┐
+        │ 平台相关代码     │
+        │ SoC / Board     │
+        └────────┬────────┘
+                 │
+        ┌────────▼────────┐
+        │ Hardware        │
+        └─────────────────┘
+```
+
+OpenSBI 官方也明确将**核心实现为平台无关**的`libsbi.a`。而平台需要提供对应的 platform-specific hooks；官方支持的平台则可以形成相应的 `libplatsbi.a`。这实际上是 OpenSBI 开发里非常漂亮的架构。比如：
+
+```
+sbi_timer_set(...)
+```
+
+上层 SBI 逻辑可以是通用的。但是：“你这块 SoC 的 timer **寄存器到底在哪？**”这就可能是 platform-specific。所以开发一块新的 RISC-V SoC 时，通常不是：把整个 OpenSBI 重写一遍。而是：
+
+> **让 OpenSBI 的通用逻辑接上你的 platform-specific 实现。**
+
+官方的平台移植指南也是这个设计：平台通过 `struct sbi_platform` 等机制向 OpenSBI 提供平台操作。
+
+### 三种固件类型
+
+> openSBI 最大的问题其实只有：**“我完成openSBI的配置后，下一步跳到哪里？”**
+
+`openSBI`有三种 `Firmware`类型:
+
+- `FW_JUMP`：该固件假定**下一级**引导阶段入口（如引导加载程序或操作系统内核）**具有固定地址**，跳转到此地址。
+
+- `FW_PAYLOAD`：此类型固件**直接包含**在 OpenSBI 固件执行之后**下一级**要运行的引导阶段的二进制代码，通常是引导加载程序（U-Boot）或操作系统内核（Liunx）。通常是U-Boot或者Linux。这是兼容Linux的RISC-V硬件所默认的`firmware`.
+
+- `FW_DYNAMIC`：根据**上一级**阶段**传入`fw_dynamic_info` 结构体**告诉下一级的跳转地址，其地址通过 `a2` 传给 OpenSBI。通常是U-Boot SPL使用它。（qemu默认的`firmware`）
+
+本项目采用的openSBI为`FW_JUMP`类型，其`opensbi_fw.bin` 文件存储在`Flash`内，初始化时会被加载到`DRAM 0x80000000`，因此 ROM 内的`fw_dynamic_info`用不到。
+
+> **openSBI 的运行地址在`objects.mk`文件中指定，因此不需要使用`.lds`文件指定运行地址。**
+
+需自行编写设备树编译，将设备树的地址传递给openSBI（通过`a1`寄存器传递）。
+
+## RiscV 的 5 级启动流程
+
+### `.elf`文件
+
+#### 运行地址/装载地址
+
+**LDS（linker script）里写的地址，不等于“虚拟内存地址”。**更准确地说，它指定的是 **VMA（Virtual Memory Address，运行地址）** 和/或 **LMA（Load Memory Address，装载地址）**。在裸机 RISC-V 环境里，MMU 尚未开启时这些地址通常就是 CPU 看到的物理地址。 LDS 决定“程序运行时认为自己应该放在哪里”，比如：
+
+``` assembly
+SECTIONS
+{
+    . = 0x20000000;
+
+    .text : {
+        *(.text.init)
+        *(.text*)
+    }
+
+    .rodata : {
+        *(.rodata*)
+    }
+
+    .data : {
+        *(.data*)
+    }
+}
+```
+
+这里`. = 0x20000000;`表示：
+
+> 从链接器的角度，后面的 section 从地址 `0x20000000` 开始布局。
+
+所以：
+
+```
+_start
+uart_main
+.text
+.rodata
+...
+```
+
+最终在 ELF 中会被赋予类似：
+
+```
+_start       → 0x20000000
+uart_main    → 0x200000xx
+...
+```
+
+这里的`0x20000000`是程序的 **VMA**。
+
+在裸机环境里没有启用页表/MMU，所以：虚拟地址 ≈ 物理地址。因此 CPU 真正执行的就是物理地址`0x20000000`。
+
+### `.bin`文件
+
+执行：
+
+```makefile
+riscv64-unknown-elf-objcopy \
+    -O binary -S \
+    build/uart_test.elf \
+    build/uart_test.bin
+```
+
+这一步把 ELF 文件编译为 纯二进制固件。ELF 是带地址信息的：
+
+```
+.text     → 0x20000000
+.data     → 0x20001000
+entry     → 0x20000000
+...
+```
+
+而`.bin`固件基本就是**一串纯字节。**`.bin` 本身通常没有：
+
+```
+“我应该加载到 0x20000000”
+```
+
+这样的元数据。那 `.bin` 最终到底被放到目标机器哪里？这不是 `.bin` 自己决定的。而是：**由加载它的人决定。**例如：
+
+```
+BootROM
+Bootloader
+QEMU
+烧录工具
+JTAG
+OpenOCD
+```
+
+谁负责加载，就由谁决定：**这个 bin 的第 0 字节对应 CPU 的哪个物理地址。**
+
+### 启动链路
+
+<img src="quard-star/启动流程.jpg" alt="启动流程"  />
+
+---
+
+![quardstar启动流程](./assets/quardstar启动流程.jpg)
+
+> 实心箭头表示加载操作，虚箭头表示跳转操作。
+
+第一阶段为ZSBL：**启动流程是从`ROM`上的代码开始**，运行在 **M 模式**下。本项目 ROM 上的代码就是复位向表`reset_vec[10]`内的代码，把`LOADER(start.s)`编译的`.bin`固件加载到`SRAM`里然后跳转执行`LOADER`这步本项目通过 QEMU 的`-drive`命令直接将固件(`loader`)加载到了`Flash`的地方，所以`ROM`上的代码不用执行加载`loader`操作。
+
+---
+
+第二阶段为FSBL，运行在 **M 模式**下，对应到本项目就是`Flash`上的代码，这段代码**加载 openSBI 固件，加载设备树**，然后跳转到openSBI 处执行。（如果没有`openSBI`则直接加载`BootLOADER`）；
+
+---
+
+第三阶段就是openSBI了，对于 OpenSBI 官方 firmware，**前一级启动阶段通常通过寄存器传入**：
+
+```assembly
+a0 = hartid
+a1 = Device Tree Blob 地址
+
+a0
+↓
+“当前我是哪个 hart？”
+
+a1
+↓
+“设备树在哪里？”
+```
+
+这是 OpenSBI 官方 firmware 明确定义的启动参数。然后跳转到`BootLOADER`处执行（也可以直接是内核，本项目中直接跳转到内核）；
+
+> OpenSBI 初始化完成之后要干什么？(假设直接跳转到内核)	
+
+假设现在：
+
+```
+OpenSBI
+M-mode
+
+↓ 初始化完成
+
+准备启动 Linux
+Linux入口 = 0x80200000
+```
+
+OpenSBI 面临一个问题：我现在在 M-mode，但 Linux 应该在 S-mode 运行。不能简单`jr 0x80200000`，因为如果只是普通 jump 无法改变 CPU 的特权级。所以 OpenSBI 要完成两个操作：
+
+```
+1. PC → Linux入口地址
+2. privilege：M-mode → S-mode
+```
+
+RISC-V 提供的关键 CSR 寄存器就是：
+
+```assembly
+mepc		# M 模式发生异常时的 PC 值，执行 mret 后会跳过去
+mstatus.MPP # mret 之后应该去哪个特权级
+mret        # 异常反馈指令
+```
+
+---
+
+第四阶段为U-Boot，负责**初始化各种硬件**，然后拉起Linux kernel，然后跳转到 kernel 处执行。
+
+---
+
+第五阶段为OS。
+
+### 本项目的启动链路
+
+- 编译得到`.bin`固件：
+
+  - 先创建存放固件的文件夹：
+
+    ``` shell
+    CROSS_PREFIX=riscv64-unknown-elf
+    
+    if [ ! -d "$SHELL_FOLDER/output/lowlevelboot" ]; then  
+    mkdir $SHELL_FOLDER/output/lowlevelboot
+    fi  
+    
+    cd  $SHELL_FOLDER/boot
+    ```
+
+  - 把`start.s`**汇编**得到`start.o`：
+
+    ``` shell
+    $CROSS_PREFIX-gcc \
+        -x assembler-with-cpp \	# 把这个文件当作“带 C 预处理器的汇编代码”。（允许出现#define、#include）
+        -c start.s \  			# -c 表示只汇编不链接
+        -o $SHELL_FOLDER/output/lowlevelboot/start.o
+    ```
+
+  - 再通过**链接**把`start.o`链接生成`lowlevel_fw.elf`：
+
+    ``` shell
+    $CROSS_PREFIX-gcc \
+        -nostartfiles \		# 不使用 GCC 默认 CRT startup files。
+        
+        -T./boot.lds  \		# 指定链接器
+        
+        # -Wl 表示把后面的参数交给 linker ld。
+        -Wl,-Map=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.map \  #要求 linker 额外生成链接 Map 文件。
+        -Wl,--gc-sections \ # 链接时删除没有被使用的 section。
+        
+        $SHELL_FOLDER/output/lowlevelboot/start.o \
+        -o $SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf
+    ```
+
+  - 最后通过**`objcopy`**生成`.bin`文件：
+
+    ``` shell
+    objcopy -O binary -S lowlevel_fw.elf lowlevel_fw.bin
+    ```
+    
+  - 生成反汇编`lowlevel_fw.lst`：
+  
+    ``` shell
+    objdump \
+        --source \
+        --demangle \
+        --disassemble \
+        --reloc \
+        --wide \
+        lowlevel_fw.elf \
+        > lowlevel_fw.lst
+    ```
+  
+    这个文件用于看最终生成了哪些机器指令。
+
+- 把`lowlevel_fw.bin `写入`fw.bin`：
+
+  ``` shell
+  # 先创建 32MB 的空Flash
+  dd of=fw.bin bs=1k count=32k if=/dev/zero
+  
+  # 写入 lowlevelboot
+  dd \
+      of=fw.bin \
+      bs=1k \
+      conv=notrunc \
+      seek=0 \		 	# seek=0 意味着从 Flash 文件偏移 0 开始写
+      if=lowlevel_fw.bin
+  ```
+
+- 启动 QEMU 时把`fw.bin`加载到`SRAM`：
+
+``` shell
+-drive if=pflash,bus=0,unit=0,format=raw,file=$(FLASH_IMG)
+```
+
+QEMU 的 `quard-star.c` 板级实现规定：**pFLASH 的起始物理地址映射到 `0x20000000`**，因此：
+
+``` text
+flash 文件 offset        CPU 物理地址
+
+0x00000000      →        0x20000000
+0x00000001      →        0x20000001
+0x00000100      →        0x20000100
+...
+```
+
+## openSBI 源码架构
+
+### 架构地图
+
+> **firmware 负责进门，lib/sbi 负责干活，platform 和 lib/utils 负责跟具体硬件打交道。**
+
+现在我们先不逐行读代码。你需要先建立一个非常重要的源码地图：
+
+```c
+OpenSBI
+│
+├── firmware/
+│      // “程序怎么启动起来？”
+│
+├── lib/sbi/
+│      // “OpenSBI 核心逻辑是什么？”
+│
+├── lib/utils/
+│      // “UART、timer、IPI、FDT 等硬件辅助代码”
+│
+├── platform/
+│      // “这到底是哪一块板子 / 哪个平台？”
+│
+├── include/
+│      // “各种结构体、宏、接口定义”
+│
+└── docs/
+       // “官方说明”
+```
+
+### `firmware/`（OpenSBI 怎么“活起来”）
+
+#### `fw_base.S`（处理 C 代码运行环境）
+
+##### 总览
+
+> 解决：**在 C 代码能够正常运行以前，CPU 环境怎么准备好？**
+
+其中非常关键的是`firmware/fw_base.S`，第一次真正读 OpenSBI 源码，就从这里开始。`fw_base.S` 是 **OpenSBI 所有固件类型（fw_jump / fw_payload / fw_dynamic）共享的汇编启动基座**。当上一级引导（在你的 quard-star 里就是 `lowlevel_fw` / U-Boot）把控制权交给 OpenSBI 时，CPU 处于 **M-mode（机器模式）**，第一条执行的指令就是这里的 `_start`。大致执行：
+
+```
+  上一级loader (a0=hartid, a1=FDT地址)
+        │
+        ▼
+   _start ──► 选 boot hart ──► 重定位 ──► 清寄存器、BSS ──► 建临时栈/trap
+        │                                          │
+        │                                          ▼
+        │                              初始化每个hart的scratch空间
+        │                                          │
+        ▼                                          ▼
+  _start_warm ◄─────────────────────────────  call sbi_init (进入C世界)
+```
+
+CPU 刚跳进来时，还不是一个舒服的 C 程序运行环境。至少得处理：
+
+```
+hart
+stack
+scratch
+trap entry
+boot hart
+多 hart 同步
+```
+
+读懂这个文件的前提是要理解 OpenSBI 的几个设计：
+
+1. **Boot HART（引导核）**：多核系统上电后所有核同时跑 `_start`，但重定位、清 BSS、初始化 scratch 这些**"全局只做一次"的工作**，只能由**一个**核来做，这个核就叫 Boot Hart，其余核要等它做完。
+2. Cold boot VS Warm boot：
+   - `_start` = 冷启动入口（第一次上电）
+   - `_start_warm` = 热启动入口（后续核、或核被唤醒时进入）
+3. **Scratch space（每核私有数据区）**：每个 hart 有一块 `SBI_SCRATCH_SIZE` 大小的内存，保存它的**栈指针**、**trap 出口**、**平台指针**等。`tp` 寄存器和 `mscratch` CSR 都指向它。
+4. **重定位（Relocation）**：固件可能被加载到任意物理地址，但代码是按链接地址写的，需要搬运到链接地址（`FW_TEXT_START`）才能正确运行。
+
+##### 辅助宏（搬运`a0-a4`）
+
+调用 C 函数（`call`）会破坏 `a0-a4`，而这些寄存器存着上一级传来的启动参数，所以每次 `call` 前后用 `MOV_xR` 把它们暂存到 `s` 寄存器再恢复。
+
+``` assembly
+# 一次搬移3个/5个寄存器，用于保护a0-a4参数
+.macro	MOV_3R __d0, __s0, __d1, __s1, __d2, __s2
+	add	\__d0, \__s0, zero
+	add	\__d1, \__s1, zero
+	add	\__d2, \__s2, zero
+.endm
+
+.macro	MOV_5R __d0, __s0, __d1, __s1, __d2, __s2, __d3, __s3, __d4, __s4
+	add	\__d0, \__s0, zero
+	add	\__d1, \__s1, zero
+	add	\__d2, \__s2, zero
+	add	\__d3, \__s3, zero
+	add	\__d4, \__s4, zero
+.endm
+
+
+# 判断 start <= check < end，做地址范围检查
+.macro BRANGE __start_reg, __end_reg, __check_reg, __jump_lable
+	blt	\__check_reg, \__start_reg, 999f
+	bge	\__check_reg, \__end_reg, 999f
+	j	\__jump_lable
+999:
+.endm
+```
+
+##### 选取 Boot Hart
+
+> hart = 硬件线程（Hardware Thread），可以理解为一个能独立取指、译码、执行的 CPU 核/硬件线程；每个 hart 有自己私有的寄存器状态，但和别的 hart 共享内存、总线和外设。
+
+注意这里区分**两种等待方式**：
+
+- PIC：PIC 位置无关没有代码复制(relocate copy)，无需等待代码重定位完毕，可以直接进入等待 boot_hart 。
+
+- 普通模式：**需要单独同步分配**，因为：**boot hart 在复制自己**，假设：加载地址`0x80000000`，链接地址`0x80200000`启动：
+
+  ```
+  hart0
+  hart1
+  hart2
+  hart3
+  ```
+
+  全部从`0x80000000`，进入 `_start`，然后 hart0 抽中开始复制整个固件，**复制过程中 0x80200000 区域正在写入**，此时如果`hart1`直接执行：
+
+  ```assembly
+  jr _wait_relocate_copy_done
+  ```
+
+  但是`_wait_relocate_copy_done`已经位于新的 link address：`0x80200000`，可能发生：
+
+  - 指令还没有复制完成；
+  - 数据段不一致；
+  - relocation entry没有修复；
+
+  结果直接跑飞。所以必须让非引导核此刻仍在**加载地址**的旧副本上执行。
+
+
+具体代码实现：
+
+``` assembly
+	.section .entry, "ax", %progbits
+	.align 3
+	.globl _start
+	.globl _start_warm
+_start:
+	/* Find preferred boot HART id */
+	MOV_3R	s0, a0, s1, a1, s2, a2
+	call	fw_boot_hart					# 问平台：有没有指定的引导核?
+	add	a6, a0, zero
+	MOV_3R	a0, s0, a1, s1, a2, s2
+	li	a7, -1
+	
+	beq	a6, a7, _try_lottery				# 返回-1 => 没指定，用抽签决定
+	bne	a0, a6, _wait_relocate_copy_done	# 我不是引导核 => 去等待
+	
+_try_lottery:
+	lla	a6, _relocate_lottery
+	li	a7, 1
+	amoadd.w a6, a7, (a6)					# 抽签用 amoadd.w 原子操作：第一个把它从 0 加成 1 的核，读回旧值 0	
+	bnez	a6, _wait_relocate_copy_done	# bnez 不跳转，即为中签的 boot hart.等待具体实现取决于FW_PIC分支
+	/* Save load address */
+	lla	t0, _load_start
+	lla	t1, _fw_start
+	REG_S	t1, 0(t0)
+
+
+# PIC:
+_wait_relocate_copy_done:   # PIC 位置无关没有代码复制(relocate copy)，可以直接运行，直接进入等待 boot_hart 。
+	j	_wait_for_boot_hart
+# NONE PIC:
+_wait_relocate_copy_done:
+	lla	t0, _fw_start
+	lla	t1, _link_start
+	REG_L	t1, 0(t1)
+	beq	t0, t1, _wait_for_boot_hart
+	lla	t2, _boot_status
+	lla	t3, _wait_for_boot_hart
+	sub	t3, t3, t0
+	add	t3, t3, t1
+	
+		
+/* waiting for boot hart to be done (_boot_status == 2) */
+_wait_for_boot_hart:
+	li	t0, BOOT_STATUS_BOOT_HART_DONE
+	lla	t1, _boot_status	# 检查 Boot Hart 是否初始化完毕
+	REG_L	t1, 0(t1)
+	/* Reduce the bus traffic so that boot hart may proceed faster */
+	nop
+	nop
+	nop
+	bne	t0, t1, _wait_for_boot_hart  # 一直循环检查
+```
+
+##### 代码重定位
+
+> 为什么需要重定位？
+
+OpenSBI 常常作为固件被上一级加载，上一级加载器可能不按 openSBI 固件中的 LMA（这里 VMA = LMA，按照 LMA 加载） 放，而是把整个固件搬到它自己选定的内存地址，比如 `0x80200000`。
+
+```text
+编译认为：0x80000000
+
+实际运行：0x80200000
+```
+
+那么代码中的：
+
+- 全局变量地址
+- 函数地址
+- GOT(Global Offset Table)
+
+都需要修正。因此：
+
+``` text
+旧地址
+↓
+加 relocation offset
+↓
+运行地址
+```
+
+对于 PIC(Position Independent Code)，主要处理`GOT(Global Offset Table)`和`dynamic relocation table`，遍历重定位表（`__rel_dyn_start` ~ `__rel_dyn_end`），把 GOT 表项修正为运行时真实地址，并把偏移存入 `_runtime_offset`。
+
+对于普通模式：**直接复制整个firmware到正确位置**。
+
+`_wait_relocate_copy_done`：只有 boot hart 负责 relocation。其他 hart：不能同时复制代码。流程：
+
+```
+所有hart启动
+        |
+        |
+        ↓
+判断是否boot hart
+        |
+        +----------------+
+        |                |
+        ↓                ↓
+boot hart        secondary hart
+
+执行relocation           等待
+        |                |
+        ↓                |
+_boot_status=RELOCATE_DONE
+        |
+        ↓
+继续启动
+```
+
+最后Boot Hart告诉其他 hart：代码已经搬迁完成，可以继续执行：
+
+```assembly
+li t1, BOOT_STATUS_RELOCATE_DONE
+
+REG_S t1,0(t0)
+```
+
+##### Boot Hart 进行全局初始化
+
+中签的核继续做全局初始化：
+
+1. **重置寄存器**：`call _reset_regs`，并刷指令缓存，**避免前一级启动程序留下未知状态**。
+
+   ``` assembly
+   /* Reset all registers for boot HART */
+   li	ra, 0
+   call	_reset_regs
+   
+   
+   # _reset_regs：先 fence.i 刷指令缓存，再把除 ra/a0/a1/a2 外所有寄存器清零、mscratch 清零——保证进入下一阶段时寄存器状态干净。
+   	.section .entry, "ax", %progbits
+   	.align 3
+   	.globl _reset_regs
+   _reset_regs:
+   
+   	/* flush the instruction cache */
+   	fence.i
+   	/* Reset all registers except ra, a0, a1 and a2 */
+   	li sp, 0
+   	li gp, 0
+   	li tp, 0
+   	/.../
+   	csrw CSR_MSCRATCH, 0
+   
+   	ret
+   ```
+
+2. **重置 BSS 区**：`_bss_start` 到 `_bss_end` 全写 0，清零未初始化全局变量区域（BSS）为后续 C 代码运行准备环境。
+
+   ``` assembly
+   	/* Zero-out BSS */
+   	lla	s4, _bss_start
+   	lla	s5, _bss_end
+   _bss_zero:
+   	REG_S	zero, (s4)
+   	add	s4, s4, __SIZEOF_POINTER__
+   	blt	s4, s5, _bss_zero
+   ```
+
+3. **临时 trap 处理器**：把 `mtvec` 指向 `_start_hang`——此时还没建好正式环境（scratch 未建立、stack 未建立、C 环境不存在），一旦出异常就直接挂死（便于调试）。
+
+   ``` assembly
+   /* 设置临时的 trap handler，没有scratch，stack，C环境，出现异常直接挂死 */
+   lla	s4, _start_hang
+   csrw	CSR_MTVEC, s4
+   ```
+
+4. **临时栈**：因为之后需要调用 C 函数`fw_save_info()、fw_platform_init()、sbi_init()`，栈指针放在 `_fw_end + 2*SBI_SCRATCH_SIZE`。
+
+   ``` assembly
+   /* 建立临时栈（终于有 sp 了！）之后才可以 call C函数 */
+   lla	s4, _fw_end
+   li	s5, (SBI_SCRATCH_SIZE * 2)
+   add	sp, s4, s5
+   ```
+
+5. **保存启动信息**：`call fw_save_info`，把 `a0:hart id、a1:DTB、a2:额外启动信息` 传给具体固件（`fw_jump/fw_dynamic`）记录。
+
+   ``` assembly
+   #ifdef FW_FDT_PATH
+   	/* Override previous arg1 */
+   	lla	a1, fw_fdt_bin
+   #endif
+   
+   /* Allow main firmware to save info */
+   MOV_5R	s0, a0, s1, a1, s2, a2, s3, a3, s4, a4
+   call	fw_save_info
+   MOV_5R	a0, s0, a1, s1, a2, s2, a3, s3, a4, s4
+
+6. **平台初始化**：`call fw_platform_init`（弱符号，默认为空，平台可覆盖）。
+
+   ``` assembly
+   /* 调用 fw_platform_init 初始化硬件平台 */
+   MOV_5R	s0, a0, s1, a1, s2, a2, s3, a3, s4, a4
+   call	fw_platform_init
+   add	t0, a0, zero
+   MOV_5R	a0, s0, a1, s1, a2, s2, a3, s3, a4, s4
+   add	a1, t0, zero
+   ```
+
+7. **从 `platform` 结构体读取板子的Hart数量以及`scratch`的大小：** `s7 = hart_count`、`s8 = scratch_size`。
+
+   ``` assembly
+   lla	a4, platform
+   #if __riscv_xlen > 32
+   	lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
+   	lwu	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
+   #else
+   	lw	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
+   	lw	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
+   #endif
+   ```
+
+8. **为每个 Hart 建立 `scratch space`，调用`_scratch_init`循环**。
+
+   > 什么是 scratch space？
+   >
+   > OpenSBI 是多 Hart 运行环境，每个 Hart 都需要保存自己的运行状态，例如：
+   >
+   > - 当前 Hart 对应的 OpenSBI 信息；
+   > - 下一阶段软件入口；
+   > - trap 处理信息；
+   > - platform 信息；
+   > - warm boot 信息等。
+   >
+   > 每个 Hart 最终：`mscratch` → 自己的 `sbi_scratch`。
+
+   通过`tp = firmware_end + Hart总数 × 每个 Hart 的 scratch_size`计算得到`scratch_top`，对每个 Hart 相较于`tp`的偏移填入每个 Hart 的：
+
+   - 固件起始/大小；
+
+   - 下一级 arg1（`fw_next_arg1`，Linux一般DTB地址）、下一阶段入口地址（`fw_next_addr`）、下一阶段模式（`fw_next_mode`，S-mode 还是 M-mode）；
+   - warm boot 入口 `_start_warm`、平台指针 `platform`、`_hartid_to_scratch`、trap 出口 `_trap_exit`、固件选项等；
+
+``` assembly
+	/* 给每个 Hart 创建 scratch，tp 以 _fw_end 开始 */
+	lla	tp, _fw_end  # openSBI 固件的结束地址 
+	mul	a5, s7, s8   # s7 = hart_count, s8 = stack_size
+	add	tp, tp, a5
+	/* Keep a copy of tp */
+	add	t3, tp, zero
+	/* 用于 + 1 */
+	li	t2, 1
+	/* 正在分配的 hart_id */
+	li	t1, 0
+_scratch_init:
+	/*
+	 * t1 -> 正在分配的 hart_id 
+	 * t2 -> 用于 + 1
+	 * t3 -> scratch_top 地址
+	 * s7 -> HART count
+	 * s8 -> HART stack size
+	 */
+	add	tp, t3, zero			# tp = scratch_top
+	
+	mul	a5, s8, t1				# tp = tp - hart_index(从 0 开始) × stack_size (得到当前 hart 的 scratch_top)
+	sub	tp, tp, a5				
+	
+	li	a5, SBI_SCRATCH_SIZE	# tp = tp - SBI_SCRATCH_SIZE (tp = 当前 hart_index 的 scratch space 起始地址)
+	sub	tp, tp, a5				
+
+
+	/* 初始化 scratch space */
+	
+	/* 存储 fw_start 和 fw_size */
+	lla	a4, _fw_start	# openSBI 固件的起始地址
+	sub	a5, t3, a4
+	REG_S	a4, SBI_SCRATCH_FW_START_OFFSET(tp)
+	REG_S	a5, SBI_SCRATCH_FW_SIZE_OFFSET(tp)
+	/* 保存下一阶段的启动参数(a1 参数) */
+	MOV_3R	s0, a0, s1, a1, s2, a2
+	call	fw_next_arg1
+	REG_S	a0, SBI_SCRATCH_NEXT_ARG1_OFFSET(tp)
+	MOV_3R	a0, s0, a1, s1, a2, s2
+	/* 保存下一阶段的跳转地址 */
+	MOV_3R	s0, a0, s1, a1, s2, a2
+	call	fw_next_addr
+	REG_S	a0, SBI_SCRATCH_NEXT_ADDR_OFFSET(tp)
+	MOV_3R	a0, s0, a1, s1, a2, s2
+	/* 保存下一阶段的启动模式 */
+	MOV_3R	s0, a0, s1, a1, s2, a2
+	call	fw_next_mode
+	REG_S	a0, SBI_SCRATCH_NEXT_MODE_OFFSET(tp)
+	MOV_3R	a0, s0, a1, s1, a2, s2
+	/* 保存 _start_warm 的地址 */
+	lla	a4, _start_warm
+	REG_S	a4, SBI_SCRATCH_WARMBOOT_ADDR_OFFSET(tp)
+	/* 保存 platform 的地址 */
+	lla	a4, platform
+	REG_S	a4, SBI_SCRATCH_PLATFORM_ADDR_OFFSET(tp)
+	/* 保存 hartid-to-scratch 函数地址 */
+	lla	a4, _hartid_to_scratch
+	REG_S	a4, SBI_SCRATCH_HARTID_TO_SCRATCH_OFFSET(tp)
+	/* 保存 trap-exit 函数地址 */
+	lla	a4, _trap_exit
+	REG_S	a4, SBI_SCRATCH_TRAP_EXIT_OFFSET(tp)
+	/* Clear tmp0 in scratch space */
+	REG_S	zero, SBI_SCRATCH_TMP0_OFFSET(tp)
+	/* Store firmware options in scratch space */
+	MOV_3R	s0, a0, s1, a1, s2, a2
+	
+#ifdef FW_OPTIONS
+	li	a0, FW_OPTIONS
+#else
+	call	fw_options
+#endif
+
+	REG_S	a0, SBI_SCRATCH_OPTIONS_OFFSET(tp)
+	MOV_3R	a0, s0, a1, s1, a2, s2
+	/* Move to next scratch space */
+	add	t1, t1, t2
+	blt	t1, s7, _scratch_init
+```
+
+##### FDT 重定位 & 通知其他 Hart
+
+如果上一启动阶段传了设备树地址（a1 ≠ 0），且**平台指定了新的 FDT 存放地址，就把设备树从源地址拷到目标地址**。核心流程：
+
+``` c
+if (a1 == NULL)
+    skip;
+
+
+dst = fw_next_arg1();
+
+
+if (dst == NULL || dst == source)
+    skip;
+
+
+size = fdt_size(source);
+
+
+copy(source, dst);
+
+
+continue_boot();
+```
+
+1. 首先判断是否存在 DTB：
+
+``` assembly
+# 检查是否传入了 DTB
+beqz	a1, _fdt_reloc_done
+```
+
+2. 然后获取目标地址：
+
+``` assembly
+/* t1 = destination FDT start address */
+MOV_3R	s0, a0, s1, a1, s2, a2
+call	fw_next_arg1
+add	t1, a0, zero
+```
+
+3. 然后完成 source -> destination 复制：
+
+``` assembly
+REG_L t3,0(t0)
+
+REG_S t3,0(t1)
+```
+
+4. 标记boot hart 初始化完成，Second Hart 也进入`_start_warm`，Boot Hart跳转进入 `_start_warm`：
+
+``` assembly
+# 所有核最终都汇聚到 _start_warm
+_fdt_reloc_done:
+
+	/* mark boot hart done，告诉其他 Hart初始化完成，可以进入 _start_warm */
+	li	t0, BOOT_STATUS_BOOT_HART_DONE
+	lla	t1, _boot_status
+	REG_S	t0, 0(t1)
+	
+	fence	rw, rw
+	j	_start_warm
+```
+
+##### `_start_warm`：每核通用初始化 + 进入 C 
+
+这是**每个 hart 都要走**的路径：
+
+- 重置寄存器、**关中断并清 pending**：`csrw CSR_MIE, zero` / `CSR_MIP, zero`：
+
+  ``` assembly
+  _start_warm:
+  	/* Reset all registers for non-boot HARTs */
+  	li	ra, 0
+  	call	_reset_regs
+  
+  	/* Disable and clear all interrupts */
+  	csrw	CSR_MIE, zero
+  	csrw	CSR_MIP, zero
+  ```
+
+
+- 然后**找 Hart 数量和 scratch 大小**，并**找到自己的 Hart ID**：
+
+  ``` assembly
+  /* Find HART count and HART stack size */
+  lla	a4, platform  									# a4 = platform结构体地址
+  
+  #if __riscv_xlen == 64
+  lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)			# s7 = hart数量
+  lwu	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)		# s8 = 每个 hart 的空间大小
+  #else
+  lw	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
+  lw	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
+  #endif
+  
+  csrr s6, CSR_MHARTID # s6 = hart_id(index)
+  REG_L	s9, SBI_PLATFORM_HART_INDEX2ID_OFFSET(a4) 		# 硬件hart_id不一定连续，openSBI需要连续；需要转换表得到 hart_index
+  ```
+
+- **找到并设置本核 `scratch` 指针 和 `sp` 指针（此时`scratch、sp、tp`都指向`scratch space`）**：
+
+  ``` assembly
+  lla tp,_fw_end 	# tp = firmware结束地址
+  
+  mul a5,s7,s8   	# tp =_fw_end + hart数量 × 每hart空间大小 (scratch_top)
+  add tp,tp,a5
+  
+  mul a5,s8,s6   			# tp = tp - hart_index × scratch_size (current_scratch_top_address)
+  sub tp,tp,a5
+  
+  li a5,SBI_SCRATCH_SIZE	# tp = scratch_start_address
+  sub tp,tp,a5
+  
+  csrw CSR_MSCRATCH,tp	# 设置 mscratch 寄存器
+  add sp,tp,zero			# 设置 sp 寄存器（创建栈）
+  ```
+
+- **设置`mtvec`寄存器**：`mtvec` 指向 `_trap_handler`（RV32 且带 H 扩展时用 `_trap_handler_rv32_hyp`）：
+
+  ``` assembly
+  lla a4,_trap_handler
+  
+  csrw CSR_MTVEC,a4
+  ```
+
+- 进入 C 世界：
+
+  ``` assembly
+  csrr	a0, CSR_MSCRATCH     # a0 = 本核scratch指针
+  call	sbi_init             # OpenSBI C语言主初始化
+  ```
+
+​	`sbi_init`正常不会返回，返回了就`j _start_hang`挂死。
+
+##### Trap 处理框架
+
+这是 OpenSBI 作为 M-mode 运行时，处理来自 S-mode（你的 OS）的 `ecall`、异常、中断的核心。用宏组织：
+
+| 宏                                    | 作用                                                         |
+| :------------------------------------ | :----------------------------------------------------------- |
+| `TRAP_SAVE_AND_SETUP_SP_T0`           | 用 `mscratch`↔`tp` 交换拿到 scratch；判断异常来自 M 还是 S 模式，选择对应的栈；保存原始 sp/t0 |
+| `TRAP_SAVE_MEPC_MSTATUS`              | 保存 `mepc`（出错/陷入指令地址）、`mstatus`                  |
+| `TRAP_SAVE_GENERAL_REGS_EXCEPT_SP_T0` | 把 31 个通用寄存器压入 `struct sbi_trap_regs`                |
+| `TRAP_CALL_C_ROUTINE`                 | `a0=sp`（即 trap_regs 指针），`call sbi_trap_handler` 交给 C 处理 |
+| `TRAP_RESTORE_*`                      | 处理完后逐个恢复寄存器、mepc、mstatus                        |
+
+``` assembly
+.macro	TRAP_SAVE_AND_SETUP_SP_T0
+	/* Swap TP and MSCRATCH */
+	csrrw	tp, CSR_MSCRATCH, tp
+
+	/* Save T0 in scratch space */
+	REG_S	t0, SBI_SCRATCH_TMP0_OFFSET(tp)
+
+	/*
+	 * Set T0 to appropriate exception stack
+	 *
+	 * Came_From_M_Mode = ((MSTATUS.MPP < PRV_M) ? 1 : 0) - 1;
+	 * Exception_Stack = TP ^ (Came_From_M_Mode & (SP ^ TP))
+	 *
+	 * Came_From_M_Mode = 0    ==>    Exception_Stack = TP
+	 * Came_From_M_Mode = -1   ==>    Exception_Stack = SP
+	 */
+	csrr	t0, CSR_MSTATUS
+	srl	t0, t0, MSTATUS_MPP_SHIFT
+	and	t0, t0, PRV_M
+	slti	t0, t0, PRV_M
+	add	t0, t0, -1
+	xor	sp, sp, tp
+	and	t0, t0, sp
+	xor	sp, sp, tp
+	xor	t0, tp, t0
+
+	/* Save original SP on exception stack */
+	REG_S	sp, (SBI_TRAP_REGS_OFFSET(sp) - SBI_TRAP_REGS_SIZE)(t0)
+
+	/* Set SP to exception stack and make room for trap registers */
+	add	sp, t0, -(SBI_TRAP_REGS_SIZE)
+
+	/* Restore T0 from scratch space */
+	REG_L	t0, SBI_SCRATCH_TMP0_OFFSET(tp)
+
+	/* Save T0 on stack */
+	REG_S	t0, SBI_TRAP_REGS_OFFSET(t0)(sp)
+
+	/* Swap TP and MSCRATCH */
+	csrrw	tp, CSR_MSCRATCH, tp
+.endm
+
+.macro	TRAP_SAVE_MEPC_MSTATUS have_mstatush
+	/* Save MEPC and MSTATUS CSRs */
+	csrr	t0, CSR_MEPC
+	REG_S	t0, SBI_TRAP_REGS_OFFSET(mepc)(sp)
+	csrr	t0, CSR_MSTATUS
+	REG_S	t0, SBI_TRAP_REGS_OFFSET(mstatus)(sp)
+	.if \have_mstatush
+	csrr	t0, CSR_MSTATUSH
+	REG_S	t0, SBI_TRAP_REGS_OFFSET(mstatusH)(sp)
+	.else
+	REG_S	zero, SBI_TRAP_REGS_OFFSET(mstatusH)(sp)
+	.endif
+.endm
+
+.macro	TRAP_SAVE_GENERAL_REGS_EXCEPT_SP_T0
+	/* Save all general regisers except SP and T0 */
+	REG_S	zero, SBI_TRAP_REGS_OFFSET(zero)(sp)
+	REG_S	ra, SBI_TRAP_REGS_OFFSET(ra)(sp)
+	REG_S	gp, SBI_TRAP_REGS_OFFSET(gp)(sp)
+	REG_S	tp, SBI_TRAP_REGS_OFFSET(tp)(sp)
+	REG_S	t1, SBI_TRAP_REGS_OFFSET(t1)(sp)
+	REG_S	t2, SBI_TRAP_REGS_OFFSET(t2)(sp)
+	REG_S	s0, SBI_TRAP_REGS_OFFSET(s0)(sp)
+	REG_S	s1, SBI_TRAP_REGS_OFFSET(s1)(sp)
+	REG_S	a0, SBI_TRAP_REGS_OFFSET(a0)(sp)
+	REG_S	a1, SBI_TRAP_REGS_OFFSET(a1)(sp)
+	REG_S	a2, SBI_TRAP_REGS_OFFSET(a2)(sp)
+	REG_S	a3, SBI_TRAP_REGS_OFFSET(a3)(sp)
+	REG_S	a4, SBI_TRAP_REGS_OFFSET(a4)(sp)
+	REG_S	a5, SBI_TRAP_REGS_OFFSET(a5)(sp)
+	REG_S	a6, SBI_TRAP_REGS_OFFSET(a6)(sp)
+	REG_S	a7, SBI_TRAP_REGS_OFFSET(a7)(sp)
+	REG_S	s2, SBI_TRAP_REGS_OFFSET(s2)(sp)
+	REG_S	s3, SBI_TRAP_REGS_OFFSET(s3)(sp)
+	REG_S	s4, SBI_TRAP_REGS_OFFSET(s4)(sp)
+	REG_S	s5, SBI_TRAP_REGS_OFFSET(s5)(sp)
+	REG_S	s6, SBI_TRAP_REGS_OFFSET(s6)(sp)
+	REG_S	s7, SBI_TRAP_REGS_OFFSET(s7)(sp)
+	REG_S	s8, SBI_TRAP_REGS_OFFSET(s8)(sp)
+	REG_S	s9, SBI_TRAP_REGS_OFFSET(s9)(sp)
+	REG_S	s10, SBI_TRAP_REGS_OFFSET(s10)(sp)
+	REG_S	s11, SBI_TRAP_REGS_OFFSET(s11)(sp)
+	REG_S	t3, SBI_TRAP_REGS_OFFSET(t3)(sp)
+	REG_S	t4, SBI_TRAP_REGS_OFFSET(t4)(sp)
+	REG_S	t5, SBI_TRAP_REGS_OFFSET(t5)(sp)
+	REG_S	t6, SBI_TRAP_REGS_OFFSET(t6)(sp)
+.endm
+
+.macro	TRAP_CALL_C_ROUTINE
+	/* Call C routine */
+	add	a0, sp, zero
+	call	sbi_trap_handler
+.endm
+
+.macro	TRAP_RESTORE_GENERAL_REGS_EXCEPT_A0_T0
+	/* Restore all general regisers except A0 and T0 */
+	REG_L	ra, SBI_TRAP_REGS_OFFSET(ra)(a0)
+	REG_L	sp, SBI_TRAP_REGS_OFFSET(sp)(a0)
+	REG_L	gp, SBI_TRAP_REGS_OFFSET(gp)(a0)
+	REG_L	tp, SBI_TRAP_REGS_OFFSET(tp)(a0)
+	REG_L	t1, SBI_TRAP_REGS_OFFSET(t1)(a0)
+	REG_L	t2, SBI_TRAP_REGS_OFFSET(t2)(a0)
+	REG_L	s0, SBI_TRAP_REGS_OFFSET(s0)(a0)
+	REG_L	s1, SBI_TRAP_REGS_OFFSET(s1)(a0)
+	REG_L	a1, SBI_TRAP_REGS_OFFSET(a1)(a0)
+	REG_L	a2, SBI_TRAP_REGS_OFFSET(a2)(a0)
+	REG_L	a3, SBI_TRAP_REGS_OFFSET(a3)(a0)
+	REG_L	a4, SBI_TRAP_REGS_OFFSET(a4)(a0)
+	REG_L	a5, SBI_TRAP_REGS_OFFSET(a5)(a0)
+	REG_L	a6, SBI_TRAP_REGS_OFFSET(a6)(a0)
+	REG_L	a7, SBI_TRAP_REGS_OFFSET(a7)(a0)
+	REG_L	s2, SBI_TRAP_REGS_OFFSET(s2)(a0)
+	REG_L	s3, SBI_TRAP_REGS_OFFSET(s3)(a0)
+	REG_L	s4, SBI_TRAP_REGS_OFFSET(s4)(a0)
+	REG_L	s5, SBI_TRAP_REGS_OFFSET(s5)(a0)
+	REG_L	s6, SBI_TRAP_REGS_OFFSET(s6)(a0)
+	REG_L	s7, SBI_TRAP_REGS_OFFSET(s7)(a0)
+	REG_L	s8, SBI_TRAP_REGS_OFFSET(s8)(a0)
+	REG_L	s9, SBI_TRAP_REGS_OFFSET(s9)(a0)
+	REG_L	s10, SBI_TRAP_REGS_OFFSET(s10)(a0)
+	REG_L	s11, SBI_TRAP_REGS_OFFSET(s11)(a0)
+	REG_L	t3, SBI_TRAP_REGS_OFFSET(t3)(a0)
+	REG_L	t4, SBI_TRAP_REGS_OFFSET(t4)(a0)
+	REG_L	t5, SBI_TRAP_REGS_OFFSET(t5)(a0)
+	REG_L	t6, SBI_TRAP_REGS_OFFSET(t6)(a0)
+.endm
+
+.macro	TRAP_RESTORE_MEPC_MSTATUS have_mstatush
+	/* Restore MEPC and MSTATUS CSRs */
+	REG_L	t0, SBI_TRAP_REGS_OFFSET(mepc)(a0)
+	csrw	CSR_MEPC, t0
+	REG_L	t0, SBI_TRAP_REGS_OFFSET(mstatus)(a0)
+	csrw	CSR_MSTATUS, t0
+	.if \have_mstatush
+	REG_L	t0, SBI_TRAP_REGS_OFFSET(mstatusH)(a0)
+	csrw	CSR_MSTATUSH, t0
+	.endif
+.endm
+
+.macro TRAP_RESTORE_A0_T0
+	/* Restore T0 */
+	REG_L	t0, SBI_TRAP_REGS_OFFSET(t0)(a0)
+
+	/* Restore A0 */
+	REG_L	a0, SBI_TRAP_REGS_OFFSET(a0)(a0)
+.endm
+
+	.section .entry, "ax", %progbits
+	.align 3
+	.globl _trap_handler
+	.globl _trap_exit
+_trap_handler:
+	TRAP_SAVE_AND_SETUP_SP_T0
+
+	TRAP_SAVE_MEPC_MSTATUS 0
+
+	TRAP_SAVE_GENERAL_REGS_EXCEPT_SP_T0
+
+	TRAP_CALL_C_ROUTINE
+
+_trap_exit:
+	TRAP_RESTORE_GENERAL_REGS_EXCEPT_A0_T0
+
+	TRAP_RESTORE_MEPC_MSTATUS 0
+
+	TRAP_RESTORE_A0_T0
+
+	mret
+
+#if __riscv_xlen == 32
+	.section .entry, "ax", %progbits
+	.align 3
+	.globl _trap_handler_rv32_hyp
+	.globl _trap_exit_rv32_hyp
+_trap_handler_rv32_hyp:
+	TRAP_SAVE_AND_SETUP_SP_T0
+
+	TRAP_SAVE_MEPC_MSTATUS 1
+
+	TRAP_SAVE_GENERAL_REGS_EXCEPT_SP_T0
+
+	TRAP_CALL_C_ROUTINE
+
+_trap_exit_rv32_hyp:
+	TRAP_RESTORE_GENERAL_REGS_EXCEPT_A0_T0
+
+	TRAP_RESTORE_MEPC_MSTATUS 1
+
+	TRAP_RESTORE_A0_T0
+
+	mret
+#endif
+```
+
+##### FDT内嵌
+
+- `fw_fdt_bin`：当定义了 `FW_FDT_PATH` 时，用 `.incbin` 把设备树二进制直接嵌进固件。
+
+``` assembly
+#ifdef FW_FDT_PATH
+	.section .rodata
+	.align 4
+	.globl fw_fdt_bin
+fw_fdt_bin:
+	.incbin FW_FDT_PATH
+	
+#ifdef FW_FDT_PADDING
+	.fill FW_FDT_PADDING, 1, 0
+#endif
+
+#endif
+```
+
+### `/lib/sbi/`（openSBI 的主体）
+
+> **平台无关（platform-independent）的 SBI 核心实现**
+
+官方把这一部分编译成：`libsbi.a`，而且官方明确将 `libsbi.a` 定义为**平台无关（platform-independent）的 SBI 核心实现**。OpenSBI 并不一定非得以官方提供的完整：
+
+```
+fw_payload
+fw_jump
+fw_dynamic
+```
+
+形式使用。官方甚至明确允许你把`libsbi.a`链接进自己的 M-mode firmware，然后由你自己提供：
+
+```c
+struct sbi_platform
+```
+
+以及对应硬件支持。所以 OpenSBI其实既可以理解成一套完整 reference firmware，也可以理解成：
+
+> **一个 SBI runtime library。**
+
+这对以后真正做芯片、BootROM、FSBL、OpenSBI 集成非常重要。
+
+`/lib/sbi/`中会看到很多文件：
+
+```c
+lib/sbi/
+
+sbi_init.c
+sbi_trap.c
+sbi_ecall.c
+sbi_timer.c
+sbi_ipi.c
+sbi_hsm.c
+sbi_hart.c
+sbi_console.c
+...
+```
+
+看到这些名字，不要害怕。你已经能猜出来很多。例如：`sbi_init.c`就是：OpenSBI runtime 初始化。当前源码中：
+
+```c
+void __noreturn sbi_init(struct sbi_scratch *scratch)
+```
+
+就是核心初始化入口之一。
+
+#### `sbi_init.c`
+
+##### 总览
+
+`fw_base.S` 的 boot hart 和 `sbi_init.c` 的 coldboot hart不是同一个概念。
+
+coldboot 做全局一次性初始化，warm startup 做 per-hart 初始化。
+
+warmboot 不一定是“第一次启动的从核”，还可能是 suspended hart 的 resume。
+
+`coldboot_done + acquire/release + IPI + WFI` 构成了 C 层多 hart 初始化同步机制。
+
+                                               sbi_init(scratch)
+                                                      │
+                                                      ▼
+                                             检查当前 hart 合法
+                                                      │
+                                                      ▼
+                                          检查 next_mode 是否支持
+                                                      │
+                                                      ▼
+                                              coldboot lottery
+                                                      │
+                                                      ▼
+                                           platform nascent init
+                                                      │
+                                         ┌────────────┴────────────┐
+                                         │                         │
+                                         ▼                         ▼
+                                        coldboot hart              warmboot hart
+                                         │                         │
+                                         ▼                         ▼
+                                        init_coldboot             wait_for_coldboot
+                                         │                         │
+                                         │                         ▼
+                                        scratch/domain               HSM state
+                                         │                      /       \
+                                         │                     /         \
+                                         │                startup       resume
+                                         │                   │            │
+                                         │                   ▼            ▼
+                                         │             per-hart init   re-init
+                                         │                   │            │
+                                         └──────────────┬────┴────────────┘
+                                                        │
+                                                        ▼
+                                             sbi_hart_switch_mode
+                                                        │
+                                                        ▼
+                                              next_addr / next_mode
+                                                        │
+                                                        ▼
+                                                 Linux / U-Boot
+
+##### 前置条件检查
+
+先看最核心入口：
+
+```c
+void __noreturn sbi_init(struct sbi_scratch *scratch)
+{
+    bool next_mode_supported = FALSE;
+    bool coldboot = FALSE;
+    u32 hartid = current_hartid();
+    const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+
+    ...
+}
+```
+
+源码明确要求进入这里之前已经满足四个条件：
+
+1. `mscratch` → 当前 hart 的 `sbi_scratch`；
+2. `sp` 已经为当前 hart 设置好；
+3. `mstatus` 中中断关闭；
+4. `mie` 中所有中断关闭；
+
+这正是我们上一阶段 `_start_warm` 做好的事情。  
+
+---
+
+首先**确认“我这个 hart 合不合法”**，进入 `sbi_init()` 后：
+
+```c
+u32 hartid = current_hartid();
+```
+
+得到当前 hart ID。然后：
+
+```c
+if ((SBI_HARTMASK_MAX_BITS <= hartid) ||
+    sbi_platform_hart_invalid(plat, hartid))
+    sbi_hart_hang();
+```
+
+意思很简单：如果这个 hart 根本不在 OpenSBI 能管理的 hart 范围内，或者平台认为它无效，就直接挂起。所以这时 OpenSBI 已经从：“CPU 启动”进入：“这个具体 hart 能不能加入 OpenSBI runtime”这个层面了。
+
+---
+
+**第二步：检查这个 hart 能不能运行下一阶段**：
+
+```c
+switch (scratch->next_mode) {
+case PRV_M:
+    next_mode_supported = TRUE;
+    break;
+
+case PRV_S:
+    if (misa_extension('S'))
+        next_mode_supported = TRUE;
+    break;
+
+case PRV_U:
+    if (misa_extension('U'))
+        next_mode_supported = TRUE;
+    break;
+
+default:
+    sbi_hart_hang();
+}
+```
+
+这里的`scratch->next_mode`前面在 `fw_base.S` 已经见过。它表示：
+
+> OpenSBI 初始化完成以后，下一个软件要运行在哪个 privilege mode。
+
+例如典型 Linux：
+
+```c
+OpenSBI：M-mode
+       ↓
+Linux：S-mode
+```
+
+那么：`scratch->next_mode = PRV_S`，OpenSBI 就必须检查：
+
+```c
+misa_extension('S')
+```
+
+也就是：当前这个 hart 支不支持 S-mode？如果这个 hart 不支持 S-mode，它就不能成为最终负责跳入 Linux 的那个 coldboot hart。
+
+##### 再次抽奖
+
+前面 `fw_base.S` 中有一个 hart 胜出。它负责的事情大致是：
+
+```
+fw_base.S
+    │
+    ├── 选一个 hart
+    │
+    ├── relocation
+    ├── BSS
+    ├── platform 初步准备
+    ├── 给所有 hart 建 scratch
+    ├── FDT relocation
+    │
+    └── BOOT_HART_DONE
+```
+
+这个 hart 我们暂时叫`firmware boot hart`，其他 hart 等它：
+
+```
+_wait_for_boot_hart:
+    ...
+```
+
+等完成之后，**所有 hart 最终都会进入 `_start_warm`**。你的源码明确是 boot hart 设置 `BOOT_HART_DONE` 后自己跳 `_start_warm`，其他 hart 等到状态满足后也落入 `_start_warm`。然后每个 hart 都执行：
+
+```assembly
+csrr a0, CSR_MSCRATCH
+call sbi_init
+```
+
+所以此时：
+
+```
+hart0 ─┐
+hart1 ─┤
+hart2 ─┼──→ sbi_init()
+hart3 ─┘
+```
+
+问题来了：**`sbi_init()` 里面很多全局结构仍然只能初始化一次，谁来做？**于是出现**第二次 lottery**。
+
+```c
+// 初始：coldboot_lottery = 0
+    static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
+
+    if (next_mode_supported && atomic_xchg(&coldboot_lottery, 1) == 0)
+    	coldboot = TRUE;	// 一个 bool，标志当前hart是否为 coldboot
+
+	if (sbi_platform_nascent_init(plat))  // 每个 hart 都要做 nascent_init
+		sbi_hart_hang();
+	
+	// 当前 hart 是coldboot，执行初始化
+	if (coldboot)
+		init_coldboot(scratch, hartid);
+	else
+		init_warmboot(scratch, hartid);
+}
+```
+
+假设 hart0、hart1、hart2 同时过来。hart1 最先`atomic_xchg(&coldboot_lottery, 1)`，读旧值 0 同时写入 1，于是：
+
+```
+返回 0
+coldboot = TRUE
+```
+
+hart1 胜出。hart0 后来：
+
+```
+读旧值 1
+写 1
+```
+
+所以走 warmboot。这就是：
+
+```
+hart0 ─┐
+hart1 ─┼──→ coldboot_lottery
+hart2 ─┘
+
+       ↓
+
+       hart1
+        │
+        └── init_coldboot()
+
+hart0 / hart2
+        │
+        └── init_warmboot()
+```
+
+源码自己也写得非常明确：
+
+> use a lottery mechanism to select coldboot HART。
+
+##### 执行`init_coldboot(*scratch, hartid)`
+
+这个函数很长，但你千万不要逐行死记，分成 4 个阶段。
+
+- **首先建立OpenSBI 基础管理结构**：最前面两件事源码甚至特别强调：
+
+  ```c
+  static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
+  {
+  	int rc;
+  	unsigned long *init_count;
+  	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+  
+  	/* Note: This has to be first thing in coldboot init sequence */
+  	rc = sbi_scratch_init(scratch);
+  	if (rc)
+  		sbi_hart_hang();
+  
+  	/* Note: This has to be second thing in coldboot init sequence */
+  	rc = sbi_domain_init(scratch, hartid);
+  	if (rc)
+  		sbi_hart_hang();
+  ```
+
+  后面几乎所有 OpenSBI 子系统都依赖这两个基础设施。可以理解：
+
+  ```c
+  int sbi_scratch_init(struct sbi_scratch *scratch)
+          ↓
+  建立 OpenSBI per-hart 动态数据基础
+  
+  int sbi_domain_init(struct sbi_scratch *scratch, u32 hartid)
+          ↓
+  建立“哪些 hart / 内存 / 资源属于哪个 domain”
+  ```
+
+- 然后**在每个 hart 的 `sbi_scratch` 扩展区域里申请一个统一 offset**：
+
+  ``` c
+  // 全局静态变量
+  static unsigned long init_count_offset;
+  
+  init_count_offset = sbi_scratch_alloc_offset(__SIZEOF_POINTER__);
+  ```
+  
+  这又和我们上一节 `sbi_scratch` 联系起来了。它不是再创建一个新的 scratch，而是**在每个 hart 的 `sbi_scratch` 扩展区域里申请一个统一 offset：**
+  
+  ``` c
+  scratch0 + offset → hart0 init_count
+  scratch1 + offset → hart1 init_count
+  scratch2 + offset → hart2 init_count
+  ```
+  后面就会看到：
+  
+  ```c
+  // 局部指针
+  unsigned long *init_count;
+  
+  init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
+  
+  (*init_count)++;
+  ```
+
+- 然后**初始化各个 OpenSBI 子系统**：coldboot hart 要把整个 OpenSBI runtime 的公共基础设施搭起来。
+
+  ``` c
+  // 管 hart 的启动 / 停止 / suspend
+  rc = sbi_hsm_init(scratch, hartid, TRUE);
+      
+  rc = sbi_platform_early_init(plat, TRUE);
+  
+  // 当前 hart 本身的 CSR / ISA / delegation 等
+  rc = sbi_hart_init(scratch, TRUE);
+      
+  rc = sbi_console_init(scratch);
+  
+  // 性能计数器
+  rc = sbi_pmu_init(scratch, TRUE);
+  
+  // 中断控制器
+  rc = sbi_irqchip_init(scratch, TRUE);
+  
+  // hart 之间发中断
+  rc = sbi_ipi_init(scratch, TRUE);
+      
+  // 多 hart TLB shootdown
+  rc = sbi_tlb_init(scratch, TRUE);
+      
+  // 时钟
+  rc = sbi_timer_init(scratch, TRUE);
+      
+  // SBI ecall 接口
+  rc = sbi_ecall_init();
+  ```
+
+  > 为什么很多函数都有 `TRUE/FALSE`？
+
+  coldboot 中`TRUE`，warmboot 中`FALSE`。例如 `warm startup`：
+
+  ```c
+  sbi_hsm_init(scratch, hartid, FALSE);
+  
+  sbi_platform_early_init(plat, FALSE);
+  
+  sbi_hart_init(scratch, FALSE);
+  
+  sbi_pmu_init(scratch, FALSE);
+  ```
+
+  这个参数你现在可以直接理解成：
+
+  ```c
+  cold_boot = TRUE
+      ↓
+  这是全系统第一次初始化，
+  必要时做 global init + 当前 hart init
+  
+  
+  cold_boot = FALSE
+      ↓
+  全局东西已经有了，
+  只做当前 hart 所需的初始化
+  ```
+
+  这是理解整个 OpenSBI 架构非常重要的一个模式。以后你读：
+
+  ```c
+  xxx_init(..., bool cold_boot)
+  ```
+
+  第一反应就应该是：
+
+  > 里面大概率会有“全局一次”和“per-hart 每次”两套逻辑。
+
+- **然后是 Domain 与 PMP**：
+
+  coldboot 中接下来：
+
+  ```c
+  /*
+   * Note: Finalize domains after HSM initialization so that we
+   * can startup non-root domains.
+   * Note: Finalize domains before HART PMP configuration so
+   * that we use correct domain for configuring PMP.
+   */
+  
+  rc = sbi_domain_finalize(scratch, hartid);
+  if (rc) {
+      sbi_printf("%s: domain finalize failed (error %d)\n",
+             __func__, rc);
+      sbi_hart_hang();
+  }
+  
+  
+  rc = sbi_hart_pmp_configure(scratch);
+  if (rc) {
+      sbi_printf("%s: PMP configure failed (error %d)\n",
+             __func__, rc);
+      sbi_hart_hang();
+  }
+  ```
+
+  源码特意解释了顺序：
+
+  ```
+  先 finalize domains
+          ↓
+  再配置 PMP
+  ```
+
+  因为 PMP 的配置需要知道：
+
+  > 当前 hart 属于哪个 domain、它允许访问哪些物理内存。
+
+  你现在先记：
+
+  ```
+  Domain
+      ↓
+  决定资源归属/访问范围
+  
+  PMP
+      ↓
+  把这种权限真正配置进 hart 硬件
+  ```
+
+  所以顺序不能反。
+
+- **最后 `platform final init`**：
+
+  ``` c
+  /*
+   * Note: Platform final initialization should be last so that
+   * it sees correct domain assignment and PMP configuration.
+   */
+  rc = sbi_platform_final_init(plat, TRUE);
+  if (rc) {
+      sbi_printf("%s: platform final init failed (error %d)\n",
+             __func__, rc);
+      sbi_hart_hang();
+  }
+  ```
+
+  源码也明确说：platform final initialization should be last。因为到这里：
+
+  ```c
+  domain 已确定
+  PMP 已配置
+  OpenSBI 子系统基本完成
+  ```
+
+  平台代码这时看到的是一个已经完整建立起来的系统。
+
+- **最后`wake_coldboot_harts()`，唤醒其他执行`wait_for_coldboot`的 warmboot**，这一步极其重要：
+
+  ```
+  wake_coldboot_harts(scratch, hartid);
+  ```
+
+  `init_warmboot(scratch, hartid)`首先执行`wait_for_coldboot()`，`warmboot hart` 会：
+
+  ```c
+  static void wait_for_coldboot(struct sbi_scratch *scratch, u32 hartid)
+      
+      unsigned long saved_mie, cmip;
+  	/* Save MIE CSR */
+  	saved_mie = csr_read(CSR_MIE);
+  	/* Set MSIE and MEIE bits to receive IPI */
+  	csr_set(CSR_MIE, MIP_MSIP | MIP_MEIP);
+      
+  	/* Mark current HART as waiting */
+  	spin_lock(&coldboot_lock);
+  	sbi_hartmask_set_hart(hartid, &coldboot_wait_hmask);
+  	spin_unlock(&coldboot_lock);
+  
+      while (!__smp_load_acquire(&coldboot_done)) {
+          do {
+              wfi();
+              cmip = csr_read(CSR_MIP);
+          } while (!(cmip & (MIP_MSIP | MIP_MEIP)));
+      }
+  	
+  	/* Unmark current HART as waiting */
+  	spin_lock(&coldboot_lock);
+  	sbi_hartmask_clear_hart(hartid, &coldboot_wait_hmask);
+  	spin_unlock(&coldboot_lock);
+  
+  	/* Restore MIE CSR */
+  	csr_write(CSR_MIE, saved_mie);
+  }
+  ```
+
+  这意味着 warm hart 不会一直疯狂`while (!coldboot_done)`占总线。而是：
+
+  ```c
+  hart1
+    ↓
+  把自己放进 coldboot_wait_hmask
+    ↓
+  wfi()
+    ↓
+  睡眠等待 IPI
+  ```
+
+  coldboot hart 完成后`__smp_store_release(&coldboot_done, 1)`，然后遍历`coldboot_wait_hmask`给所有正在等的 hart：
+
+  ```c
+  sbi_ipi_raw_send(i);
+  ```
+
+  把它们唤醒。所以整个同步过程：
+
+  ```
+                   coldboot hart
+  
+                  初始化 OpenSBI
+                        │
+                        │
+                coldboot_done = 1
+                        │
+                release memory order
+                        │
+                        ▼
+                 IPI 唤醒其他 hart
+  
+  hart1                 hart2                 hart3
+   │                     │                     │
+   ▼                     ▼                     ▼
+  wait                  wait                  wait
+   │                     │                     │
+   WFI                   WFI                   WFI
+   │                     │                     │
+   └──────────── IPI 唤醒 ────────────────────┘
+  ```
+
+  这里源码不用显式`fence rw,rw`，而使用：
+
+  ```c
+  __smp_store_release(&coldboot_done, 1);
+  ```
+
+  另一边：
+
+  ```c
+  __smp_load_acquire(&coldboot_done)
+  ```
+
+  本质上都在解决：
+
+  > **不能只看到 `coldboot_done=1`，却看不到 coldboot hart 之前完成的初始化写操作。**
+
+  你可以先把它理解成：
+
+  ```
+  coldboot hart：
+  
+  初始化 A
+  初始化 B
+  初始化 C
+      ↓
+  release
+  coldboot_done = 1
+  ```
+
+  warm hart：
+
+  ```
+  看到 coldboot_done == 1
+      ↓
+  acquire
+      ↓
+  保证之后可以安全看到 A/B/C
+  ```
+
+  这就是比单纯`coldboot_done = 1;`更严格的同步语义。
+
+##### 两种 `warmboot`
+
+`init_warmboot()`先：
+
+``` c
+wait_for_coldboot(scratch, hartid);
+
+// 看 HSM state 来区分进入哪一种 warmboot
+hstate = sbi_hsm_hart_get_state(sbi_domain_thishart_ptr(), hartid);
+	if (hstate < 0)
+		sbi_hart_hang();
+
+	if (hstate == SBI_HSM_STATE_SUSPENDED)  // SUSPENDED
+		init_warm_resume(scratch);
+	else
+		init_warm_startup(scratch, hartid);
+```
+
+- `warm_startup`：这个 hart 是**第一次正常加入** OpenSBI runtime。所以它需要做：
+
+  ```
+  sbi_hsm_init
+  sbi_platform_early_init
+  ...
+  ```
+
+  注意没有：
+
+  ```
+  sbi_scratch_init
+  sbi_domain_init
+  sbi_ecall_init
+  ```
+
+  因为这些全局结构已经由 coldboot hart 完成了。
+
+- `warm_resume`：这个 hart 则不同。它之前已经初始化过，只是：
+
+  ``` c
+  running
+     ↓
+  suspend
+     ↓
+  resume
+  ```
+
+  所以不需要重新初始化整套东西。它只做：
+
+  ```c
+  sbi_hsm_hart_resume_start(scratch);
+  
+  sbi_hart_reinit(scratch);
+  
+  sbi_hart_pmp_configure(scratch);
+  
+  sbi_hsm_hart_resume_finish(scratch);
+  ```
+
+  所以：
+
+  ```
+  warm startup
+      =
+  第一次启动这个 hart
+  
+  warm resume
+      =
+  这个 hart 以前已经起来过，
+  现在只是从 suspend 恢复
+  ```
+
+  这是 HSM 后面非常关键的基础。
+
+##### 最后汇合到`sbi_hart_switch_mode()`
+
+> `sbi_init()` 负责“把 OpenSBI 自己初始化好”，而 `sbi_hart_switch_mode()` 负责“把当前 hart 正式交给下一阶段”。
+
+ `fw_base.S` 已经提前把 `next_arg1`、`next_addr`、`next_mode` 存入每个 Hart 的 scratch space，最后又设置好当前 hart 的 `mscratch`、栈和正式 trap handler，再调用 `sbi_init()`。
+
+`coldboot hart` 最后：
+
+```c
+sbi_hsm_prepare_next_jump(scratch, hartid);
+
+__attribute__((noreturn))  sbi_hart_switch_mode(	// 永远不会正常 return 给 sbi_init()
+    hartid,
+    scratch->next_arg1,	// 下一阶段的启动参数
+    scratch->next_addr,	// 下一阶段的启动地址
+    scratch->next_mode,	// 下一阶段的启动模式
+    FALSE
+);
+```
+
+`warmboot hart` 最后也是：
+
+```c
+__attribute__((noreturn))  sbi_hart_switch_mode(	// 永远不会正常 return 给 sbi_init()
+    hartid,
+    scratch->next_arg1,	// 下一阶段的启动参数
+    scratch->next_addr,	// 下一阶段的启动地址
+    scratch->next_mode,	// 下一阶段的启动模式
+    FALSE
+);
+```
+
+所以所有路最后汇合到：
+
+```c
+sbi_hart_switch_mode()
+```
+
+这就是下一阶段：
+
+> `sbi_hart_switch_mode()` 的目标就是把 CPU 从：
+>
+> ```
+> M-mode OpenSBI
+> ```
+>
+> 变成：
+>
+> ```
+> S-mode Linux/U-Boot
+> ```
+
+所以它本质只需要完成四件事：
+
+- 检查下一阶段模式是否合法，然后配置 `mstatus.MPP`（执行`mret`后会回到这个寄存器存储的模式）:
+
+  ``` c
+  mstatus.MPP = S
+  ```
+
+- 设置`mepc = next_addr`（执行`mret`后`pc`寄存器会跳转到这个寄存器的地址执行指令）:
+
+  ``` c
+  csr_write(CSR_MEPC, next_addr);
+  ```
+
+- 清空初始化`S-Mode` CSR 寄存器：
+
+  ``` c
+  // 给即将进入的 S-mode 提供一个干净、确定的初始环境
+  if (next_mode == PRV_S) {
+      csr_write(CSR_STVEC, next_addr);	// 交接前的一个安全初始值。Linux开始运行后会建立自己的 trap/exception entry，然后重新设置
+      csr_write(CSR_SSCRATCH, 0);
+      csr_write(CSR_SIE, 0);
+      csr_write(CSR_SATP, 0);				// 处于 bare mode，没有开启 S-mode 地址转换/分页，Linux进入后会自己建立页表，然后设置satp。
+  }
+  ```
+
+- 准备`a0(hartid)、a1(DTB)`，最后`mret`。
+
+完整链路：
+
+``` c
+CPU reset
+  ↓
+OpenSBI _start
+  ↓
+relocation / boot hart同步
+  ↓
+platform / scratch / stack / mtvec
+  ↓
+sbi_init()
+  ↓
+sbi_hart_switch_mode()
+  ↓
+mstatus.MPP = S
+mepc = Linux entry
+a0 = hartid
+a1 = DTB
+satp = 0
+  ↓
+mret
+  ↓
+Linux（S-mode）
+```
+
+#### `sbi_ecall.c`
+
+这是目前对你来说最值得看的文件之一。上一层我们说：
+
+```
+a7 → EID
+a6 → FID
+```
+
+现在看源码。OpenSBI 当前的 `sbi_ecall_handler()` 里面直接：
+
+```c
+unsigned long extension_id = regs->a7;
+unsigned long func_id      = regs->a6;
+```
+
+然后：
+
+```
+ext = sbi_ecall_find_extension(extension_id);
+```
+
+找到对应 SBI Extension 后：
+
+```
+ext->handle(extension_id, func_id, regs, &out);
+```
+
+这几行代码实际上就是我们上一层讲的：
+
+```
+读 a7
+ ↓
+找到部门
+
+读 a6
+ ↓
+找到部门里的业务
+
+执行 handler
+```
+
+不是类比而已，源码真的就是这样做。甚至 `mepc += 4` 也真的在那里：现在看 OpenSBI 当前源码：
+
+```c
+regs->mepc += 4;
+```
+
+下一行附近就是：
+
+```c
+regs->a0 = ret;
+regs->a1 = out.value;
+```
+
+也就是说你刚才学的：
+
+```c
+mepc += 4
+
+a0 = error
+a1 = value
+```
+
+OpenSBI 当前 `sbi_ecall_handler()` 真的就是这么干的。这个时候你应该开始有一种感觉：
+
+> OpenSBI 没有想象中神秘，它其实就是把 RISC-V 特权规范和 SBI 规范变成了一堆 C/Assembly 代码。
+
+####  `sbi_timer.c`、`sbi_ipi.c` 等
+
+假设：
+
+```
+Linux
+
+a7 = TIME
+a6 = SET_TIMER
+ecall
+```
+
+进入：
+
+```
+sbi_ecall_handler()
+```
+
+然后 TIME Extension 对应的 handler 会进一步调用 timer 相关核心逻辑。
+
+所以你可以理解成：
+
+```
+sbi_ecall.c
+   │
+   │“你要什么 SBI 服务？”
+   │
+   ├───────────┐
+   ▼           ▼
+sbi_timer.c   sbi_ipi.c
+              ...
+```
+
+也就是说：
+
+```
+sbi_ecall.c
+=
+前台接待 / dispatcher
+```
+
+而：
+
+```
+sbi_timer.c
+sbi_ipi.c
+sbi_hsm.c
+```
+
+才是不同业务部门。这跟你刚刚说的“a7 找部门”完全对应。但这里马上出现一个问题假设：
+
+```
+sbi_timer.c
+```
+
+知道：
+
+> 我要设置 timer。
+
+但是它怎么知道：
+
+```
+QEMU virt 的 timer 在哪？
+
+SiFive 的 timer 在哪？
+
+你的 FPGA timer 又在哪？
+```
+
+如果 `libsbi` 里面直接写：
+
+```
+if (qemu)
+    ...
+else if (sifive)
+    ...
+else if (my_board)
+    ...
+```
+
+那整个 OpenSBI 会非常难维护。所以 OpenSBI 必须再做一层抽象。这就是：
+
+```
+platform
++
+drivers / utils
+```
+
+### `platform/`（板子信息）
+
+官方的设计就是：
+
+```
+platform-independent libsbi
+       ↓
+platform-specific hooks
+       ↓
+具体平台
+```
+
+官方文档明确说明，平台通过 `struct sbi_platform` 以及 platform operations 提供平台相关操作。于是可以想成：
+
+```
+             libsbi
+
+      “我要初始化 timer”
+               │
+               ▼
+       platform abstraction
+               │
+        “这个平台怎么办？”
+               │
+               ▼
+          hardware driver
+```
+
+这些尽量交给平台层和设备树驱动。
+
+#### `generic`
+
+你以后很可能首先使用：
+
+```
+PLATFORM=generic
+```
+
+尤其 QEMU `virt`。OpenSBI 官方的 Generic Platform 是：
+
+> **基于 FDT / Device Tree 的通用平台。**
+
+它读取前一级传进来的 Device Tree，然后根据设备树决定当前平台有什么硬件。官方说明 Generic Platform 能让同一套 OpenSBI firmware 用于不同 emulator、simulator、FPGA 和 board。这和我们第二层讲的：
+
+```
+a1 = DTB 地址
+```
+
+又连起来了。现在你终于知道：
+
+> OpenSBI 为什么那么在意 `a1`。
+
+因为 Generic Platform 会：
+
+```
+a1
+ ↓
+FDT
+ ↓
+看看 CPU 有几个
+看看 timer 是什么
+看看 interrupt controller 是什么
+看看 UART 是什么
+```
+
+当前 `platform/generic/platform.c` 里甚至直接：
+
+```c
+const void *fdt = (void *)arg1;
+```
+
+然后开始解析：
+
+```
+/cpus
+/chosen
+timer
+irqchip
+serial
+...
+```
+
+### `lib/utils/`（硬件相关代码）
+
+> 真正操作 UART、timer 的代码。
+
+这一层你先把它理解为：
+
+> **OpenSBI 提供的一批可复用底层驱动与辅助设施。**
+
+例如 Generic Platform 官方文档直接提到：
+
+```
+lib/utils/ipi
+lib/utils/timer
+```
+
+以及基于 FDT 的各种 driver。
+
+当前 `platform/generic/platform.c` 也能看到：
+
+```c
+#include <sbi_utils/serial/fdt_serial.h>
+#include <sbi_utils/timer/fdt_timer.h>
+#include <sbi_utils/irqchip/fdt_irqchip.h>
+```
+
+然后：
+
+```c
+.timer_init   = fdt_timer_init
+.irqchip_init = fdt_irqchip_init
+```
+
+所以最终就形成了非常漂亮的一层层调用。
+
+## 如何移植
+
+> 在移植之前需要明确几个东西:
+>
+> - 我们采用 openSBI 固件是 `FW_JUMP` 类型的，`openSBI`会被加载到 DRAM 处即 0x80000000 执行，因此需要编写在 Flash 上运行的代码来将 openSBI 固件加载到 DRAM 处，然后跳转执行。
+> - 需要自行编写设备树编译将设备树的地址传递给 openSBI，ROM 上的 fw_dynamic_info 用不到。
+
+可按照下面步骤添加名为`<xyz>`的新平台支持：
+
+0.在`platform/`目录下创建名为`<xyz>`的文件夹。
+
+1.在`platform/<xyz>/`目录下创建平台配置文件：`Kconfig` 与 `configs/defconfig`。 这些配置文件用于为待编译源码**提供编译期配置。**
+
+2.创建`platform/<xyz>/objects.mk`文件，用来**列出需要编译的平台目标文件**。该文件同时提供平台专属编译参数，并选择固件相关选项。
+
+3.创建`platform/<xyz>/platform.c`文件，在其中**定义一个`struct sbi_platform`结构体实例**。
+
+4.编写设备树信息。
+
+### 第一步：创建平台配置文件（`Kconfig、configs、defconfig`）
+
+#### `Kconfig`文件
+
+Kconfig 文件的内容，这里照着 generci 中的内容 copy 了过来，看样子是选择使用 FDT 以及支持 fdt 的 domain 配置和 fdt 的 pmu 配置。
+
+```makefile
+# SPDX-License-Identifier: BSD-2-Clause
+
+config PLATFORM_QUARD_STAR
+	bool
+	select FDT
+	select FDT_DOMAIN
+	select FDT_PMU
+	default y
+```
+
+#### `defconfig`文件
+
+defconfig 的内容是指定配置支持哪些硬件，这里也是把 generic 中的内容 copy 了过来，虽然现在 quard_star 的硬件比较少，但是不管，先把所有的都添加进去。
+
+### 第二步：创建`objects.mk`文件
+
+objects 的内容比较简单，**配置固件为 JUMP 类型，同时指定 jump 的地址**：
+
+```makefile
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+
+# Compiler flags
+platform-cppflags-y =
+platform-cflags-y =
+platform-asflags-y =
+platform-ldflags-y =
+
+# Objects to build
+platform-objs-y += platform.o
+
+# Blobs to build
+FW_JUMP=y
+FW_TEXT_START=0x80000000
+FW_JUMP_ADDR=0x0
+```
+
+### 第三步：创建`platform.c`
+
+#### `sbi_platform` 结构体
 
 类型为`struct sbi_platform`，用于描述平台的相关信息和配置。
 
@@ -932,18 +6152,20 @@ struct sbi_platform platform = {
 	.platform_version	= SBI_PLATFORM_VERSION(0x0, 0x01),  // 平台的版本号
 	.name			= "Quard-Star",  // 名称
 	.features		= SBI_PLATFORM_DEFAULT_FEATURES,  //默认特性
-	.hart_count		= SBI_HARTMASK_MAX_BITS,  // hart数量
-	.hart_index2id		= quard_star_hart_index2id,  // 将处理器索引映射到处理器标识符的数组
-	.hart_stack_size	= SBI_PLATFORM_DEFAULT_HART_STACK_SIZE,  // 每个hart的默认堆栈大小
-	.platform_ops_addr	= (unsigned long)&platform_ops  // 指向平台操作函数结构体的指针
+    
+	.hart_count		= SBI_HARTMASK_MAX_BITS,  						// hart数量
+	.hart_index2id		= quard_star_hart_index2id, 				// 将处理器索引映射到处理器标识符的数组
+	.hart_stack_size	= SBI_PLATFORM_DEFAULT_HART_STACK_SIZE,  	// 每个hart的默认堆栈大小
+    
+	.platform_ops_addr	= (unsigned long)&platform_ops  			// 指向平台操作函数结构体的指针
 };
 ```
 
-### 3.3.2 fw_platform_init( )*
+#### `fw_platform_init( )`
 
-​	**传入过来的五个arg依次对应上衣启动阶段传递过来的参数，为`a0~a4`寄存器：`a0` ：存放`hartid`; `a1`：设备树的地址，`arg1`被强制转换为一个指向设备树的指针即`fdt`。**
+**五个`args`依次对应上级启动阶段传递过来的参数，`a0` :存放`hartid`; `a1`:设备树的地址;`arg1`被强制转换为一个指向设备树的指针即`FDT`。**
 
-1.首先通过解析设备树来获取平台的模型名称，并将其存储在`platform.name`中。
+1.首先解析设备树的"model"来获取平台的模型名称，并将其存储在`platform.name`中。
 
 2.在设备树的"/cpus"路径下遍历处理器节点，获取每个处理器的`hartid`。
 
@@ -952,11 +6174,11 @@ struct sbi_platform platform = {
 4.最后设置`platform.hart_count`，表示平台上处理器的数量。
 
 ``` c
-unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
-				unsigned long arg2, unsigned long arg3,
-				unsigned long arg4)
+unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1, unsigned long arg2, 
+                               unsigned long arg3, unsigned long arg4)
 {
 	const char *model;
+    // 设备树地址
 	void *fdt = (void *)arg1;
 	u32 hartid, hart_count = 0;
 	int rc, root_offset, cpus_offset, cpu_offset, len;
@@ -965,15 +6187,17 @@ unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 	if (root_offset < 0)
 		goto fail;
     
-	/* 1.解析设备树获取模型名称，将其存储在platform.name */
+	/* 1.解析设备树获取板子的名称，将其存储在platform.name */
 	model = fdt_getprop(fdt, root_offset, "model", &len);
 	if (model)
 		sbi_strncpy(platform.name, model, sizeof(platform.name));
+    
 	/* 2.在设备树的"/cpus"路径下遍历处理器节点，获取每个处理器的hartid */
 	cpus_offset = fdt_path_offset(fdt, "/cpus");
 	if (cpus_offset < 0)
 		goto fail;
-	/* 3.将hartid存储在quard_star_hart_index2id数组中，并统计数量 */
+    
+	/* 3.将hartid存储在quard_star_hart_index2id 数组中，并统计数量 */
 	fdt_for_each_subnode(cpu_offset, fdt, cpus_offset) {
 		rc = fdt_parse_hart_id(fdt, cpu_offset, &hartid);
 		if (rc)
@@ -982,6 +6206,7 @@ unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 			continue;
 		quard_star_hart_index2id[hart_count++] = hartid;
 	}
+    
     /* 4.将hart数量写入platform */
 	platform.hart_count = hart_count;
 
@@ -994,15 +6219,15 @@ fail:
 }
 ```
 
-### 3.3.3 platform_ops结构体
+#### `platform_ops` 结构体
 
-​	结构体内的成员全部为**函数指针。**
+结构体内的成员全部为**函数指针。**
 
-​	这些函数是平台特定的操作函数，**用于在 OpenSBI 初始化过程中进行特定的操作和配置**。每个函数在相应的阶段被调用，以完成与平台相关的初始化、配置和资源管理等工作。通过定义这个结构体并填充相应的函数指针，OpenSBI 可以根据平台的特性和需求，调用适当的操作函数，以确保其在不同平台上的正确运行和适配性。
+这些函数是平台特定的操作函数，**用于在 OpenSBI 初始化过程中进行特定的操作和配置**。每个函数在相应的阶段被调用，以完成与平台相关的初始化、配置和资源管理等工作。通过定义这个结构体并填充相应的函数指针，OpenSBI 可以根据平台的特性和需求，调用适当的操作函数，以确保其在不同平台上的正确运行和适配性。
 
 ```c
 const struct sbi_platform_operations platform_ops = {
-	.early_init		= quard_star_early_init,             //早期初始化，不需要
+	.early_init		= quard_star_early_init,            //早期初始化，不需要
 	.final_init		= quard_star_final_init,            //最终初始化，需要
 	.early_exit		= quard_star_early_exit,            //早期退出，不需要
 	.final_exit		= quard_star_final_exit,            //最终退出，不需要
@@ -1022,7 +6247,7 @@ const struct sbi_platform_operations platform_ops = {
 };
 ```
 
-### 3.3.4 操作函数
+#### 定义平台操作函数
 
 ``` c
 static int quard_star_early_init(bool cold_boot)
@@ -1097,33 +6322,35 @@ static u64 quard_star_tlbr_flush_limit(void)
 }
 ```
 
-## 3.4 设备树
+### 第四步：编写设备树
 
-### 3.4.1 格式
+#### 节点/属性格式
 
-设备树是一种树形结构，**用代码来描述设备的各种信息**，如设备的类型、地址、中断、时钟等。这些代码通常保存在后缀为`.dts`或`.dtsi`的文件中，称为设备树源文件。
-
-**作用**：它提供了一种与平台无关的方式来描述硬件，**将硬件信息从内核代码中分离出来**。这样当硬件发生变化时只需修改设备树文件，而不必重新编译整个内核，提高了系统的可移植性和可维护性。
+设备树是一种树形结构，**用代码来描述设备的各种信息**，如设备的类型、地址、中断、时钟等。这些代码通常保存在后缀为`.dts`或`.dtsi`的文件中，称为设备树源文件。它提供了一种与平台无关的方式来描述硬件，**将硬件信息从内核代码中分离出来**。这样当硬件发生变化时只需修改设备树文件，而不必重新编译整个内核，提高了系统的可移植性和可维护性。
 
 ---
 
-**节点格式**：
+**节点（Node）与属性（Property）**：这是设备树的基本元素。
 
-1. **节点（Node）与属性（Property）**：这是设备树的基本元素。
-   - **节点**：代表一个总线或设备。例如 `/` 是根节点，`i2c1`、`uart0` 是子节点。
-   - **属性**：描述节点的特性。是 `键=值` 对。
-     - `compatible`：**最重要的属性！** 外设节点的`compatible`驱动通过这个字符串来匹配设备。例如 `compatible = "fsl,imx6ull-i2c", "fsl,imx21-i2c";`。
-     - model 属性：用来准确地定义这个硬件是什么。与`compatible`属性类似，但`compatible`属性表示兼容哪些驱动，`model`属性则明确设备的具体型号。
-     - `reg`：描述设备在父总线地址空间内的地址和大小。
-     - `status`：设备状态，如 `"okay"`（启用）、`"disabled"`（禁用）。
-     - `interrupts`：设备使用的中断号。
+- **节点**：代表一个总线或设备。例如 `/` 是根节点，`i2c1`、`uart0` 是子节点。
+- **属性**：描述节点的特性。是 键=值 对。
+  - `model`：用来准确地定义这个硬件是什么。与`compatible`属性类似，但`compatible`属性表示兼容哪些驱动，`model`属性则**明确设备的具体型号**。
+  - `reg`：描述设备**在父总线地址空间内的起始地址和占据大小**。
+  - `status`：设备状态，如 `"okay"`（启用）、`"disabled"`（禁用）。
+  - `compatible`：**最重要的属性！** 外设节点的`compatible`**驱动通过这个属性的值（字符串）来匹配设备**。例如 `compatible = "fsl,imx6ull-i2c", "fsl,imx21-i2c"`。
+  - `interrupts`：设备使用的**中断号**。
 
-```c
+```json
+// label 		是标号，用于在设备树中方便地引用该节点，可选；
+// nodename 	是节点名字，通常是硬件设备的名称，必须在设备树中唯一；
+// unitaddress 	是单元地址，用于标识设备的实例，也是可选的.
 (label) : nodename@(unitaddress){
     
 }
-
-/ { // / 为根节点
+```
+例如：
+``` json
+/ {
     compatible = "my-company,my-board", "fsl,imx6ull"; // 板子兼容性
     model = "My Awesome Board";
 
@@ -1137,21 +6364,16 @@ static u64 quard_star_tlbr_flush_limit(void)
 }
 ```
 
-`label`是标号，用于在设备树中方便地引用该节点，是可选的；`nodename`是节点名字，通常是硬件设备的名称，必须在设备树中**唯一**；`unitaddress`是单元地址，用于标识设备的实例，也是可选的.
-
- **常用节点:**
+**常用节点:**
 
 - **根节点**：用`/`标识，是设备树的起始点和顶层节点，包含了整个设备树的基本信息和其他子节点。
 - **cpus 节点**：用于描述 CPU 的相关信息，如 CPU 的数量、型号、频率等。
 - **memory 节点**：用于描述系统内存的信息，如内存的起始地址和大小。由于不同的开发板使用的内存大小可能不同，所以这个节点通常需要板厂根据实际情况进行设置。
 - **chosen 节点**：可以通过该节点给内核传入一些参数，通常用于设置`bootargs`属性，指定内核启动时的参数。
 
-总的来说，设备树是一种将硬件信息进行结构化描述的方式，使得内核能够方便地获取硬件设备的信息，实现了硬件和软件的分离，方便了嵌入式系统的开发和维护。
+总的来说，设备树是一种将硬件信息进行结构化描述的方式，使得内核能够方便地获取硬件设备的信息，实现了硬件和软件的分离。
 
----
-
-
-### 3.4.2 编写quard_star_sbi.dts
+#### 编写`quard_star_sbi.dts`
 
 ``` json
 /dts-v1/;
@@ -1172,7 +6394,7 @@ static u64 quard_star_tlbr_flush_limit(void)
 	};
 
 	cpus {
-		#address-cells = <0x1>;  // 用一个32位表示CPU索引
+		#address-cells = <0x1>;  // 用一个32位表示CPU 索引
 		#size-cells = <0x0>;
 		timebase-frequency = <0x989680>;  // 系统时钟基准频率为0x989680（10Mhz）
 
@@ -1395,86 +6617,83 @@ static u64 quard_star_tlbr_flush_limit(void)
 };
 ```
 
-## 3.5 重写start.S
+## 重写`start.S`
 
 <img src="quard-star/移植opensbi.png" alt="移植opensbi" style="zoom:80%;" />
 
-现在`start.s`汇编代码主要工作是**加载opensbi的固件**到`0x80000000`和**设备树**到`0x82200000`，然后**跳转**到`t0 = 0x80000000`的DRAM起始位置开始处执行`openSBI`的代码，最终`t0 = 0x80000000`,`a1 = 0x82200000`。**然后openSBI就可以通过`fw_platform_init()`**函数获取设备树等信息来划分`domain`。
+现在`start.S`代码（Loader）主要工作是**加载openSBI固件**到`0x80000000`和**设备树**到`0x82200000`，加载完毕后**跳转**到`t0 = 0x80000000`的 DRAM 起始位置处执行`openSBI`的代码，最终`t0 = 0x80000000`,`a1 = 0x82200000`，**然后openSBI通过`fw_platform_init()`**函数获取设备树的信息来划分`domain`。因此现在主要的功能需要为：
 
 - 加载` opensbi_fw.bin` 文件的内容到指定内存区域` [0x80000000:0x80200000]`。
-
 - 加载 `qemu_sbi.dtb` 文件的内容到指定内存区域` [0x82200000:0x82280000]`。
 
-- 获取当前处理器的 ID，并与零进行比较。如果相等，执行 `_no_wait` 标签处的代码。
-
-- `_no_wait` 标签处的代码**加载设备树的地址到寄存器 `a1`**，然后将控制权跳转到寄存器 `t0` 指向的地址。
-
 ``` assembly
+	# 循环多少次 65535
 	.macro loop, cunt
-    li		t1,	0xffff  // 65535
+    li		t1,	0xffff  # 65535
     li		t2,	\cunt
-1:  // 为label
+1:  
 	nop
 	addi    t1, t1, -1
-	bne		t1, x0, 1b  // 相等则继续
+	bne		t1, x0, 1b  # 1b = 1backward，引用前面最近的 1
     li		t1,	0xffff
 	addi    t2, t2, -1
 	bne		t2, x0, 1b
-	.endm  // 结束宏
+	.endm  # 结束宏
+
 
 	.macro load_data, _src_start, _dst_start, _dst_end
-	bgeu	\_dst_start, \_dst_end, 2f  // 如果 1中的unsigned > 2
+	bgeu	\_dst_start, \_dst_end, 2f  # 如果 1 中的unsigned > 2
 1:
-	lw      t0, (\_src_start)  // 寄存器与内存的数据交换
-	sw      t0, (\_dst_start)
+	lw      t0, (\_src_start) # 从 \_src_start 地址中读取数据到寄存器
+	sw      t0, (\_dst_start) # 把寄存去中的数据写入到 \_dst_start 地址
 	addi    \_src_start, \_src_start, 4
 	addi    \_dst_start, \_dst_start, 4
 	bltu    \_dst_start, \_dst_end, 1b
 2:
 	.endm
 
-	.section .text  // 将当前的汇编上下文切换到代码段
+	.section .text  # 将当前的汇编上下文切换到代码段
 	.globl _start
 	.type _start, @function
 
 _start:
-	//load opensbi_fw.bin 
-	//[0x20200000:0x20400000] --> [0x80000000:0x80200000]
+	# load opensbi_fw.bin 
+	# [0x20200000:0x20400000] --> [0x80000000:0x80200000]
     li		a0,	0x202
-	slli	a0,	a0, 20      //a0 = 0x20200000
+	slli	a0,	a0, 20      # a0 = 0x20200000
     li		a1,	0x800
-	slli	a1,	a1, 20      //a1 = 0x80000000
+	slli	a1,	a1, 20      # a1 = 0x80000000
     li		a2,	0x802
-	slli	a2,	a2, 20      //a2 = 0x80200000
+	slli	a2,	a2, 20      # a2 = 0x80200000
 	load_data a0,a1,a2
 
-	//load qemu_sbi.dtb
-	//[0x20080000:0x20100000] --> [0x82200000:0x82280000]
+	# load qemu_sbi.dtb
+	# [0x20080000:0x20100000] --> [0x82200000:0x82280000]
     li		a0,	0x2008
-	slli	a0,	a0, 16       //a0 = 0x20080000
+	slli	a0,	a0, 16       # a0 = 0x20080000
     li		a1,	0x822
-	slli	a1,	a1, 20       //a1 = 0x82200000
+	slli	a1,	a1, 20       # a1 = 0x82200000
     li		a2,	0x8228
-	slli	a2,	a2, 16       //a2 = 0x82280000
+	slli	a2,	a2, 16       # a2 = 0x82280000
 	load_data a0,a1,a2
 
-    csrr    a0, mhartid  // 如果为0号hart则跳转到opensbi加载后的固件的地址
+    csrr    a0, mhartid
     li		t0,	0x0     
-	beq		a0, t0, _no_wait
+	beq		a0, t0, _no_wait # 0 号 hart 则跳转到 openSBI 加载后的固件的地址
 	loop	0x1000
 _no_wait:
     li		a1,	0x822
-	slli	a1,	a1, 20       //a1 = 0x82200000 保存加载的设备树的地址(替代在reset_vec的操作)
+	slli	a1,	a1, 20       # a1 = 0x82200000 设备树的地址(替代在reset_vec的操作)
     li	    t0,	0x800
-	slli	t0,	t0, 20       //t0 = 0x80000000 跳转到并执行opensbi加载后的固件的地址
+	slli	t0,	t0, 20       # t0 = 0x80000000 跳转到openSBI加载后的地址开执行
     jr      t0
 
     .end
 ```
 
-## 3.6 修改build.sh
+## 修改`build.sh`
 
-`opensbi_fw.bin`固件由下载的文件提供，固件具体在`flash`的位置由`build.sh`中`fw.bin`的偏移决定，`fw.bin`在Flash中的哪里由`run.sh`中命令写入。
+`opensbi_fw.bin`固件由下载的文件提供，固件在 Flash 中的位置由在`build.sh`中的`fw.bin`中的偏移决定，`fw.bin`在 Flash 中的哪里由`run.sh`中命令写入。
 
 ``` bash
 # 获取当前脚本文件所在的目录
@@ -1533,33 +6752,35 @@ dd of=fw.bin bs=1k conv=notrunc seek=512 if=$SHELL_FOLDER/output/opensbi/quard_s
 dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.bin
 ```
 
-# 4. 添加domain机制
+# 添加 Domain 机制
 
-`domain`的程序运行地址/参数地址在设备树中指定，`domain`的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中下级程序的地址**自动运行其`domain`的程序了。
+Domain 的程序运行地址/参数地址在设备树中指定，Domain 的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中指定的下级程序地址**就跳转自动运行 Domain 里的程序了。
 
 ![添加domain](quard-star/添加domain.png)
 
-## 4.1 domain机制
+## Domain机制
 
-​	`domain`机制提供了一种在系统中**划分资源（包括硬件资源）和权限的方法**，以确保软件实体之间的相同隔离和安全性。`domain`代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个`domain`都有自己的一组资源和权限，包括hart、内存、设备、中断等、`domain`之间是相互隔离的，不能直接访问或干扰彼此的资源。
+Domain 机制提供了一种在系统中**划分资源**（包括硬件资源）和权限的方法，以确保软件实体之间的相同隔离和安全性。核心目标是在**同一硬件平台上，实现比传统特权级（如 M/S/U 模式）更细粒度、更灵活的隔离**。它允许将系统的硬件资源（如内存、IO、中断）划分为多个相互独立的“域”，每个域可以运行独立的软件栈，彼此间实现硬件强制的安全隔离。
 
-​	通过`domain`机制，openSBI可以**实现不同软件实体的隔离和安全性**。每个`domain`只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
+Domain 代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个 Domain 都有自己的一组资源和权限，包括hart、内存、设备、中断等、Domain 之间是相互隔离的，不能直接访问或干扰彼此的资源。
 
----
+通过 Domain 机制，openSBI 可以**实现不同软件实体的隔离和安全性**。每个 Domain 只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
 
-通过以下方式实现：
+## 硬件基石
 
-`domain ID`:   每个`domain`都有一个唯一的标识符，用于区分不同的`domain`。
+Domain 机制的硬件基础是 **Smmtt（Supervisor Domain Access Protection）** 扩展，它为物理地址空间（内存和设备）提供隔离。
 
-`Hart Mask`：每个`domain`都有一个唯一的位图`Hart Mask`，每个位表示一个`hart`，可以将相应的位设置为`1`来表示属于此domain。
+- **Supervisor Domain Identifier (SDID)**：每个域有一个唯一标识符 **SDID**。它存储在 Hart（硬件线程）的一个 M 模式 CSR 中，用于**动态指示当前 Hart 正在哪个 Domain 中运行。**
 
-`SBI`接口：`openSBI`提供了一组SBI接口，用于domain之间的通信和资源管理。这些接口包括中断处理、内存管理、设备访问等，可以由domain调用这些接口来请求和管理资源。
+- **Memory Tracking Table (MTT)**：这是 Smmtt 的核心数据结构，类似于一个用于物理地址的页表。它**定义了每个物理内存页或设备区域允许哪个 SDID 访问（读/写）**，从而实现硬件级的访问控制。当 Hart 发起物理地址访问时，硬件会根据其当前 SDID 和 MTT 配置进行校验，非法访问会触发 fault。
 
----
+  `Hart Mask`：每个 Domain 都有一个唯一的位图`Hart Mask`，每个位表示一个 Hart，可以将相应的位设置为 `1` 来表示允许对应的 Hart 可以来访问这个 Domain。
 
-## 4.2 设备树划分domain
+- **执行环境**：**M 模式** 负责管理 SDID 和 MTT，是隔离机制的最终仲裁者。而 **Supervisor Domain Security Manager (SDSM)** 则是一段运行在 M 模式的固件，负责配置和维护域的安全策略。
 
-​	使用**设备树**来基于openSBI划分`domain`。**默认**情况下所有hart都被划分给`ROOT domain`.设备树划分了`domain`在加载了`opensbi_fw.bin`固件之后就**自动执行**了。
+## 设备树划分 Domain
+
+​	使用**设备树**来基于 openSBI 划分 Domain。**默认情况**下所有 Hart 都划分给 Root Domain。设备树划分的 Domain 在加载`opensbi_fw.bin`固件之后就自动了。
 
 ``` json
 chosen {
@@ -1613,30 +6834,9 @@ chosen {
 	};
 ```
 
-## 4.3 编写link.lds
+## 编写`tdomain`中运行的程序
 
-指定此汇编程序运行的入口函数,以及**程序运行的虚拟内存位置**。
-
-``` assembly
-OUTPUT_ARCH( "riscv" )
-
-ENTRY( _start )
-
-MEMORY
-{ 
-	ddr (rxai!w) : ORIGIN = 0xb0000000, LENGTH = 256M
-}
-
-SECTIONS
-{
-  .text :
-  {
-    KEEP(*(.text))
-  } >ddr
-}
-```
-
-## 4.4 编写start_up.S
+### 编写`start_up.S`
 
 此汇编文件经过汇编链接生成`trusted_domain.bin`固件，会被加载到`0xb000 0000`处。
 
@@ -1708,9 +6908,30 @@ _loop:
     .end
 ```
 
-## 4.5 修改build.sh
+### 编写链接脚本
 
-![image-20250510153359514](C:/Users/75538/AppData/Roaming/Typora/typora-user-images/image-20250510153359514.png)
+指定此汇编程序运行的入口函数,以及**程序运行的虚拟内存位置**。
+
+``` assembly
+OUTPUT_ARCH( "riscv" )
+
+ENTRY( _start )
+
+MEMORY
+{ 
+	ddr (rxai!w) : ORIGIN = 0xb0000000, LENGTH = 256M
+}
+
+SECTIONS
+{
+  .text :
+  {
+    KEEP(*(.text))
+  } >ddr
+}
+```
+
+## 修改`build.sh`
 
 ``` sh
 # 获取当前脚本文件所在的目录
@@ -1785,7 +7006,7 @@ dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.
 dd of=fw.bin bs=1k conv=notrunc seek=4K if=$SHELL_FOLDER/output/trusted_domain/trusted_fw.bin
 ```
 
-## 4.6 修改start.S
+## 修改`start.S`（加载`t_domain`固件）
 
 ``` assembly
 
@@ -1862,23 +7083,23 @@ _no_wait:
     .end
 ```
 
-# 5.调用SBI接口实现控制台输出（创建OS）
+# 调用SBI接口实现控制台输出（创建OS）
 
 在`untrusted-domain`中运行自己写的操作系统。
 
-## 5.1 系统调用
+## 系统调用
 
-SBI有两个大版本：v0.1 v0.2；为了保持兼容性，SBI扩展ID`(EID)`和SBI函数ID`(FID)`被编码为**有符号的32位整数**。通过ID来调用SBI函数。在v0.2版本中，函数调用规则如下：
+SBI有两个大版本：v0.1 v0.2；为了保持兼容性，SBI 扩展ID`(EID)`和SBI 函数ID`(FID)`被编码为**有符号的32位整数**。通过 ID 来调用 SBI 函数。在v0.2版本中，函数调用规则如下：
 
-- 在监管者（S模式下的软件程序也就是操作系统）和SBI之间使用`ecall`作为控制传输指令。
-- `a6`寄存器编码`FID`
-- `a7`寄存器编码`EID`
-- 在SBI调用期间，除了`a0`和`a1`寄存器（用于返回值）外，所有寄存器都必须由被调用方（SBI）保留（例如：`a0-a5`寄存器用于来传递参数,`a6 a7`寄存器写入值选择调用什么接口函数)。
-- SBI函数必须在`a0`和`a1`寄存器中返回一对值，其中`a0`寄存器返回错误代码，类似于返回C结构体。
+- 在 S 模式下的软件程序也就是操作系统和 M 模式下的 SBI 之间使用`ecall`作为控制传输指令。
+- `a7`寄存器编码`EID`；
+- `a6`寄存器编码`FID`；
+- 在 SBI 调用期间，除了`a0`和`a1`寄存器（用于返回值）外，所有其他寄存器都必须由被调用方（SBI）保留（callee-save 寄存器，需要在返回之前恢复这些寄存器的值，保存在栈上，通过压栈保存）。
+- SBI函数必须在`a0`和`a1`寄存器中返回一对值，其中`a0`寄存器返回错误代码，类似于返回 C 结构体。
 ``` c
 struct sbiret{
 	long error;  // 错误代码
-    long value;  // 返回值
+    long value;  // 返回值(额外信息)
 }
 ```
 
@@ -1886,11 +7107,11 @@ struct sbiret{
 
 ---
 
-通过`EID`与`FID`共同决定调用什么函数；其中基本拓展函数如下：（EID都为`0x10`）
+通过`FID`与`EID`共同决定调用什么函数；其中基本拓展函数如下：（EID都为`0x10`）
 
 <img src="quard-star/V1.0SBI函数.png" alt="V1.0SBI函数" style="zoom: 50%;" />
 
-**传统的SBI扩展 v0.1**与**SBI v0.2**规范相比，略有不同，其中：
+传统的SBI扩展 v0.1与SBI v0.2规范相比，略有不同，其中：
 
 - `a6`寄存器中的的`FID`字段被忽略，因为这些被编码为多个`EID`.
 - `a1`寄存器不返回任何值。
@@ -1900,7 +7121,7 @@ struct sbiret{
 
 <img src="quard-star/传统SBI指令.png" alt="传统SBI指令" style="zoom:50%;" />
 
-## 5.2 修改ut_domain的起始地址
+## 修改`ut_domain`的起始地址
 
 修改`untrusted_domain`的下级程序起始地址，`0x80200000`作为OS的起始地址；下级程序的参数地址可以先随便给。
 
@@ -1909,33 +7130,34 @@ next-arg1 = <0x0 0x82000000>;
 next-addr = <0x0 0x80200000>;
 ```
 
-## 5.3 创建OS*
+## 创建OS
 
 在quard-star目录下新建os文件夹，在此文件夹中编写操作系统程序：
 
 ```c
 makefile   entry.S   main.c   os.ld   sbi.c   sbi.h
 ```
-### 5.3.1 编写entry.S（栈）
+### 编写`entry.S`（栈）
 
 **定义栈并初始化`sp`寄存器**！
 
 ``` assembly
-     .section .text.entry  // 定义自己的段
+     .section .text.entry   # 定义程序段
      .globl _start
 _start:
     la sp, boot_stack_top
     call os_main
 
-    .section .bss.stack  // 定义栈段
+    .section .bss.stack  	# 定义栈段
     .globl boot_stack_lower_bound
 boot_stack_lower_bound:
-    .space 4096 * 16  // .space下面的指向高地址
+    .space 4096 * 16  		#  .space下面的指向高地址
     .globl boot_stack_top
 boot_stack_top:
 ```
-### 5.3.2 编写.c/.h程序
-#### 5.3.2.1 编写sbi.h
+### 编写`.c/.h`程序
+#### 编写`sbi.h`（定义调用号）
+
 ``` c
 #ifndef __SBI_H__
 #define __SBI_H__
@@ -1967,7 +7189,10 @@ struct sbiret {
 
 #endif  
 ```
-#### 5.3.2.2 编写sbi.c
+#### 编写`sbi.c`（定义系统调用API）
+
+本质是通过`ecall`指令转发给 openSBI。
+
 ``` c
 #include "sbi.h"
 #include "stdint.h"
@@ -2002,7 +7227,8 @@ void sbi_console_putchar(int ch)
 	sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
 }
 ```
-#### 5.3.3.3 编写main.c
+#### 编写`main.c`（系统调用测试程序）
+
 ``` c
 extern sbi_console_putchar(int ch);
 
@@ -2016,7 +7242,7 @@ void os_main()
     sbi_console_putchar('!');
 }
 ```
-### 5.3.3 编写os.ld
+### 编写`os.ld`链接脚本
 ``` assembly
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
@@ -2050,7 +7276,7 @@ SECTIONS
 
 }
 ```
-### 5.3.4 创建makefile
+### 编写 makefile 文件
 ``` makefile
 
 CROSS_COMPILE = riscv64-unknown-elf-
@@ -2088,7 +7314,7 @@ os.elf: ${OBJS}
 clean:
 	rm -rf *.o *.bin *.elf
 ```
-### 5.3.5 修改build.sh
+### 修改`build.sh`
 
 ![添加os的内存·布局](quard-star/添加os的内存·布局.png)
 
@@ -2192,17 +7418,17 @@ typedef char* va_list;
 // 3. va_start：初始化ap指向第一个可变参数（跳过固定参数v的大小）
 #define va_start(ap, v)  (ap = (va_list)&v + _VA_ALIGN(v))
 
-// 4. va_arg：先读当前参数，再移动指针
-#define va_arg(ap, t)  (*( (t*) ((ap += _VA_ALIGN(t)) - _VA_ALIGN(t))) )
+// 4. va_arg：先移动指针，再读取
+#define va_arg(ap, t)  (   *( (t*) ((ap += _VA_ALIGN(t)) - _VA_ALIGN(t)) )     )
 
 // 5. va_end：x86下为空操作（语义收尾，无需赋值0，也可保留赋值）
 #define va_end(ap)  (ap = (va_list)0)
 ```
 
-- 在x86架构中函数参数**从右至左**依次压入栈内，因此地址最低处是最左侧的参数。
+- 在x86架构中函数参数**从右至左**依次压入栈内（即使在寄存器中也会在栈中存副本），因此地址最低处是最左侧的参数。
 
 - **如果函数参数传入的是字符串，压入栈内的是指向字符串的指针，并不是字符串本身。也就是说`v`自身也是一个指针。**`va_start`获取的是`v`这个指针在栈上的地址，而不是`v`所指向的字符串的地址。
-- 通过字符串指针访问字符串：`*buf`等价于`buf[0]`；`*(buf + 1)`等价于`buf[1]`。`buf + n`实际移动的字节数为`n * sizeof( *buf )`。`* char*`为`char`。
+- 通过字符串指针访问字符串：`*buf`等价于`buf[0]`；`*(buf + 1)`等价于`buf[1]`。`buf + n`实际移动的字节数为`n * sizeof( *buf)`。`* char*`为`char`。
 - 当函数参数是`int`等基本数据类型时，函数参数会直接存储在栈内。
 
 ``` c

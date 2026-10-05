@@ -1,0 +1,122 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="第 1 页" id="ELMVpiSEnHehvdRkaraa">
+    <mxGraphModel dx="1278" dy="710" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title1" parent="1" style="text;fontSize=18;fontStyle=1;align=center;" value="ListenerHandler 内部结构" vertex="1">
+          <mxGeometry height="35" width="400" x="300" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="outer" parent="1" style="rounded=1;fillColor=#E1F5FE;strokeColor=#01579B;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry height="455" width="920" x="40" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="outer_label" parent="1" style="text;fontSize=14;fontStyle=1;" value="ListenerHandler（一个Channel一个实例）" vertex="1">
+          <mxGeometry height="25" width="350" x="370" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="box1" parent="1" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;verticalAlign=top;" value="" vertex="1">
+          <mxGeometry height="160" width="410" x="80" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_label" parent="1" style="text;fontSize=12;fontStyle=1;align=left;" value="1. signal_  (广播信号)" vertex="1">
+          <mxGeometry height="25" width="200" x="90" y="105" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_line1" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="类型: using message_signal = base::Signal&lt;const message_ptr&amp;, const MessageInfo&amp;&gt;;" vertex="1">
+          <mxGeometry height="18" width="200" x="90" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_line2" parent="1" style="text;fontSize=10;align=left;fontColor=#555;fontFamily=Courier New;" value="= Signal(const message_ptr&amp;, const MessageInfo&amp;)" vertex="1">
+          <mxGeometry height="18" width="380" x="90" y="146" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_line3" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="职责: 触发所有广播模式的 Reader 回调" vertex="1">
+          <mxGeometry height="18" width="350" x="90" y="168" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_line4" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="内含 SlotList, 每个 Slot 包装一个用户回调" vertex="1">
+          <mxGeometry height="18" width="350" x="90" y="186" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_line5" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="调用 signal_(msg, info) 即遍历所有 Slot" vertex="1">
+          <mxGeometry height="18" width="350" x="90" y="204" as="geometry" />
+        </mxCell>
+        <mxCell id="box1_line6" parent="1" style="text;fontSize=11;fontStyle=2;align=left;fontColor=#C62828;" value="[!] 每收到一条消息都会触发" vertex="1">
+          <mxGeometry height="22" width="350" x="90" y="228" as="geometry" />
+        </mxCell>
+        <mxCell id="box2" parent="1" style="rounded=1;fillColor=#FFF9C4;strokeColor=#F57F17;verticalAlign=top;" value="" vertex="1">
+          <mxGeometry height="160" width="410" x="520" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="box2_label" parent="1" style="text;fontSize=12;fontStyle=1;align=left;" value="2. writer_signals_;" vertex="1">
+          <mxGeometry height="25" width="250" x="530" y="105" as="geometry" />
+        </mxCell>
+        <mxCell id="box2_line1" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="类型:  using message_signal_map = std::unordered_map&lt;uint64_t, signal_ptr&gt;;" vertex="1">
+          <mxGeometry height="18" width="370" x="530" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="box2_line2" parent="1" style="text;fontSize=10;align=left;fontColor=#555;fontFamily=Courier New;" value="= Map(writer_id, shared_ptr(MessageSignal))" vertex="1">
+          <mxGeometry height="18" width="380" x="530" y="146" as="geometry" />
+        </mxCell>
+        <mxCell id="box2_line3" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="职责: 为每个 writer 单独创建一个信号（实现这个通道里只订阅某个writer的功能）" vertex="1">
+          <mxGeometry height="18" width="350" x="530" y="168" as="geometry" />
+        </mxCell>
+        <mxCell id="box3" parent="1" style="rounded=1;fillColor=#FFCCBC;strokeColor=#BF360C;verticalAlign=top;" value="" vertex="1">
+          <mxGeometry height="110" width="410" x="80" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="box3_label" parent="1" style="text;fontSize=13;fontStyle=1;align=left;" value="3. signal_conns_ " vertex="1">
+          <mxGeometry height="25" width="280" x="90" y="295" as="geometry" />
+        </mxCell>
+        <mxCell id="box3_line1" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="类型: using connection_map = std::unordered_map&lt;uint64_t, message_connection&gt;;" vertex="1">
+          <mxGeometry height="18" width="200" x="90" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="box3_line2" parent="1" style="text;fontSize=10;align=left;fontColor=#555;fontFamily=Courier New;" value="= Map(reader_id, MessageConnection)" vertex="1">
+          <mxGeometry height="18" width="380" x="90" y="336" as="geometry" />
+        </mxCell>
+        <mxCell id="box3_line3" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="职责: 记录每个 reader_id 在这个channel的广播信号里对应的 message_connection" vertex="1">
+          <mxGeometry height="18" width="350" x="90" y="358" as="geometry" />
+        </mxCell>
+        <mxCell id="box4" parent="1" style="rounded=1;fillColor=#D1C4E9;strokeColor=#4527A0;verticalAlign=top;" value="" vertex="1">
+          <mxGeometry height="110" width="410" x="520" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="box4_label" parent="1" style="text;fontSize=13;fontStyle=1;align=left;" value="4. writer_signals_conns_;  (点对点连接表)" vertex="1">
+          <mxGeometry height="25" width="280" x="530" y="295" as="geometry" />
+        </mxCell>
+        <mxCell id="box4_line1" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="类型: std::unordered_map&lt;uint64_t, connection_map&gt;" vertex="1">
+          <mxGeometry height="18" width="280" x="530" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="box4_line2" parent="1" style="text;fontSize=10;align=left;fontColor=#555;fontFamily=Courier New;" value="= Map(writer_id, Map(reader_id, Connection))" vertex="1">
+          <mxGeometry height="18" width="380" x="530" y="336" as="geometry" />
+        </mxCell>
+        <mxCell id="box4_line3" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="职责: 保存这个 channel 中 writer _id - reader_id - message_connection 的映射关系" vertex="1">
+          <mxGeometry height="18" width="380" x="530" y="358" as="geometry" />
+        </mxCell>
+        <mxCell id="box5" parent="1" style="rounded=1;fillColor=#F5F5F5;strokeColor=#616161;verticalAlign=top;" value="" vertex="1">
+          <mxGeometry height="70" width="850" x="75" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="box5_label" parent="1" style="text;fontSize=13;fontStyle=1;align=left;" value="5. rw_lock_  (原子读写锁)" vertex="1">
+          <mxGeometry height="25" width="250" x="90" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="box5_line1" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="Connect / Disconnect  --&gt;  加写锁 (WriteLockGuard)   --&gt;  写写互斥、读写互斥" vertex="1">
+          <mxGeometry height="18" width="500" x="90" y="445" as="geometry" />
+        </mxCell>
+        <mxCell id="box5_line2" parent="1" style="text;fontSize=10;align=left;fontColor=#555;" value="Run               --&gt;  加读锁 (ReadLockGuard)    --&gt;  读读共享、不被写阻塞" vertex="1">
+          <mxGeometry height="18" width="500" x="90" y="463" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow1" edge="1" parent="1" style="endArrow=classic;strokeWidth=2;strokeColor=#2E7D32;dashed=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="260" as="sourcePoint" />
+            <mxPoint x="280" y="290" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow1_label" parent="1" style="text;fontSize=9;fontColor=#2E7D32;" value="signal_.Connect() 后存入" vertex="1">
+          <mxGeometry height="18" width="150" x="285" y="265" as="geometry" />
+        </mxCell>
+        <mxCell id="oPLaRvi7tX048rcor1dx-2" edge="1" parent="1" source="outer" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;innerLoopWaypoints=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" target="outer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="oPLaRvi7tX048rcor1dx-6" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;edgeStyle=orthogonalEdgeStyle;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <Array as="points">
+              <mxPoint x="850" y="130" />
+              <mxPoint x="174.67" y="130" />
+            </Array>
+            <mxPoint x="850" y="140" as="sourcePoint" />
+            <mxPoint x="174.74" y="140" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

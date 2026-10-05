@@ -1,0 +1,73 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="第 1 页" id="Hh6LtYhaDW7RTsXxL23x">
+    <mxGraphModel dx="182276" dy="132594" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="900" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="ctor0" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" value="DataStream()&#xa;无参构造函数" vertex="1">
+          <mxGeometry height="70" width="180" x="54" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ctor0-step1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="pos_ = 0" vertex="1">
+          <mxGeometry height="40" width="100" x="14" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="ctor0-step2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="byteorder_ = byteorder()" vertex="1">
+          <mxGeometry height="40" width="140" x="134" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="link0-1" edge="1" parent="1" source="ctor0" style="endArrow=block;html=1;strokeWidth=2" target="ctor0-step1" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="link0-2" edge="1" parent="1" source="ctor0" style="endArrow=block;html=1;strokeWidth=2" target="ctor0-step2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ctor-str" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="DataStream(const std::string&amp; str)&#xa;字符串重载构造" vertex="1">
+          <mxGeometry height="70" width="200" x="380" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="call-char-ctor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="调用 DataStream(str.data(), str.size())" vertex="1">
+          <mxGeometry height="45" width="240" x="360" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="link-str-call" edge="1" parent="1" source="ctor-str" style="endArrow=block;html=1;strokeWidth=2" target="call-char-ctor" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ctor-char" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="DataStream(const char* data, size_t size)&#xa;字符数组核心构造" vertex="1">
+          <mxGeometry height="70" width="250" x="710" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="char-s1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="pos_ = 0" vertex="1">
+          <mxGeometry height="38" width="90" x="710" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="char-s2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="byteorder_ = byteorder()" vertex="1">
+          <mxGeometry height="38" width="140" x="830" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="char-s3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="buf_.clear()" vertex="1">
+          <mxGeometry height="38" width="80" x="710" y="215" as="geometry" />
+        </mxCell>
+        <mxCell id="char-s4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="buf_.reserve(size)" vertex="1">
+          <mxGeometry height="38" width="105" x="710" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="char-s5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" value="write(data, size)" vertex="1">
+          <mxGeometry height="38" width="100" x="710" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="link-c1" edge="1" parent="1" source="ctor-char" style="endArrow=block;html=1;strokeWidth=2" target="char-s1" value="" />
+        <mxCell id="link-c2" edge="1" parent="1" source="ctor-char" style="endArrow=block;html=1;strokeWidth=2" target="char-s2" value="" />
+        <mxCell id="link-c3" edge="1" parent="1" source="ctor-char" style="endArrow=block;html=1;strokeWidth=2" target="char-s3" value="" />
+        <mxCell id="link-c4" edge="1" parent="1" source="ctor-char" style="endArrow=block;html=1;strokeWidth=2" target="char-s4" value="" />
+        <mxCell id="link-c5" edge="1" parent="1" source="ctor-char" style="endArrow=block;html=1;strokeWidth=2" target="char-s5" value="" />
+        <mxCell id="link-str-core" edge="1" parent="1" source="call-char-ctor" style="endArrow=block;html=1;strokeWidth=2;dashed=1" target="ctor-char" value="" />
+        <mxCell id="mg56MuBS697pA1yRpXyW-2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="358" width="312" x="675" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="mg56MuBS697pA1yRpXyW-3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="358" width="312" x="317" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="mg56MuBS697pA1yRpXyW-4" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="358" width="312" x="-27" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="mg56MuBS697pA1yRpXyW-6" edge="1" parent="1" source="mg56MuBS697pA1yRpXyW-3" style="shape=flexArrow;endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" target="mg56MuBS697pA1yRpXyW-2" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="630" y="231" as="sourcePoint" />
+            <mxPoint x="680" y="181" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
