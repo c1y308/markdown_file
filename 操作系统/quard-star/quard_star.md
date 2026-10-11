@@ -14,7 +14,7 @@
 >
 > 绝大部分普通裸机代码很快就可以读懂。
 
-## 数据移动
+## 数据移动/读取地址
 
 ### `li`：将立即数装入寄存器
 
@@ -1546,7 +1546,7 @@ mip = 哪些中断已经来了
 
 Linux 启动以后会大量涉及这个 CSR。
 
-#### `m(s)scratch`（指向每个 hart 的`sbi_scratch`）
+#### `mscratch`（OpenSBI 中指向每个 hart 的`sbi_scratch`）
 
 `mscratch` 是每个 hart 独有的一个 Machine-mode CSR；OpenSBI 把“指向该 hart 的 `sbi_scratch` 内存区域的指针”放进 `mscratch`。
 
@@ -2238,71 +2238,7 @@ bnez a0, label
 | 写系统寄存器   | `csrw`         | `msr`           |
 | 等待中断       | `wfi`          | `wfi`           |
 
-#  文件类型
-
-## .sh文件
-
-`.sh` 文件是 **Shell 脚本文件**（Shell Script），**用于在 Unix/Linux 系统中运行一系列命令**。它是由 **Bash（Bourne Again Shell）** 或其他 Shell（如 `sh`、`zsh`、`ksh` 等）解释执行的纯文本文件。
-
-1. **文件扩展名**：以 `.sh` 结尾（但不是强制要求，Linux 不依赖扩展名判断文件类型）。
-2. **内容**：包含 Shell 命令，例如 `ls`、`echo`、`grep` 等，也可以包含条件判断、循环、函数等编程结构。
-3. **可执行权限**：需要赋予执行权限才能直接运行（`chmod +x script.sh`）。
-
----
-
- **常见用途：**
-
-- 自动化任务（如备份、日志清理）。
-- 批量处理文件。
-- CI/CD 流程中的脚本（如 GitHub Actions、Jenkins）。
-
----
-
-**常见语法：**
-
-- **`$SHELL_FOLDER`**是一个 **Shell 变量**，表示脚本所在的 **基础目录**。
-- 使用变量需要在变量前面加`$`，而定义变量则不需要加`$`。
-- `if[-d "路径"];then`表示检测目录是否存在，必须加入`-d`，`-e`则检测文件是否存在。
-
----
-
-在本项目中，通过`build.sh`文件：
-
-- 指定交叉编译工具链
-- 自动创建/存储编译文件的存放位置
-- 执行编译命令，利用编写的`.lds`文件对`.s`文件汇编/`.c`文件编译汇编生成的`.o`文件进行链接生成`.elf`可执行文件。
-- 将`.elf`文件生成`.bin`固件，通过`dd`命令合成固件。
-
-通过`run.sh`文件将`fw.bin`固件写入到`Flash`里。
-
-``` sh
-# 编译 lowlevelboot
-CROSS_PREFIX=riscv64-unknown-elf # 指定交叉编译工具链前缀
-
-if [ ! -d "$SHELL_FOLDER/output/lowlevelboot" ]; then  
-mkdir $SHELL_FOLDER/output/lowlevelboot
-fi  
-
-cd  $SHELL_FOLDER/boot
-$CROSS_PREFIX-gcc -x assembler-with-cpp -c start.s -o $SHELL_FOLDER/output/lowlevelboot/start.o
-$CROSS_PREFIX-gcc -nostartfiles -T./boot.lds -Wl,-Map=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.map -Wl,--gc-sections $SHELL_FOLDER/output/lowlevelboot/start.o -o $SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf
-# 使用gnu工具生成原始的程序bin文件
-$CROSS_PREFIX-objcopy -O binary -S $SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf $SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
-
-# 合成firmware固件
-if [ ! -d "$SHELL_FOLDER/output/fw" ]; then  
-mkdir $SHELL_FOLDER/output/fw
-fi  
-cd $SHELL_FOLDER/output/fw
-
-rm -rf fw.bin  # -rf表示强制递归删除
-# 填充 32K的0
-dd of=fw.bin bs=1k count=32k if=/dev/zero   
-# # 写入 lowlevel_fw.bin 偏移量地址为 0
-dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
-```
-
-## makefile
+#  MakeFile
 
 每个规则定义了一个目标（target）及其依赖关系，以及如何生成该目标：
 
@@ -2311,9 +2247,9 @@ target: dependencies
     command
 ```
 
-变量：用于简化重复的代码，例如编译器名称或编译选项。使用定义的变量需要用`${}`。
+变量：用于简化重复的代码，例如编译器名称或编译选项。引用 Make 变量可使用`$(VAR)`或`${VAR}`。
 
-**编译命令会依据`include""`命令搜索`.c`文件所在目录的`.h`文件以及`#include<>`搜索`/usr/include`的系统头文件**。如果头文件不在这两个地方就需要使用`INCLUDE:=-Ipath`指定头文件所在的地方。
+编译器处理`#include "name.h"`时先查找当前源文件所在目录，再查找配置的头文件目录；`#include <name.h>`主要查找配置的头文件目录和工具链默认目录。额外目录可通过`-Ipath`指定，例如`INCLUDE := -I../include`。
 
 `$<`表示第一个依赖文件，`$^`表示所有依赖文件。
 
@@ -2348,113 +2284,971 @@ write: write.c $(LIB)/*.c
 time: time.c 
 	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/time.bin $^
 ```
-## .ld文件
 
-`.ld` 文件**用于控制程序的内存布局，指定代码、数据、堆栈等段（Sections）在内存中的存放位置**。它通常用于嵌入式开发或操作系统引导程序，确保程序在编译后能正确加载到目标硬件的特定地址，**依据`.ld`文件的规则合并所有的`.o`文件生成可执行文件**。
+# 程序是如何变成可执行文件的
 
-`.ld` 文件的主要功能是 告诉链接器（ld）：
+ CPU 本身并不认识 C 语言，CPU 能够执行的是其指令集规定的机器指令，例如 RISC-V 中的 `add`、`lw`、`jal` 等。那么，这段 C 程序怎样才能变成 CPU 能够执行的指令呢？一般需要经过四个阶段：
 
-- **代码（`.text`）、数据（`.data`）、未初始化变量（`.bss`）等存放在内存的哪个地址。**
-- **如何组织程序的各个段（Sections）。**
-- **堆（Heap）和栈（Stack）的起始位置和大小。**
-- **特殊需求**（如内存对齐、固定地址变量、Flash vs RAM 的分配）。
+<img src="./assets/程序运行的四个阶段.png" alt="程序运行的四个阶段" style="zoom:67%;" />
+
+## 第一步：预处理
+
+现在我们将程序稍作修改。`main.c`：
+
+```c
+#define NUM 10
+
+int main(void)
+{
+    int a = NUM;
+    return a;
+}
+```
+
+注意：
+
+```c
+#define NUM 10
+```
+
+这是一条预处理指令。运行：
+
+```sh
+gcc -E main.c -o main.i
+```
+
+其中：
+
+- `gcc`：调用 GCC 编译工具链。
+- `-E`：只执行预处理阶段。
+- `-o main.i`：将结果写入 `main.i`。
+
+打开 `main.i`，忽略预处理器添加的文件位置标记，你会看到核心代码已经变成：
+
+```c
+int main(void)
+{
+    int a = 10;
+    return a;
+}
+```
+
+核心理解：预处理器并没有把 C 代码转成机器指令。它只是按照预处理规则修改源代码文本。例如展开 `#include`，替换宏定义，处理 `#if` 等条件编译指令。
+
+## 第二步：编译
+
+接下来执行：
+
+```shell
+gcc -S main.i -o main.s
+```
+
+`-S` 表示只执行到生成汇编代码的阶段。
+
+如果是在 RISC-V 平台上编译，可能看到类似这样的汇编指令（仅用于展示指令含义，并非上述命令的固定输出）：
+
+```assembly
+li a0, 10
+ret
+```
+
+这里：
+
+- `li a0, 10`：将立即数 10 放入寄存器 `a0`。
+- `ret`：返回调用者。
+
+由于我们写的是 `return 10;`，在 RISC-V 调用约定下，返回值会放入 `a0`。
+
+需要特别注意：**编译阶段生成的 `.s` 文件仍然是文本文件**。它只是使用汇编语言描述 CPU 应当执行的指令，并不是机器指令的二进制编码。
+
+## 第三步：汇编
+
+> 在 Linux/GCC 常用的 ELF 工具链中，`.o` 通常是一个 ELF 格式的可重定位目标文件（Relocatable Object File）。
+>
+> ELF 全称为：Executable and Linkable Format（可执行与可链接格式），ELF 是一种文件格式，它既可以用于保存可重定位目标文件，也可以用于保存可执行文件和共享库。这个容器不仅保存机器指令，还保存变量的初始数据、符号表、重定位信息等。
+>
+
+现在执行：
+
+```sh
+gcc -c main.s -o main.o
+```
+
+汇编器会将汇编指令编码成机器指令，生成目标文件（Object File）。例如：
+
+```assembly
+li a0, 10
+```
+
+最终会被编码成相应的机器指令。不过，这里出现一个非常重要的问题：
+
+既然 `.o` 文件已经包含机器指令，为什么不能直接把它当作完整程序运行？
+
+因为目标文件通常还没有完成最终的链接工作。例如：
+
+- 其他文件中的函数地址可能还不知道。
+- 某些符号引用尚未解析。
+- 各个代码段和数据段还没有被安排到最终的地址布局。
+
+这就引出了第四个阶段。
+
+## 第四步：链接
+
+> 链接器（Linker）除了将不同目标文件中的符号关联起来，还需要进行：
+>
+> - 符号解析（Symbol Resolution）；
+> - 节和地址布局（Section and Address Layout）；
+> - 必要的重定位处理（Relocation）；
+
+假设我们有两个文件。
+
+`main.c`：
+
+```c
+int add(int a, int b);
+
+int main(void)
+{
+    return add(10, 20);
+}
+```
+
+`add.c`：
+
+```c
+int add(int a, int b)
+{
+    return a + b;
+}
+```
+
+分别编译成目标文件：
+
+```shell
+gcc -c main.c -o main.o
+gcc -c add.c -o add.o
+```
+
+此时：
+
+- `main.o` 包含 `main()` 的机器指令。
+- `add.o` 包含 `add()` 的机器指令。
+
+但是 `main.o` 中调用 `add()` 时，需要知道 `add()` 的实际地址。在目标文件生成时，这个地址可能还没有最终确定。于是运行：
+
+```shell
+gcc main.o add.o -o app
+```
+
+链接器会整合两个目标文件，解析 `add` 符号的引用，并完成所需的地址计算和修正，生成可执行程序。在 Linux 环境中，运行：
+
+```
+./app
+echo $?
+```
+
+`echo $?` 应输出 `30`，即 `main()` 的返回值。这里还要留意，通常使用 GCC 链接时，也会涉及启动文件和运行时库。
+
+## `.elf`文件
+
+> 在 Linux/GCC 常用的 ELF 工具链中，`.o` 通常是一个 ELF 格式的可重定位目标文件（Relocatable Object File）。
+>
+> ELF 全称为：Executable and Linkable Format（可执行与可链接格式），ELF 是一种文件格式，它既可以用于保存可重定位目标文件，也可以用于保存可执行文件和共享库。这个容器不仅保存机器指令，还保存变量的初始数据、符号表、重定位信息等。
+
+### 数据节
+
+假设我们有这样的 `main.c`：
+
+```c
+int a = 10;
+
+int b = 0;
+
+int c;
+
+const int d = 20;
+
+int main(void)
+{
+    return a + b + c + d;
+}
+```
+
+这段程序中，既有代码，也有各种类型的变量。编译器需要区分它们的不同性质。
+
+例如：
+
+- `main()` 对应机器指令。
+- `a` 是需要初始化的可写全局变量。
+- `b` 和 `c` 的初始值为零。
+- `d` 是只读的常量对象。
+
+因此，ELF 通常会按照不同用途将内容放入不同的节（Section）。
+
+<img src="./assets/ELF文件的节.png" alt="ELF文件的节" style="zoom:67%;" />
+
+#### 为什么要区分只读数据要与可写数据？
+
+假设：
+
+```c
+const char message[] = "Hello";
+int counter = 10;
+```
+
+通常将 `message` 放入 `.rodata`，而 `counter` 放入 `.data`。原因之一是**内存权限不同**：
+
+- 只读数据在运行时通常不需要修改。
+- 可写数据在运行时可能发生变化。
+
+另外，在嵌入式系统中，**某些只读内容可以直接保留在适合读取的非易失性存储器中，而可写数据则通常需要位于 RAM**。
+
+#### `.data`和`.bss`
+
+假设：
+
+```c
+int a = 10;
+int b = 0;
+int c;
+```
+
+通常情况下：
+
+`a` 在 `.data`，而 `b`、`c` 在 `.bss`。
+
+为什么不把三个变量都放在 `.data` 中呢？因为 `.bss` 有一个很重要的特点：
+
+**它通常只在文件中记录空间需求，而不需要在文件中实际存储对应数量的零字节**。例如：
+
+```c
+int buffer[100000];
+```
+
+假设 `int` 占 4 字节，则 `buffer` 需要 400000 字节，也就是约 390.6 KiB 的内存。但这并不意味着 `.o` 文件必须为 `buffer` 保存 400000 个零字节。
+
+ELF 可以利用 `.bss` 的节信息说明：
+
+> 程序运行时，需要为这个变量分配相应空间，并保证初始内容为零。
+
+这一性质在嵌入式开发中尤其重要，因为固件文件大小与运行时占用的内存大小不是同一回事。
+
+### 符号表与重定位表
+
+<img src="./assets/符号表和重定位表.png" alt="符号表和重定位表" style="zoom:80%;" />
+
+#### 符号表
+
+**定义（Definition）：真正创建函数或变量。**例如：
+
+```c
+int value = 10;
+```
+
+这定义了一个全局变量 `value`。
+
+**声明（Declaration）：告诉编译器某个函数或变量存在，并告知其类型，但不一定在当前文件中定义它**。例如：
+
+```c
+extern int value;
+```
+
+这里不会再创建一个新的 `value`，而是告诉编译器：你可以使用这个变量，其定义可能在其他目标文件中。
+
+因此，对 `main.c` 来说：
+
+- `main` 是当前文件定义的符号；
+- `add` 是当前文件引用的外部符号；
+- `value` 也是当前文件引用的外部符号。
+
+**编译器能够根据声明生成调用或访问它们的机器指令，却未必能够确定它们的最终地址，于是需要符号表**。
+
+``` shell
+c1y308@pc-System-Product-Name:~/temp-proj/watch-elf$ readelf -s main.o
+
+Symbol table '.symtab' contains 9 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main.c
+     2: 0000000000000000     0 SECTION LOCAL  DEFAULT    1 .text
+     3: 0000000000000000     4 OBJECT  GLOBAL DEFAULT    3 counter
+     4: 0000000000000000  4000 OBJECT  GLOBAL DEFAULT    4 buffer
+     5: 0000000000000000     6 OBJECT  GLOBAL DEFAULT    5 message
+     6: 0000000000000000    28 FUNC    GLOBAL DEFAULT    1 main
+     7: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND value
+     8: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND add
+     
+     
+c1y308@pc-System-Product-Name:~/temp-proj/watch-elf$ readelf -s add.o
+
+Symbol table '.symtab' contains 5 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS add.c
+     2: 0000000000000000     0 SECTION LOCAL  DEFAULT    1 .text
+     3: 0000000000000000     4 OBJECT  GLOBAL DEFAULT    2 value
+     4: 0000000000000000    24 FUNC    GLOBAL DEFAULT    1 add
+```
+
+#### 重定位表
+
+##### `.rela.text`静态重定位表（编译器生成）
+
+同样针对外部定义的全局变量、静态变量和外部函数：
+
+```c
+int main(void)
+{
+    return add(value, 3);
+}
+```
+
+这里涉及两个外部引用：
+
+- 读取 `value` 的值。
+- 调用 `add()` 函数。
+
+编译器需要生成相应的机器指令，但这些引用所需的最终地址或偏移量还没有确定。一种解决办法是：**先生成带有待修正位置的指令，同时记录这些位置需要怎样修正。重定位表正是用于记录这些信息的。**执行：
+
+```sh
+readelf -r main.o
+```
+
+`.rela.text` 的关键输出如下：
+
+```shell
+c1y308@pc-System-Product-Name:~/temp-proj/watch-elf$ readelf -r main.o
+
+重定位节 '.rela.text' at offset 0x1f8 contains 2 entries:
+  偏移量          信息           类型           符号值        符号名称 + 加数
+00000000000a  000700000002 R_X86_64_PC32     0000000000000000 value - 4
+000000000016  000800000004 R_X86_64_PLT32    0000000000000000 add - 4
+
+重定位节 '.rela.eh_frame' at offset 0x228 contains 1 entry:
+  偏移量          信息           类型           符号值        符号名称 + 加数
+000000000020  000200000002 R_X86_64_PC32     0000000000000000 .text + 0
+```
+
+现在只需要理解三个字段：
+
+| 字段     | 作用                           |
+| -------- | ------------------------------ |
+| 偏移量   | 需要修正的位置在相关节中的偏移 |
+| 类型     | 应使用哪一种重定位计算方式     |
+| 符号名称 | 计算时需要引用哪个符号         |
+
+例如：
+
+```
+Offset = 0x16
+Symbol = add
+```
+
+意味着链接器需要使用 `add` 符号的信息，对 `.text` 节中偏移 `0x16` 处的字段进行修正。注意：`0x16` 不是 `add()` 函数的地址，而是需要修正的字段的位置。这也是符号表和重定位表最根本的区别。
+
+##### `.rela.dyn`运行时重定位表
+
+> 这一部分要解决三个问题：
+>
+> 重定位信息保存在哪里？每一条记录代表什么？OpenSBI 启动时怎样根据这些记录修改地址？
+
+从一个 C 语言指针开始，假设有这样的 C 程序：
+
+```
+int counter = 10;
+int *ptr = &counter;
+```
+
+假设链接后的内存布局是：
+
+| 对象         | 链接地址   |
+| ------------ | ---------- |
+| 程序起始位置 | 0x80000000 |
+| `counter`    | 0x80001000 |
+| `ptr`        | 0x80002000 |
+
+注意，`ptr` 自身是一个变量，它有两个不同的地址概念。
+
+一是 `ptr` 自己存放在哪里：
+
+```c
+&ptr = 0x80002000
+```
+
+二是 `ptr` 内部存储了什么数值：
+
+```c
+ptr = 0x80001000
+```
+
+因为 `ptr` 保存的是 `counter` 的地址。现在假设**整个程序移动**到 `0x80300000`，搬迁量为：$ \Delta=0x300000 $于是：
+
+| 对象               | 搬迁前       | 搬迁后       |
+| ------------------ | ------------ | ------------ |
+| `counter` 的位置   | `0x80001000` | `0x80301000` |
+| `ptr` 自身的位置   | `0x80002000` | `0x80302000` |
+| `ptr` 应保存的数值 | `0x80001000` | `0x80301000` |
+
+注意：将包含 `ptr` 的数据复制到新地址，不会自动修改 `ptr` 所保存的旧地址值。所以运行期必须知道两件事：
+
+第一，应该修改哪个内存位置？
+
+第二，应该把什么新地址写进去？
 
 ---
 
-一个典型的链接脚本包含以下部分：
+在 RV64 的 ELF64 格式中，一条带显式附加值的重定位记录使用 `Elf64_Rela` 结构。
 
- **（1）指定入口点（程序从哪里开始执行）**
-
-```assembly
-ENTRY(_start)  /* 程序入口符号（通常是汇编启动代码 _start） */
+``` c
+typedef struct {
+    uint64_t r_offset;	// 需要重定位的原始内存位置
+    uint64_t r_info;	// 重定位类型 & 符号索引 type = r_info & 0xffffffff; symbol = r_info >> 32
+    int64_t  r_addend;	// 参与计算的附加值（原始这个位置应该是什么值）
+} Elf64_Rela;
 ```
 
- **（2）定义内存布局（Memory Regions）**
+每条记录占用：$ 8+8+8=\boxed{24\text{ 字节}} $。
 
-```assembly
-MEMORY
-{
-    ROM (rx)  : ORIGIN = 0x00000000, LENGTH = 256K  /* Flash，可读可执行 */
-    RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K   /* RAM，可读可写可执行 */
-}
+例如：`R_RISCV_RELATIVE = 3`，这种重定位不需要根据某个命名符号查找最终地址，通常符号索引为 0。所以：
+
+```
+r_info = 0x0000000000000003
 ```
 
- **（3）组织段（Sections）**
+即低 32 位的重定位类型为 3，高 32 位的符号索引为 0。
 
-```assembly
-SECTIONS
-{
-    .text : {
-        *(.text)       /* 所有输入文件的代码段：main.o(.text), lib.o(.text)等 */
-        *(.text.*)    /* 编译器生成的代码段(优化后的代码函数) */
-    } > ROM           /* 存放到 Flash */
+`r_addend` 是用于重定位计算的附加值。
 
-    .data : {
-        *(.data)      /* 初始化数据 */
-    } > RAM AT > ROM   /* 运行时在 RAM，但初始值存储在 Flash */
+按照 RISC-V psABI，`R_RISCV_RELATIVE` 的计算规则是：$ \boxed{\text{Result}=B+A} $，其中：
 
-    .bss : {
-        *(.bss)       /* 未初始化数据（运行时清零） */
-    } > RAM
-}
+- \(B\)：实际装载的映像基址。
+- \(A\)：重定位记录中的附加值 `r_addend`。
+
+### `readelf`工具
+
+#### 查看节头表：`-S`
+
+#### 查看符号表：`-s`
+
+``` shell
+c1y308@pc-System-Product-Name:~/temp-proj/watch-elf$ readelf -s main.o
+
+# 
+Symbol table '.symtab' contains 8 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 			# UND == undefine
+     1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main.c
+     2: 0000000000000000     0 SECTION LOCAL  DEFAULT    1 .text
+     3: 0000000000000000     4 OBJECT  GLOBAL DEFAULT    3 counter
+     4: 0000000000000000  4000 OBJECT  GLOBAL DEFAULT    4 buffer
+     5: 0000000000000000     6 OBJECT  GLOBAL DEFAULT    5 message
+     6: 0000000000000000    41 FUNC    GLOBAL DEFAULT    1 main
+     7: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND add		# UND == undefine
 ```
 
----
+#### 观察重定位信息：`-r`
 
-``` assembly
-OUTPUT_ARCH( "riscv" )  /*输出可执行文件平台*/
+``` shell
+c1y308@pc-System-Product-Name:~/temp-proj/watch-elf$ readelf -r main.o
 
-ENTRY( _start )         /*程序入口函数*/
+重定位节 '.rela.text' at offset 0x1f8 contains 2 entries:
+  偏移量          信息           类型           符号值        符号名称 + 加数
+00000000000a  000700000002 R_X86_64_PC32     0000000000000000 value - 4
+000000000016  000800000004 R_X86_64_PLT32    0000000000000000 add - 4
 
-MEMORY                  /*定义内存域*/
-{ 
-    /*定义名为flash的内存域属性以及起始地址，大小等*/
-	flash (rxai!w) : ORIGIN = 0x20000000, LENGTH = 512k 
-}
+重定位节 '.rela.eh_frame' at offset 0x228 contains 1 entry:
+  偏移量          信息           类型           符号值        符号名称 + 加数
+000000000020  000200000002 R_X86_64_PC32     0000000000000000 .text + 0
+```
 
-SECTIONS                /*定义段域*/
+#### 查看程序入口地址：`-h`
+
+## `.ld`文件
+
+> **最后实际放置、加载在哪由 Loader、Bootloader 等决定！**`.ld`文件中的 LMA 和 VMA 只是程序自己预期放置在哪里。
+
+### 程序如何被加载的？
+
+| 概念                                                         | 英文        | 含义                                         |
+| ------------------------------------------------------------ | ----------- | -------------------------------------------- |
+| 存储位置                                                     |             | 程序文件存放在 SSD、eMMC、Flash 等介质的哪里 |
+| 文件内部偏移                                                 | File Offset | 需要的字节位于程序文件内部的哪个位置         |
+| 装载地址（裸机、烧录的bin文件里等于存储地址 + 文件内部偏移、可被加载的ELF文件则不是） | LMA         | 链接器假定程序存储的内存地址                 |
+| 运行地址                                                     | VMA         | 链接器假定程序运行时通过哪个地址访问该节     |
+
+#### 为什么需要 LMA？（其实是裸机、拉OS用的）
+
+> LMA 主要在需要区分程序初始装载位置与预期运行位置的场景中发挥作用，例如嵌入式固件、Bootloader 和部分内核启动过程。对于普通 Linux 用户态 ELF 程序，Linux 内核通常依据 Program Headers 中的虚拟地址和文件偏移进行装载，而不依赖 LMA。
+
+考虑一个典型的嵌入式设备，它有两类存储器：
+
+![VMA和LMA](./assets/VMA和LMA.png)
+
+假设我们有一个变量：
+
+```c
+int counter = 10;
+```
+
+现在思考：如果设备断电后，RAM 的内容丢失了，那么下次上电时，程序怎么知道 `counter` 初始值应该是 10？
+
+需要提前把初始值 10 保存在非易失性存储器（ROM、Flash）中，然后在启动时搬运到 RAM。因此，这个变量就涉及两个位置：
+
+- 在 Flash 中保存初始值的位置。
+- 在 RAM 中实际存放和访问变量的位置。
+
+假设它们分别是：
+
+```
+Flash: 0x08001000
+RAM:   0x20000000
+```
+
+那么：$\boxed{\mathrm{LMA}=0x08001000} $，$\boxed{\mathrm{VMA}=0x20000000} $​；启动代码：Flash → RAM，复制初始数据之后 CPU 通过 RAM 地址也就是 VMA 访问和修改 `counter`。
+
+#### 裸机系统没有 OS 如何加载？
+
+假设编译生成：`firmware.elf`，随后通过：
+
+```shell
+arm-none-eabi-objcopy -O binary firmware.elf firmware.bin
+```
+
+生成原始固件二进制文件。开发者使用 STM32CubeProgrammer 或其他烧录工具，将 `firmware.bin` **烧录** STM32 内部 Flash 的指定地址。假设：
+
+```
+Flash：0x08000000
+RAM：  0x20000000
+```
+
+注意，之后运行时不是 STM32 在运行时从磁盘上寻找 `firmware.elf`，**程序已经预先烧录到 Flash 中**。
+
+<img src="./assets/STM32启动流程.png" alt="STM32启动流程" style="zoom: 80%;" />
+
+如果从用户 Flash 启动，处理器会通过启动映射访问向量表，获得 `Reset_Handler` 的入口地址，这里不需要 Linux，也不一定需要独立的软件 Bootloader。
+
+ST 官方提供的启动汇编中，**`Reset_Handler` 就包含从 Flash 复制 `.data` 到 RAM、清零 `.bss`，最后调用 `main()` 的过程**。
+
+假设链接脚本：
+
+```assembly
+.text :
 {
-  .text :               /*.text段域*/
+    *(.text .text.*)
+} > FLASH
+
+.data :
+{
+    *(.data .data.*)
+} > RAM AT> FLASH
+```
+
+程序中有：
+
+```c
+int counter = 10;
+```
+
+其内存布局可能是：
+
+<img src="./assets/STM32内存分布.png" alt="STM32内存分布" style="zoom:67%;" />
+
+因此：
+
+- `.text`：LMA 和 VMA 可以相同，都在 Flash。
+- `.data`：LMA 位于 Flash，VMA 位于 RAM。
+- `.bss`：在 RAM 预留空间，启动时清零，不需要从 Flash 复制一份零字节。
+
+所以，不存在“先把整个 ELF 加载到 LMA，然后 VMA 才起作用”的普遍顺序**（XIP）**。在 STM32 里，一些程序节从一开始就在正确的执行位置；只有部分需要初始化或搬迁的数据和代码，才需要启动代码进行复制。
+
+#### 有 OS 如何加载 ELF 程序？
+
+现在假设你在一台运行 Linux 的 x86-64 PC 上编译：
+
+```sh
+gcc main.c -o app
+```
+
+得到：`/home/user/app`，随后运行：`./app`。
+
+##### **文件最初在哪里？**
+
+一般保存在 SSD、HDD 等存储设备的文件系统中。例如：
+
+```
+SSD
+ └── 文件系统
+      └── /home/user/app
+```
+
+文件在 SSD 上的**存储位置由文件系统管理，通常与链接时的 VMA 没有直接对应关系**。Linux 不会认为：app 在 SSD 的某个物理地址，所以应该加载到同样数值的内存地址。相反，它需要读取 ELF 中的装载信息。
+
+##### **Linux Loader 读取什么？**
+
+ELF 的 Section Header 与 Program Header 是两套不同的信息。之前我们研究的是节（Section）：
+
+```
+.text
+.data
+.bss
+.rodata
+```
+
+这些对链接器非常重要。但**加载可执行 ELF 时，更关键的是程序头表**（Program Header Table），它描述可装载段（Segment）。例如：
+
+```
+ELF
+ ├── ELF Header
+ ├── Program Header Table
+ │    ├── PT_LOAD
+ │    ├── PT_LOAD
+ │    └── PT_INTERP
+ ├── .text
+ ├── .data
+ └── ...
+```
+
+Linux 主要依据 `PT_LOAD` 描述需要映射的内容。每个 `PT_LOAD` 包含几个重要字段：
+
+| 字段       | 含义                    |
+| ---------- | ----------------------- |
+| `p_offset` | 内容在 ELF 文件中的偏移 |
+| `p_vaddr`  | 该段预期的虚拟地址      |
+| `p_filesz` | 对应的文件内容长度      |
+| `p_memsz`  | 运行时所需的内存长度    |
+| `p_flags`  | 读、写、执行权限        |
+
+这是 ELF 规范中的装载模型。我们假设某个 `PT_LOAD`：
+
+```c
+p_offset = 0x1000	// 在文件中的偏移位置
+p_filesz = 0x2000	// 需要加载的大小
+p_vaddr  = 0x400000	// 预期的 VMA
+p_memsz  = 0x3000	// 运行时需要的内存大小
+```
+
+假设这是一个按固定地址装载的非 PIE 可执行程序。这意味着：
+
+ELF 文件中从 `0x1000` 开始的 `0x2000` 字节内容，应当在进程虚拟地址空间中对应从 `0x400000` 开始的区域。此外，`p_memsz` 比 `p_filesz` 多出的部分，需要具有零初始化语义。这里出现了三个完全不同的位置：
+
+<img src="./assets/三个地址.png" alt="三个地址" style="zoom:67%;" />
+
+现代 Linux 通常使用按需分页（Demand Paging），不要求在程序启动时就把所有文件内容一次性复制进 RAM。Linux 可以先建立虚拟内存映射，之后在需要时把文件页调入物理内存。**Linux 内核是根据 ELF 的装载段信息建立进程虚拟地址空间，并通过 MMU 页表将虚拟地址映射到实际物理内存。**
+
+##### **如何处理重定位？**
+
+以普通动态链接 ELF 程序为例：
+
+<img src="./assets/运行时重定位流程.png" alt="运行时重定位流程" style="zoom:67%;" />
+
+对于动态链接程序，Linux 根据 ELF 的 `PT_INTERP` 找到相应动态链接器，后者负责共享库加载与动态链接工作。因此，普通 Linux 程序即使存在 `.rela.dyn`，通常也不需要你自己编写一段类似 OpenSBI `fw_base.S` 的重定位汇编代码。当然，静态 PIE、动态链接器自身、特殊加载器等有不同实现细节，不能简单一概而论。
+
+### 链接脚本如何实现布局并合并`.o`文件？
+
+假设有两个目标文件：
+
+```c
+main.o
+    .text
+    .data
+    .bss
+
+add.o
+    .text
+    .data
+    .bss
+```
+
+它们都有自己的 `.text`、`.data`、`.bss`。那么链接器应当把这些内容放在哪里呢？例如：
+
+- 程序入口 `_start` 在什么地址？
+
+  ``` assembly
+  ENTRY(_start)  /* 程序入口符号（通常是汇编启动代码 _start） */
+  
+  # 但是注意：这只是在 ELF 中指定入口，不代表链接器能够让 CPU 自动跳转到该地址。究竟是谁让 CPU 从这个入口开始执行的？可能是操作系统的加载器，也可能是 Bootloader 或其他启动机制。具体取决于运行环境。
+  ```
+
+- 如何定义内存布局？
+
+  ``` assembly
+  MEMORY
   {
-    KEEP( *(.text) )      /*将所有.text段链接在此域内，keep是保持防止优化，即无论如何都保留此段*/
-  } > flash              /*段域的地址(LMA和VMA相同)位于名为flash内存域*/
-}
+      ROM (rx)  : ORIGIN = 0x00000000, LENGTH = 256K  /* Flash，可读可执行 */
+      RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K   /* RAM，可读可写可执行 */
+  }
+  ```
+
+- `main.o` 的 `.text` 应放在什么地址？`add.o` 的 `.text` 应紧跟在哪个位置？`.data` 与 `.bss` 应该安排在哪里？
+
+  ``` assembly
+  SECTIONS
+  {
+  	# .text 是最终 ELF 的输出节，*(.text)和*(.text.*)是收集各个输入目标文件中名称匹配的节
+      .text : {
+          *(.text)      	/* 所有输入文件的代码段：main.o(.text), lib.o(.text)等 */
+          *(.text.*)    	/* 编译器生成的代码段(优化后的代码函数) */
+      } > ROM           	/* 存放到 Flash */
+  
+      .data : {
+          *(.data)      	/* 初始化数据 */
+      } > RAM AT > ROM   	/* 运行时在 RAM(VMA)，但初始值存储在 Flash(LMA) */
+  
+      .bss : {
+          *(.bss)       	/* 未初始化数据（运行时清零） */
+      } > RAM
+      
+      . = 0x80000000;
+      
+      .rodata : {
+          *(.rodata .rodata.*)
+      }
+      
+       . = ALIGN(0x1000);
+       
+        __bss_start = .;
+  
+      .bss :
+      {
+          *(.bss .bss.*)
+          *(COMMON)
+      }
+  
+      __bss_end = .;
+  }
+  ```
+
+链接脚本（Linker Script）就是用来规定这些布局规则的。GNU ld 官方文档将这种规则称为输出节布局（Output Section Layout）。
+
+`.ld` 文件**用于控制程序的内存布局，指定代码、数据、堆栈等段（Sections）在内存中的存放位置**。确保程序在编译后能正确加载到目标硬件的特定地址，依据`.ld`文件的规则合并所有的`.o`文件生成可执行文件。
+
+### VMA 不等于 CPU 实际运行地址怎么办？
+
+从链接器的角度看，VMA 是程序预期的运行地址。但假设一个程序被链接为：
+
 ```
+VMA = 0x80000000
+```
+
+而 Loader 却将它放到了：
+
+```
+实际位置 = 0x80200000
+```
+
+如果 CPU 随后从 `0x80200000` 执行程序，会发生什么？**取决于机器指令如何引用地址**：
+
+- 某些采用 PC 相对寻址的内部跳转，在整体移动后仍然可能正确。
+- 某些已经按照 `0x80000000` 这一布局计算好的绝对地址引用，可能指向错误的位置。
+- 其他代码或数据引用则取决于具体的寻址形式、链接方式和重定位处理。
+
+所以，程序被放到另一个位置，并不意味着它一定可以在那里正确运行。这正是**运行期重定位问题。**
+
+另外，VMA 名称中的 Virtual 也不意味着一定启用了 MMU 或虚拟内存。在某些裸机环境下，程序所使用的地址可以直接对应物理地址。
+
+---
+
+先假设这是一个没有开启 MMU 地址转换的 RISC-V 裸机环境。链接器原本认为程序位于：
+
+```
+.text 起始：0x80000000
+.data 起始：0x80001000
+```
+
+但是，Loader 实际把代码和数据整体移动了 `0x200000` 字节：
+
+```
+.text 起始：0x80200000
+.data 起始：0x80201000
+```
+
+<img src="./assets/地址不一样.png" alt="地址不一样"  />
+
+我们定义：$\Delta = A_{\mathrm{actual}}-A_{\mathrm{linked}}$，本例：$ \boxed{\Delta=0x200000} $，你需要记住这个移动量，后面将反复用到。
+
+#### 第一种情况：绝对寻址
+
+假设代码需要读取全局变量 `counter`。它链接时的地址是：
+
+```c
+int counter = 10;
+int *ptr = &counter;
+
+counter = 0x80001000 // counter 的地址
+```
+
+我们考虑下面的 RISC-V 汇编：
+
+```assembly
+li t0, 0x80001000
+lw t1, 0(t0)
+```
+
+`li t0, 0x80001000` 是伪指令，其作用是将绝对数值 `0x80001000` 装入 `t0`。
+
+`lw t1, 0(t0)` 从 `t0` 指向的地址读取一个 32 位数据到 `t1`。假设执行这段代码时，程序确实运行在 `0x80000000` 附近，那么：
+
+```
+t0 = 0x80001000
+```
+
+CPU 从正确的位置读取 `counter`，没有问题。但现在将程序整体移动到 `0x80200000`。注意：我们只是移动已经生成的机器指令，并没有重新编译或修改指令内容。所以：
+
+```assembly
+li t0, 0x80001000
+```
+
+仍然产生：
+
+```assembly
+t0 = 0x80001000
+```
+
+但是 `counter` 的实际位置已经变成：
+
+```
+0x80201000
+```
+
+于是，CPU 访问了错误的内存地址。这可能导致读取错误数据、访问异常，或者其他错误行为。这就是为什么包含固定绝对地址引用的程序，在移动后往往需要修正相关地址。
+
+严格来说，并不是所有绝对地址都应该修改。例如，固定 MMIO 寄存器的地址不会因为程序整体搬迁而改变。需要调整的是那些指向被移动对象的地址引用。
+
+#### 第二种情况：PC 相对寻址
+
+现在我们换一种方式访问同一个变量。先认识一条 RISC-V 指令：
+
+```
+auipc t0, 1
+```
+
+> `AUIPC` 的全称是：Add Upper Immediate to PC
+
+它的功能是**以当前指令的 PC 为基准，加上一个由立即数字段高位构造（左移 12 位）的偏移值**。在这个例子中：
+
+```
+auipc t0, 1
+```
+
+等价于：$ t0 = PC + 0x1000 $，这是 RISC-V 指令集定义的行为。现在，假设 `auipc` 指令恰好位于 `.text` 起始地址，而 `counter` 位于其后 `0x1000` 字节处。在原来的地址执行：
+
+```
+PC = 0x80000000
+```
+
+执行：
+
+```
+auipc t0, 1
+```
+
+结果：$ t0=0x80000000+0x1000 $，$ \boxed{t0=0x80001000}$，这就是 `counter` 的地址。
+
+---
+
+把程序整体移动后执行：
+
+```
+PC = 0x80200000
+```
+
+注意，我们仍然没有修改 `auipc` 指令的任何字节。再次执行：
+
+```
+auipc t0, 1
+```
+
+结果：$ t0=0x80200000+0x1000 $，$\boxed{t0=0x80201000} $恰好是移动后的 `counter` 地址！
+
+---
+
+| 寻址方式        | 移动前       | 移动后             |
+| --------------- | ------------ | ------------------ |
+| 绝对地址 `li`   | `0x80001000` | `0x80001000`（旧） |
+| PC 相对 `auipc` | `0x80001000` | `0x80201000`（新） |
+
+这就解释了为什么 PC 相对寻址特别适合能够整体搬迁的程序。
+
+因为它依赖的是：$ \boxed{\text{目标地址}=\text{当前PC}+\text{相对偏移}} $，只要指令和目标一起移动、相对距离保持不变，原来的偏移就仍然有效。
+
+当然，真实程序的目标地址不一定刚好相距 `0x1000`。RISC-V 通常可以通过 `AUIPC` 配合 `ADDI`、`LW`、`LD` 等指令处理更一般的 PC 相对地址。具体的重定位方式由 RISC-V psABI 定义。
+
+#### 第三种情况：函数跳转会怎样？
+
+现在考虑 `JAL` 指令：
+
+```
+jal ra, func
+```
+
+> `JAL`（Jump And Link）通过 PC 相对偏移确定跳转目标，同时将返回地址写入 `ra`。
+
+假设：
+
+```
+调用位置： 0x80000000
+func地址：0x80000100
+```
+
+两者之间的距离：$ 0x80000100-0x80000000=0x100 $，因此，链接后这条指令可以使用 `0x100` 作为跳转偏移。
+
+现在把程序整体移动 `0x200000`：
+
+```
+调用位置：0x80200000
+func地址：0x80200100
+```
+
+新的偏移仍然是：$ 0x80200100-0x80200000=\boxed{0x100} $，所以这条已经正确编码的 `jal` 指令仍然能跳转到 `func`，不需要仅仅因为整体搬迁而重新修正这个偏移。
+
+> RISC-V 的 `JAL` 使用 PC 相对寻址，对应的静态重定位 `R_RISCV_JAL` 也是按照符号地址和指令地址之间的相对差值计算的。
+
+但是，这里存在两个前提：
+
+1. `JAL` 已经在链接时完成了必要的静态重定位。
+2. 函数相对于调用指令的位置没有变化，并且目标仍在指令可表示的跳转范围内。
+
+因此：PC 相对寻址通常能够适应整体移动，但不能由此推断所有使用 PC 相对指令的程序都是完全位置无关的。
+
+
+在 RISC-V ELF 中，一种用于处理此类基址相关地址的动态重定位类型是 `R_RISCV_RELATIVE`，其计算规则为 \(B+A\)，其中 \(B\) 为实际装载基址，\(A\) 为相应的加数。
+
+
 # 配置工具链
 
 ## 交叉编译器
 
 ### 命名规则
 
-GNU 交叉编译器名字格式：**`arch-vendor-os-gcc`**
+GNU 目标工具链名称通常写成 **`arch-vendor-system-gcc`**；部分名称省略 vendor。
 
-> `arch`：架构；`vendor`：厂商 / 维护方；`os`：目标系统 / ABI；`gcc`就是编译器本身
+> `arch` 是目标架构，`vendor` 是厂商字段，`system` 表示目标执行环境；末尾的`gcc`是编译器命令。
 
-1. `riscv64-linux-gnu-gcc`：**运行在 Linux 系统，使用 GNU libc**，编译跑 Linux 用户态应用程序，**动态链接，依赖 glibc 库**。
-2. `riscv64-unknown-elf-gcc`：`elf`：不是操作系统，代表裸机（bare-metal）环境，输出 ELF 格式二进制无操作系统，**不带 libc**（一般用 newlib），用途：编写 Bootloader、RTOS、内核代码，裸机固件，静态编译，**没有 Linux 系统调用**。
-3. `riscv64-unknown-linux-gnu-gcc`：目标 Linux + glibc，**动态链接，依赖 glibc 库**。
+1. `riscv64-linux-gnu-gcc`：面向 RISC-V Linux 用户态，通常配套 glibc；可按链接选项生成动态或静态程序。
+2. `riscv64-unknown-elf-gcc`：面向 RISC-V 裸机环境，不以 Linux/glibc 为目标。本机这套工具链带有 newlib 的`libc.a`；本项目编译内核时使用`-nostdlib`，不自动链接它。
+3. `riscv64-unknown-linux-gnu-gcc`：同样面向 RISC-V Linux 用户态，通常配套 glibc；链接方式由选项决定。
 
 > 为什么会有`unknown`？ GNU 三元组里`vendor`是可选字段，当这个工具链不是某个芯片厂商定制打包，社区通用构建，就填`unknown`；很多时候简写会直接省略`unknown`，所以就出现 `riscv64-linux-gnu`。
 
 | 字段               | 含义                                                         |
 | ------------------ | ------------------------------------------------------------ |
 | `riscv64`          | 目标 CPU 架构：RISC-V 64 位                                  |
-| `vendor`（中间段） | 厂商标记：`linux` / `unknown`。`unknown` = 无特定厂商，通用版本 |
-| `os`               | 目标操作系统 / ABI：`elf` / `linux-gnu`                      |
+| `vendor`（中间段） | 厂商标记；`unknown`表示未指定特定厂商，简写形式可省略此字段 |
+| `system`           | 目标执行环境：裸机`elf` / Linux`linux-gnu`                 |
 
 > 三元组完整标准：**`arch-vendor-system`**，后面追加 `-gcc` 构成编译器文件名。
 
 | 编译器                        | 目标环境     | C 库             | 典型用途                                     |
 | ----------------------------- | ------------ | ---------------- | -------------------------------------------- |
-| riscv64-linux-gnu-gcc         | Linux 用户态 | glibc            | Linux 应用，动态链接程序                     |
+| riscv64-linux-gnu-gcc         | Linux 用户态 | glibc            | Linux 用户程序，可动态或静态链接             |
 | riscv64-unknown-elf-gcc       | 裸机 / RTOS  | newlib（精简库） | U-Boot、RTOS、内核、裸机固件                 |
-| riscv64-unknown-linux-gnu-gcc | Linux 用户态 | glibc            | Linux 应用，和第一个等价，只是三元组写法完整 |
+| riscv64-unknown-linux-gnu-gcc | Linux 用户态 | glibc            | 与上一行目标环境相同，显式写出 vendor 字段   |
 
-1. **`elf` 后缀 = 裸机编译器**： 不能编译 Linux 下带系统调用的用户程序；输出 elf 给无操作系统环境，没有 glibc。
+1. **`elf` 后缀 = 裸机目标**：不提供 Linux 用户态运行环境或 glibc；是否链接 newlib 取决于编译和链接选项。
 
 2. `linux-gnu` = Linux glibc 编译器
 
-   专门编译 Linux 用户程序，可以调用 Linux 系统调用，链接 glibc。
+   面向 Linux 用户程序，可使用对应的系统调用 ABI 和 glibc。
 
    - `riscv64-linux-gnu` 是简写
    - `riscv64-unknown-linux-gnu` 是完整三元组写法 这两个编译出来的程序**二进制可以通用**，只是构建时三元组命名差异。
@@ -2463,7 +3257,7 @@ GNU 交叉编译器名字格式：**`arch-vendor-os-gcc`**
 >
 > 写 U-Boot、RTOS、裸机驱动、RISC-V 内核前期代码：`riscv64-unknown-elf-gcc`
 
-#  自定义开发板
+# 自定义开发板（QEMU 11.1.1）
 
 ## `Kconfig`配置
 
@@ -2530,8 +3324,6 @@ executable('hello', 'hello.c')
 - `project()`：每个项目的入口，声明项目名和使用的编程语言；
 - `executable()`：定义一个可执行文件目标，指定源文件。
 
-
-
 - **目标定义**：`executable()`（可执行文件）、`shared_library()`（动态库）、`static_library()`（静态库）；
 - **依赖检测**：`dependency('glib-2.0')` 自动通过 pkg-config、系统包管理器查找依赖；
 - **条件分支**：`if` / `elif` / `else`，根据平台、配置选项切换构建逻辑；
@@ -2574,21 +3366,11 @@ hw_arch += {'riscv': riscv_ss}
 
 ![板载资源](quard-star/板载资源.png)
 
-在`quard-star.h`中的`QuardStarState`结构体中为板子新建硬件，这些硬件在软件中表现为一个个的结构体，各种硬件结构体的定义在`hw/`目录下。
-
-``` c
-typedef struct QuardStarState{
-    /*private*/
-    MachineState parent;
-    
-    /*public*/
-    RISCVHartArrayState soc[QUARD_STAR_SOCKETS_MAX];  // cpu
-}
-```
+`quard_star.h`中的`QuardStarState`保存 CPU hart 数组、Flash 和 PLIC 设备；其结构体定义见下文。
 
 ## 自定义文件
 
-### `quard-star.h`
+### `quard_star.h`
 
 #### 枚举定义外设索引和中断号
 
@@ -2604,16 +3386,18 @@ enum {
     QUARD_STAR_UART1,
     QUARD_STAR_UART2,
     QUARD_STAR_RTC,
+    QUARD_STAR_VIRTIO0,
     QUARD_STAR_FLASH,
     QUARD_STAR_DRAM,
 };
 
 
 enum {
-    QUARD_STAR_UART0_IRQ = 10,  //定义了串口中断号为10
-    QUARD_STAR_UART1_IRQ = 11,
-    QUARD_STAR_UART2_IRQ = 12,
-    QUARD_STAR_RTC_IRQ   = 13,
+    QUARD_STAR_VIRTIO0_IRQ = 1,
+    QUARD_STAR_UART0_IRQ   = 10,  //定义了串口中断号为 10
+    QUARD_STAR_UART1_IRQ   = 11,
+    QUARD_STAR_UART2_IRQ   = 12,
+    QUARD_STAR_RTC_IRQ     = 13,
 };
 ```
 
@@ -2677,7 +3461,7 @@ struct MachineClass {
 };
 ```
 
-### `quard-star.c`
+### `quard_star.c`
 
 #### 硬件内存分配表
 
@@ -2710,6 +3494,7 @@ static const MemMapEntry quard_star_memmap[] = {  // 使用了enum，因此不�
     [QUARD_STAR_UART1] = { 0x10001000,        0x1000 },
     [QUARD_STAR_UART2] = { 0x10002000,        0x1000 },
     [QUARD_STAR_RTC]   = { 0x10003000,        0x1000 },
+    [QUARD_STAR_VIRTIO0] = { 0x10100000,      0x1000 },
     [QUARD_STAR_FLASH] = { 0x20000000,     0x2000000 },   
     [QUARD_STAR_DRAM]  = { 0x80000000,    0x40000000 },   
 };
@@ -2800,6 +3585,7 @@ static void quard_star_machine_init(MachineState *machine)
     quard_star_serial_create(machine);
     // 创建 RTC
     quard_star_rtc_create(machine);
+    quard_star_virtio_mmio_create(machine);
 }
 ```
 
@@ -2941,7 +3727,7 @@ static void quard_star_memory_create(MachineState *machine)
 
 本项目中没用到`fw_dynamic_info`结构体中的信息，因此没有传递`fdt_loader_addr`与`kernel_entry`
 
-在移植openSBI章节中`start.S`文件`_no_wait` 标签的代码**加载设备树的地址到寄存器 `a1`**，然后将控制权跳转到寄存器 `t0` 指向的地址。
+在移植OpenSBI章节中`start.S`文件`_no_wait` 标签的代码**加载设备树的地址到寄存器 `a1`**，然后将控制权跳转到寄存器 `t0` 指向的地址。
 
 ---
 
@@ -3190,20 +3976,6 @@ static void quard_star_aclint_create(MachineState *machine)
 
 # 制作测试固件验证UART打印
 
-## `.section`（段）
-
-在汇编语言中，`.section` 指令用于指定接下来的代码或数据应该被放置在程序的哪个内存段（section）中。不同的段可能对应于不同的内存区域和属性，例如：
-
-- 代码段（`.text`）。
-
-- 数据段（`.data`）。
-
-- 只读数据段（`.rodata`）：用于存放只读数据，如字符串常量。位于 ROM 中。
-
-- 未初始化数据段（`.bss`）：存放**未初始化**的全局和静态变量，它们在程序启动时会被自动清零。
-
-- 代码段通常位于 ROM 中；数据段（存储全局变量以及静态变量）位于 RAM 中。
-
 ## 测试固件
 
 
@@ -3274,9 +4046,9 @@ SECTIONS                /*定义段域*/
 }
 ```
 
-## 编写build.sh
+## 编写`build.sh`
 
-`lowlevle_fw_bin`在内存中烧录的地址在`run.sh`中决定。
+`lowlevel_fw.bin`写入`fw.bin`的偏移由`build.sh`中的`dd`决定；`run.sh`将整个镜像接到板卡的 pFlash 设备。
 
 ``` sh
 # # 编译 lowlevelboot
@@ -3296,42 +4068,307 @@ mkdir $SHELL_FOLDER/output/fw
 fi  
 cd $SHELL_FOLDER/output/fw
 rm -rf fw.bin
-# 填充 32K的0
+# 填充 32 MiB 的 0
 dd of=fw.bin bs=1k count=32k if=/dev/zero   
 # # 写入 lowlevel_fw.bin 偏移量地址为 0
 dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
 ```
 
-## 编写run.sh
+## 编写`run.sh`
 
-`fw_bin`在内存中烧录的地址在`run.sh`中决定。
+`run.sh`把`fw.bin`作为 pFlash 镜像连接到 QEMU；其起始物理地址由板卡内存映射决定。
 
-``` sh
-SHELL_FOLDER=$(cd "$(dirname "$0")";pwd)
-DEFAULT_VC="1080x1200"
+```sh
+SHELL_FOLDER=$(cd "$(dirname "$0")"; pwd)
+DEFAULT_VC="960x960"
 
-$SHELL_FOLDER/output/qemu/bin/qemu-system-riscv64 \
--M quard-star \
--m 1G \
--smp 8 \
--bios none \
--drive if=pflash,bus=0,unit=0,format=raw,file=$SHELL_FOLDER/output/fw/fw.bin \
--d in_asm -D qemu.log \
---serial vc:$DEFAULT_VC --serial vc:$DEFAULT_VC --serial vc:$DEFAULT_VC --monitor vc:$DEFAULT_VC --parallel none \
-# -nographic --parallel none \
+"$SHELL_FOLDER/output/qemu/bin/qemu-system-riscv64" \
+    -M quard-star -m 1G -smp 8 -bios none \
+    -drive if=pflash,bus=0,unit=0,format=raw,file="$SHELL_FOLDER/output/fw/fw.bin" \
+    -drive file="$SHELL_FOLDER/output/disk/disk.img",if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+    -d in_asm -D qemu.log \
+    -serial vc:$DEFAULT_VC -serial vc:$DEFAULT_VC -serial vc:$DEFAULT_VC \
+    -monitor vc:$DEFAULT_VC -parallel none
 ```
-# 移植openSBI
+
+# RISC-V 的 V 级启动流程
+
+## 启动链路
+
+<img src="./assets/启动流程.jpg" alt="启动流程"  />
+
+---
+
+![quardstar启动流程](./assets/quardstar启动流程.jpg)
+
+> 实心箭头表示加载操作，虚箭头表示跳转操作。
+
+### 第一阶段：从 ROM 的复位向量开始
+
+第一阶段从 MROM 的复位向量开始，在 M 模式下跳转到 **Flash 起始地址`0x20000000`执行`fw.bin(起始是lowlevel_fw.bin)`二进制文件**。（本项目通过QEMU 的`-drive if=pflash`命令把`fw.bin`**烧录**到 pFlash的`0x20000000`起始地址）。
+
+### 第二阶段：Loader 加载固件（FSBL）
+
+第二阶段为FSBL，运行在 **M 模式**下，对应到本项目就是 Flash 起始地址的`fw.bin(起始是lowlevel_fw.bin)`，`lowlevel_fw.bin`由`start.s` Loader 代码编译而来，主要是**加载 OpenSBI 固件，加载设备树**，然后跳转到 OpenSBI 处执行。（如果没有`OpenSBI`则直接加载`BootLOADER`）；
+
+### 第三阶段：SBI 配置
+
+第三阶段就是OpenSBI了，对于 OpenSBI 官方 firmware，**前一级启动阶段通常通过寄存器传入**：
+
+```assembly
+a0 = hartid
+a1 = Device Tree Blob 地址
+
+a0
+↓
+“当前我是哪个 hart？”
+
+a1
+↓
+“设备树在哪里？”
+```
+
+这是 OpenSBI 官方 firmware 明确定义的启动参数。然后跳转到`BootLOADER`处执行（也可以直接是内核，本项目中直接跳转到内核）；
+
+> OpenSBI 初始化完成之后要干什么？(假设直接跳转到内核)	
+
+假设现在：
+
+```
+OpenSBI
+M-mode
+
+↓ 初始化完成
+
+准备启动 Linux
+Linux入口 = 0x80200000
+```
+
+OpenSBI 面临一个问题：我现在在 M-mode，但 Linux 应该在 S-mode 运行。不能简单`jr 0x80200000`，因为如果只是普通 jump 无法改变 CPU 的特权级。所以 OpenSBI 要完成两个操作：
+
+```c
+1. PC → Linux入口地址
+
+2. privilege：M-mode → S-mode
+```
+
+RISC-V 提供的**修改特权级的 CSR **：
+
+```assembly
+mepc		# M 模式发生异常时的 PC 值，执行 mret 后会跳过去
+mstatus.MPP # mret 之后应该去哪个特权级
+mret        # 异常反馈指令
+```
+
+**通过 OpenSBI 中的`objects.mk`文件来指定下一阶段的跳转地址以及固件类型**。
+
+### 第四阶段：U-Boot 配置
+
+第四阶段为U-Boot，负责**初始化各种硬件**，然后拉起Linux kernel，然后跳转到 kernel 处执行。
+
+### 第五阶段：OS启动
+
+## 编写 Loader 加载固件
+
+### 编写 `start.s`
+
+`start.s`代码（Loader，编译为`lowevel_fw.bin`，通过`dd`命令写入到`0x20000000`的`fw.bin`固件的起始处）主要工作是：
+
+- **加载OpenSBI固件**`fw_jump.bin`的内容到   DRAM 内存区域`[0x80000000:0x80200000]`；
+- **加载设备树**`quard_star_sbi.dtb`的内容到 DRAM 内存区域`[0x82200000:0x82280000]`；
+- 加载完毕后**跳转到**`t0 = 0x80000000`的 DRAM 起始位置处**执行`OpenSBI`的代码**，然后 OpenSBI 通过`fw_platform_init()`函数获取设备树的信息来。（最终`a1 = 0x82200000`（设备树地址））
+
+<img src="quard-star/移植opensbi.png" alt="移植opensbi" style="zoom:80%;" />
+
+``` assembly
+	# 循环多少次 65535
+	.macro loop, cunt
+    li		t1,	0xffff  # 65535
+    li		t2,	\cunt
+1:  
+	nop
+	addi    t1, t1, -1
+	bne		t1, x0, 1b  # 1b = 1backward，引用前面最近的 1
+    li		t1,	0xffff
+	addi    t2, t2, -1
+	bne		t2, x0, 1b
+	.endm  # 结束宏
+
+
+	.macro load_data, _src_start, _dst_start, _dst_end
+	bgeu	\_dst_start, \_dst_end, 2f  # 如果 1 中的unsigned > 2
+1:
+	lw      t0, (\_src_start) # 从 \_src_start 地址中读取数据到寄存器
+	sw      t0, (\_dst_start) # 把寄存去中的数据写入到 \_dst_start 地址
+	addi    \_src_start, \_src_start, 4
+	addi    \_dst_start, \_dst_start, 4
+	bltu    \_dst_start, \_dst_end, 1b
+2:
+	.endm
+
+	.section .text  # 将当前的汇编上下文切换到代码段
+	.globl _start
+	.type _start, @function
+
+_start:
+	# load fw_jump.bin 
+	# [0x20200000:0x20400000] --> [0x80000000:0x80200000]
+    li		a0,	0x202
+	slli	a0,	a0, 20      # a0 = 0x20200000
+    li		a1,	0x800
+	slli	a1,	a1, 20      # a1 = 0x80000000
+    li		a2,	0x802
+	slli	a2,	a2, 20      # a2 = 0x80200000
+	load_data a0,a1,a2
+
+	# load quard_star_sbi.dtb
+	# [0x20080000:0x20100000] --> [0x82200000:0x82280000]
+    li		a0,	0x2008
+	slli	a0,	a0, 16       # a0 = 0x20080000
+    li		a1,	0x822
+	slli	a1,	a1, 20       # a1 = 0x82200000
+    li		a2,	0x8228
+	slli	a2,	a2, 16       # a2 = 0x82280000
+	load_data a0,a1,a2
+
+    csrr    a0, mhartid
+    li		t0,	0x0     
+	beq		a0, t0, _no_wait # 0 号 hart 则跳转到 OpenSBI 加载后的固件的地址
+	loop	0x1000
+_no_wait:
+    li		a1,	0x822
+	slli	a1,	a1, 20       # a1 = 0x82200000 设备树的地址(替代在reset_vec的操作)
+    li	    t0,	0x800
+	slli	t0,	t0, 20       # t0 = 0x80000000 跳转到OpenSBI加载后的地址开执行
+    jr      t0
+
+    .end
+```
+
+### 编写`boot.lds`
+
+``` c
+OUTPUT_ARCH( "riscv" )  /*输出可执行文件平台*/
+
+ENTRY( _start )         /*程序入口函数*/
+
+MEMORY                  /*定义内存域*/
+{ 
+    /*定义名为flash的内存域属性以及起始地址，大小等*/
+	flash (rxai!w) : ORIGIN = 0x20000000, LENGTH = 512k 
+}
+
+SECTIONS                /*定义段域*/
+{
+  .text :               /*.text段域*/
+  {
+    KEEP(*(.text))      /*将所有.text段链接在此域内，keep是保持防止优化，即无论如何都保留此段*/
+  } >flash              /*段域的地址(LMA和VMA相同)位于名为flash内存域*/
+}
+```
+
+### 编写`build.sh`
+
+- 编译得到`fw.bin`固件：
+
+  - 先创建存放固件的文件夹：
+
+    ``` shell
+    #!/usr/bin/env bash
+    set -e
+    
+    # 获取当前脚本文件所在的目录
+    SHELL_FOLDER=$(cd "$(dirname "$0")";pwd)
+    
+    # 将 RISC-V 交叉工具链加入 PATH（工具链位于仓库同级的 toolchain/bin 目录）
+    export PATH=$SHELL_FOLDER/../toolchain/bin:$PATH
+    
+    if ! command -v dtc >/dev/null 2>&1; then
+        echo "缺少 dtc(device-tree-compiler),无法生成 quard_star_sbi.dtb" >&2
+        exit 1
+    fi
+    
+    if [ ! -d "$SHELL_FOLDER/output" ]; then  
+    mkdir $SHELL_FOLDER/output
+    fi  
+    ```
+
+  - 把`start.s`**汇编**得到`start.o`：
+
+    ```sh
+    # -x 指定输入为带预处理的汇编；-c 只编译，不链接
+    cd  $SHELL_FOLDER/boot
+    
+    $CROSS_PREFIX-gcc -x assembler-with-cpp -c start.s -o $SHELL_FOLDER/output/lowlevelboot/start.o
+    ```
+
+  - 再通过**链接**把`start.o`链接生成`lowlevel_fw.elf`：
+
+    ```sh
+    # -nostartfiles 不使用默认启动文件；-Wl 把选项传给链接器
+    $CROSS_PREFIX-gcc -nostartfiles -T ./boot.lds \
+        -Wl,-Map="$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.map" \
+        -Wl,--gc-sections "$SHELL_FOLDER/output/lowlevelboot/start.o" \
+        -o "$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf"
+    ```
+
+  - 最后通过**`objcopy`**生成`.bin`文件：
+
+    ``` shell
+    $CROSS_PREFIX-objcopy -O binary -S "$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf" "$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin"
+    ```
+    
+  - 生成反汇编`lowlevel_fw.lst`：
+
+    ```sh
+    $CROSS_PREFIX-objdump --source --demangle --disassemble --reloc --wide \
+        "$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf" \
+        > "$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.lst"
+    ```
+
+    这个文件用于看最终生成了哪些机器指令。
+
+- 把`lowlevel_fw.bin `写入`fw.bin`：
+
+  ``` shell
+  # 创建 32 MiB 的 Flash 镜像
+  mkdir -p "$SHELL_FOLDER/output/fw"
+  dd of="$SHELL_FOLDER/output/fw/fw.bin" bs=1k count=32k if=/dev/zero
+  
+  # seek=0：从 Flash 镜像偏移 0 开始写
+  dd of="$SHELL_FOLDER/output/fw/fw.bin" bs=1k conv=notrunc seek=0 \
+      if="$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin"
+  ```
+
+
+在`run.sh`启动 QEMU 时把`fw.bin`作为 pFlash ：
+
+``` shell
+-drive if=pflash,bus=0,unit=0,format=raw,file="$SHELL_FOLDER/output/fw/fw.bin"
+```
+
+QEMU 的 `quard_star.c` 板级实现规定：**pFlash 的起始物理地址映射到 `0x20000000`**，因此：
+
+``` text
+flash 文件 offset        CPU 物理地址
+
+0x00000000      →        0x20000000
+0x00000001      →        0x20000001
+0x00000100      →        0x20000100
+...
+```
+
+# 移植 OpenSBI
 
 
 ## SBI
-
-### 作用（解耦）
 
 > **SBI 是一套接口规范（Specification），OpenSBI 是这套接口规范的开源实现（Implementation）。**
 
 OpenSBI ：它是 RISC-V **Supervisor Binary Interface（SBI）规范的开源参考实现**，主要运行于 **M-mode**，为运行于 **S-mode/HS-mode** 的 bootloader、hypervisor 或 OS 提供服务。这些接口服务由`SBI`规范定义。如运行在S模式的操作系统通过`SBI`来调试`M`模式的硬件资源。是**M模式与S模式之间的桥梁**。
 
-openSBI为OS提供接口（不同的SBI函数）其**通过`ecall`指令进行调用。**
+OpenSBI为OS提供接口（不同的SBI函数）其**通过`ecall`指令进行调用。**
 
 > `ecall` 是 **RISC-V 指令（instruction）**，不是“调用 SBI 的专用命令”。`ecall` 的含义是“向当前执行环境的上层环境发起调用”，当 Linux 在 S-mode 下执行它时，会产生一次 **Environment Call from S-mode** 的异常，随后进入更高特权级处理；在我们讨论的典型 OpenSBI 场景里，这个处理者就是 M-mode 下的 OpenSBI。
 
@@ -3511,7 +4548,7 @@ a6 = HART_START
 
 > 找 HSM 部门，执行 HART_START 业务。
 
-#### `ecall`的本质（Trap）
+#### `ecall`的本质（触发一次 Trap）
 
 > `ecall` 本身并不知道 SBI。`ecall` 是 RISC-V ISA 里的：**Environment Call**。它做的事情只是：“我要向执行环境发起调用。”至于**是谁处理，由当前特权级和 trap 配置决定**。
 
@@ -3857,9 +4894,7 @@ Linux ── SBI ── firmware
 
 Linux 只面对：SBI 标准接口，下面的平台差异由 firmware/OpenSBI 消化。
 
-## openSBI
-
-### 本质是协议的实现
+## OpenSBI
 
 OpenSBI是：**用 C + RISC-V Assembly 写出来的一套 SBI 实现。**所以：
 
@@ -3911,286 +4946,51 @@ sbi_timer_set(...)
 
 官方的平台移植指南也是这个设计：平台通过 `struct sbi_platform` 等机制向 OpenSBI 提供平台操作。
 
-### 三种固件类型
+### 三种固件类型（如何跳转下一级）
 
-> openSBI 最大的问题其实只有：**“我完成openSBI的配置后，下一步跳到哪里？”**
+> OpenSBI 最大的问题其实只有：**“我完成OpenSBI的配置后，下一步跳到哪里？”**
 
-`openSBI`有三种 `Firmware`类型:
+`OpenSBI`有三种 `Firmware`类型:
 
 - `FW_JUMP`：该固件假定**下一级**引导阶段入口（如引导加载程序或操作系统内核）**具有固定地址**，跳转到此地址。
 
-- `FW_PAYLOAD`：此类型固件**直接包含**在 OpenSBI 固件执行之后**下一级**要运行的引导阶段的二进制代码，通常是引导加载程序（U-Boot）或操作系统内核（Liunx）。通常是U-Boot或者Linux。这是兼容Linux的RISC-V硬件所默认的`firmware`.
+- `FW_PAYLOAD`：将**下一级镜像直接打包**进 OpenSBI 固件，例如 U-Boot 或 Linux 内核。
 
-- `FW_DYNAMIC`：根据**上一级**阶段**传入`fw_dynamic_info` 结构体**告诉下一级的跳转地址，其地址通过 `a2` 传给 OpenSBI。通常是U-Boot SPL使用它。（qemu默认的`firmware`）
+- `FW_DYNAMIC`：由**上一级阶段通过`a2`传入`fw_dynamic_info`结构体**，告知 OpenSBI 下一级入口等信息。
 
-本项目采用的openSBI为`FW_JUMP`类型，其`opensbi_fw.bin` 文件存储在`Flash`内，初始化时会被加载到`DRAM 0x80000000`，因此 ROM 内的`fw_dynamic_info`用不到。
+本项目采用的OpenSBI为`FW_JUMP`类型，其`fw_jump.bin` 文件存储在`Flash`内，初始化时会被加载到`DRAM 0x80000000`，因此 ROM 内的`fw_dynamic_info`用不到。
 
-> **openSBI 的运行地址在`objects.mk`文件中指定，因此不需要使用`.lds`文件指定运行地址。**
-
-需自行编写设备树编译，将设备树的地址传递给openSBI（通过`a1`寄存器传递）。
-
-## RiscV 的 5 级启动流程
-
-### `.elf`文件
-
-#### 运行地址/装载地址
-
-**LDS（linker script）里写的地址，不等于“虚拟内存地址”。**更准确地说，它指定的是 **VMA（Virtual Memory Address，运行地址）** 和/或 **LMA（Load Memory Address，装载地址）**。在裸机 RISC-V 环境里，MMU 尚未开启时这些地址通常就是 CPU 看到的物理地址。 LDS 决定“程序运行时认为自己应该放在哪里”，比如：
+> **通过平台的`\platform\quard-star\objects.mk`中的`FW_TEXT_START`指定 OpenSBI 的下一级运行地址**；OpenSBI 的`firmware/fw_base.ldS`链接脚本使用这个值布局固件。
 
 ``` assembly
-SECTIONS
-{
-    . = 0x20000000;
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
 
-    .text : {
-        *(.text.init)
-        *(.text*)
-    }
+# Compiler flags
+platform-cppflags-y =
+platform-cflags-y =
+platform-asflags-y =
+platform-ldflags-y =
 
-    .rodata : {
-        *(.rodata*)
-    }
+# Objects to build
+platform-objs-y += platform.o
 
-    .data : {
-        *(.data*)
-    }
-}
+# Blobs to build
+FW_JUMP=y
+FW_TEXT_START=0x80000000
+FW_JUMP_ADDR=0x0
 ```
 
-这里`. = 0x20000000;`表示：
+需自行编写设备树编译，并**通过`a1`寄存器传递设备树的地址**给 OpenSBI，在`start.s`代码的末尾写入了：
 
-> 从链接器的角度，后面的 section 从地址 `0x20000000` 开始布局。
-
-所以：
-
-```
-_start
-uart_main
-.text
-.rodata
-...
+``` assembly
+li		a1,	0x822
+slli	a1,	a1, 20       //a1 = 0x82200000
 ```
 
-最终在 ELF 中会被赋予类似：
 
-```
-_start       → 0x20000000
-uart_main    → 0x200000xx
-...
-```
-
-这里的`0x20000000`是程序的 **VMA**。
-
-在裸机环境里没有启用页表/MMU，所以：虚拟地址 ≈ 物理地址。因此 CPU 真正执行的就是物理地址`0x20000000`。
-
-### `.bin`文件
-
-执行：
-
-```makefile
-riscv64-unknown-elf-objcopy \
-    -O binary -S \
-    build/uart_test.elf \
-    build/uart_test.bin
-```
-
-这一步把 ELF 文件编译为 纯二进制固件。ELF 是带地址信息的：
-
-```
-.text     → 0x20000000
-.data     → 0x20001000
-entry     → 0x20000000
-...
-```
-
-而`.bin`固件基本就是**一串纯字节。**`.bin` 本身通常没有：
-
-```
-“我应该加载到 0x20000000”
-```
-
-这样的元数据。那 `.bin` 最终到底被放到目标机器哪里？这不是 `.bin` 自己决定的。而是：**由加载它的人决定。**例如：
-
-```
-BootROM
-Bootloader
-QEMU
-烧录工具
-JTAG
-OpenOCD
-```
-
-谁负责加载，就由谁决定：**这个 bin 的第 0 字节对应 CPU 的哪个物理地址。**
-
-### 启动链路
-
-<img src="quard-star/启动流程.jpg" alt="启动流程"  />
-
----
-
-![quardstar启动流程](./assets/quardstar启动流程.jpg)
-
-> 实心箭头表示加载操作，虚箭头表示跳转操作。
-
-第一阶段为ZSBL：**启动流程是从`ROM`上的代码开始**，运行在 **M 模式**下。本项目 ROM 上的代码就是复位向表`reset_vec[10]`内的代码，把`LOADER(start.s)`编译的`.bin`固件加载到`SRAM`里然后跳转执行`LOADER`这步本项目通过 QEMU 的`-drive`命令直接将固件(`loader`)加载到了`Flash`的地方，所以`ROM`上的代码不用执行加载`loader`操作。
-
----
-
-第二阶段为FSBL，运行在 **M 模式**下，对应到本项目就是`Flash`上的代码，这段代码**加载 openSBI 固件，加载设备树**，然后跳转到openSBI 处执行。（如果没有`openSBI`则直接加载`BootLOADER`）；
-
----
-
-第三阶段就是openSBI了，对于 OpenSBI 官方 firmware，**前一级启动阶段通常通过寄存器传入**：
-
-```assembly
-a0 = hartid
-a1 = Device Tree Blob 地址
-
-a0
-↓
-“当前我是哪个 hart？”
-
-a1
-↓
-“设备树在哪里？”
-```
-
-这是 OpenSBI 官方 firmware 明确定义的启动参数。然后跳转到`BootLOADER`处执行（也可以直接是内核，本项目中直接跳转到内核）；
-
-> OpenSBI 初始化完成之后要干什么？(假设直接跳转到内核)	
-
-假设现在：
-
-```
-OpenSBI
-M-mode
-
-↓ 初始化完成
-
-准备启动 Linux
-Linux入口 = 0x80200000
-```
-
-OpenSBI 面临一个问题：我现在在 M-mode，但 Linux 应该在 S-mode 运行。不能简单`jr 0x80200000`，因为如果只是普通 jump 无法改变 CPU 的特权级。所以 OpenSBI 要完成两个操作：
-
-```
-1. PC → Linux入口地址
-2. privilege：M-mode → S-mode
-```
-
-RISC-V 提供的关键 CSR 寄存器就是：
-
-```assembly
-mepc		# M 模式发生异常时的 PC 值，执行 mret 后会跳过去
-mstatus.MPP # mret 之后应该去哪个特权级
-mret        # 异常反馈指令
-```
-
----
-
-第四阶段为U-Boot，负责**初始化各种硬件**，然后拉起Linux kernel，然后跳转到 kernel 处执行。
-
----
-
-第五阶段为OS。
-
-### 本项目的启动链路
-
-- 编译得到`.bin`固件：
-
-  - 先创建存放固件的文件夹：
-
-    ``` shell
-    CROSS_PREFIX=riscv64-unknown-elf
-    
-    if [ ! -d "$SHELL_FOLDER/output/lowlevelboot" ]; then  
-    mkdir $SHELL_FOLDER/output/lowlevelboot
-    fi  
-    
-    cd  $SHELL_FOLDER/boot
-    ```
-
-  - 把`start.s`**汇编**得到`start.o`：
-
-    ``` shell
-    $CROSS_PREFIX-gcc \
-        -x assembler-with-cpp \	# 把这个文件当作“带 C 预处理器的汇编代码”。（允许出现#define、#include）
-        -c start.s \  			# -c 表示只汇编不链接
-        -o $SHELL_FOLDER/output/lowlevelboot/start.o
-    ```
-
-  - 再通过**链接**把`start.o`链接生成`lowlevel_fw.elf`：
-
-    ``` shell
-    $CROSS_PREFIX-gcc \
-        -nostartfiles \		# 不使用 GCC 默认 CRT startup files。
-        
-        -T./boot.lds  \		# 指定链接器
-        
-        # -Wl 表示把后面的参数交给 linker ld。
-        -Wl,-Map=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.map \  #要求 linker 额外生成链接 Map 文件。
-        -Wl,--gc-sections \ # 链接时删除没有被使用的 section。
-        
-        $SHELL_FOLDER/output/lowlevelboot/start.o \
-        -o $SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.elf
-    ```
-
-  - 最后通过**`objcopy`**生成`.bin`文件：
-
-    ``` shell
-    objcopy -O binary -S lowlevel_fw.elf lowlevel_fw.bin
-    ```
-    
-  - 生成反汇编`lowlevel_fw.lst`：
-  
-    ``` shell
-    objdump \
-        --source \
-        --demangle \
-        --disassemble \
-        --reloc \
-        --wide \
-        lowlevel_fw.elf \
-        > lowlevel_fw.lst
-    ```
-  
-    这个文件用于看最终生成了哪些机器指令。
-
-- 把`lowlevel_fw.bin `写入`fw.bin`：
-
-  ``` shell
-  # 先创建 32MB 的空Flash
-  dd of=fw.bin bs=1k count=32k if=/dev/zero
-  
-  # 写入 lowlevelboot
-  dd \
-      of=fw.bin \
-      bs=1k \
-      conv=notrunc \
-      seek=0 \		 	# seek=0 意味着从 Flash 文件偏移 0 开始写
-      if=lowlevel_fw.bin
-  ```
-
-- 启动 QEMU 时把`fw.bin`加载到`SRAM`：
-
-``` shell
--drive if=pflash,bus=0,unit=0,format=raw,file=$(FLASH_IMG)
-```
-
-QEMU 的 `quard-star.c` 板级实现规定：**pFLASH 的起始物理地址映射到 `0x20000000`**，因此：
-
-``` text
-flash 文件 offset        CPU 物理地址
-
-0x00000000      →        0x20000000
-0x00000001      →        0x20000001
-0x00000100      →        0x20000100
-...
-```
-
-## openSBI 源码架构
-
-### 架构地图
+## OpenSBI 源码架构
 
 > **firmware 负责进门，lib/sbi 负责干活，platform 和 lib/utils 负责跟具体硬件打交道。**
 
@@ -4222,13 +5022,11 @@ OpenSBI
 
 #### `fw_base.S`（处理 C 代码运行环境）
 
-##### 总览
-
 > 解决：**在 C 代码能够正常运行以前，CPU 环境怎么准备好？**
 
-其中非常关键的是`firmware/fw_base.S`，第一次真正读 OpenSBI 源码，就从这里开始。`fw_base.S` 是 **OpenSBI 所有固件类型（fw_jump / fw_payload / fw_dynamic）共享的汇编启动基座**。当上一级引导（在你的 quard-star 里就是 `lowlevel_fw` / U-Boot）把控制权交给 OpenSBI 时，CPU 处于 **M-mode（机器模式）**，第一条执行的指令就是这里的 `_start`。大致执行：
+其中非常关键的是`firmware/fw_base.S`，第一次真正读 OpenSBI 源码，就从这里开始。`fw_base.S` 是 **OpenSBI 所有固件类型共享的汇编启动基座**。当上一级引导（在你的 quard-star 里就是 `lowlevel_fw.bin`）把控制权交给 OpenSBI 时，CPU 处于 **M-mode（机器模式）**，第一条执行的指令就是这里的 `_start`。大致执行：
 
-```
+```c
   上一级loader (a0=hartid, a1=FDT地址)
         │
         ▼
@@ -4255,13 +5053,13 @@ boot hart
 读懂这个文件的前提是要理解 OpenSBI 的几个设计：
 
 1. **Boot HART（引导核）**：多核系统上电后所有核同时跑 `_start`，但重定位、清 BSS、初始化 scratch 这些**"全局只做一次"的工作**，只能由**一个**核来做，这个核就叫 Boot Hart，其余核要等它做完。
-2. Cold boot VS Warm boot：
+2. **Cold boot VS Warm boot**：
    - `_start` = 冷启动入口（第一次上电）
    - `_start_warm` = 热启动入口（后续核、或核被唤醒时进入）
 3. **Scratch space（每核私有数据区）**：每个 hart 有一块 `SBI_SCRATCH_SIZE` 大小的内存，保存它的**栈指针**、**trap 出口**、**平台指针**等。`tp` 寄存器和 `mscratch` CSR 都指向它。
 4. **重定位（Relocation）**：固件可能被加载到任意物理地址，但代码是按链接地址写的，需要搬运到链接地址（`FW_TEXT_START`）才能正确运行。
 
-##### 辅助宏（搬运`a0-a4`）
+##### 辅助宏（搬运`a0-a4`，保存上一级传递的数据）
 
 调用 C 函数（`call`）会破坏 `a0-a4`，而这些寄存器存着上一级传来的启动参数，所以每次 `call` 前后用 `MOV_xR` 把它们暂存到 `s` 寄存器再恢复。
 
@@ -4291,39 +5089,11 @@ boot hart
 .endm
 ```
 
-##### 选取 Boot Hart
+##### 选取引导核 & 重定位
 
 > hart = 硬件线程（Hardware Thread），可以理解为一个能独立取指、译码、执行的 CPU 核/硬件线程；每个 hart 有自己私有的寄存器状态，但和别的 hart 共享内存、总线和外设。
 
-注意这里区分**两种等待方式**：
-
-- PIC：PIC 位置无关没有代码复制(relocate copy)，无需等待代码重定位完毕，可以直接进入等待 boot_hart 。
-
-- 普通模式：**需要单独同步分配**，因为：**boot hart 在复制自己**，假设：加载地址`0x80000000`，链接地址`0x80200000`启动：
-
-  ```
-  hart0
-  hart1
-  hart2
-  hart3
-  ```
-
-  全部从`0x80000000`，进入 `_start`，然后 hart0 抽中开始复制整个固件，**复制过程中 0x80200000 区域正在写入**，此时如果`hart1`直接执行：
-
-  ```assembly
-  jr _wait_relocate_copy_done
-  ```
-
-  但是`_wait_relocate_copy_done`已经位于新的 link address：`0x80200000`，可能发生：
-
-  - 指令还没有复制完成；
-  - 数据段不一致；
-  - relocation entry没有修复；
-
-  结果直接跑飞。所以必须让非引导核此刻仍在**加载地址**的旧副本上执行。
-
-
-具体代码实现：
+**选取引导核：**
 
 ``` assembly
 	.section .entry, "ax", %progbits
@@ -4337,8 +5107,8 @@ _start:
 	add	a6, a0, zero
 	MOV_3R	a0, s0, a1, s1, a2, s2
 	li	a7, -1
-	
 	beq	a6, a7, _try_lottery				# 返回-1 => 没指定，用抽签决定
+	
 	bne	a0, a6, _wait_relocate_copy_done	# 我不是引导核 => 去等待
 	
 _try_lottery:
@@ -4350,26 +5120,73 @@ _try_lottery:
 	lla	t0, _load_start
 	lla	t1, _fw_start
 	REG_S	t1, 0(t0)
+```
 
+---
 
-# PIC:
-_wait_relocate_copy_done:   # PIC 位置无关没有代码复制(relocate copy)，可以直接运行，直接进入等待 boot_hart 。
-	j	_wait_for_boot_hart
-# NONE PIC:
-_wait_relocate_copy_done:
-	lla	t0, _fw_start
-	lla	t1, _link_start
-	REG_L	t1, 0(t1)
-	beq	t0, t1, _wait_for_boot_hart
-	lla	t2, _boot_status
-	lla	t3, _wait_for_boot_hart
-	sub	t3, t3, t0
-	add	t3, t3, t1
-	
-		
+**重定位：**
+
+> OpenSBI 被上级 Loader 加载的真实地址和编译时指定的 VMA 可能不一致，而此时还属于启动阶段（没有Linux的程序 Loader），因此需要自行进行重定位检测
+
+具体表现为`_wait_relocate_copy_done`的**两种等待方式**：
+
+- `#ifdef FW_PIC`：固件不搬家，只修复数据中的绝对地址引用（即使是 `0x80200000`，固件被加载到`0x80000000`，它也不需要复制到 LMA）；其他 hart 可以在原位置等待 boot hart 初始化完成。直接`j _wait_for_boot_hart`：
+
+  ``` assembly
+  #ifdef FW_PIC
+  /.../
+  _wait_relocate_copy_done:   # PIC 位置无关没有代码复制(relocate copy)，可以直接运行，直接进入等待 boot_hart 。
+  	j	_wait_for_boot_hart
+  ```
+
+- `else`：需要单独同步分配。因为：**boot hart 在复制移动整个 OpenSBI 固件**，假设：真实加载的地址为`0x80000000`，而链接时指定的 VMA 为：`0x80200000`，启动后所有 Hart 全部从真实加载的地址`0x80000000`进入 `_start`，然后 Hart0 抽中作为引导核开始复制移动整个固件，此时如果 Hart1 直接执行：
+
+  ```assembly
+  jr _wait_relocate_copy_done
+  ```
+  
+  但是`_wait_relocate_copy_done`已经位于新的链接时指定的 VMA：`0x80200000`，可能发生：
+  
+  - 指令还没有复制完成；
+  - 数据段不一致；
+
+  结果直接跑飞。所以必须让非引导核在通过旧地址上跳转一会儿，等待`BOOT_STATUS_RELOCATE_DONE`：
+  
+  ``` assembly
+  _wait_relocate_copy_done:
+  	lla	t0, _fw_start	# 使用lla相对寻址（展开为 auipc和addi）来获取fw_start符号真实加载地址，存储在 t0
+  	lla	t1, _link_start	# 获取链接时指定的_fw_start的 VMA，存在 t1
+  	REG_L	t1, 0(t1)
+  	
+  	beq	t0, t1, _wait_for_boot_hart	# 如果是相等则不用搬移，直接跳
+  	
+  	lla	t2, _boot_status			# t2 为旧 _boot_status 真实地址
+  	lla	t3, _wait_for_boot_hart		# t3 为旧 _wait_for_boot_hart 真实地址
+  	sub	t3, t3, t0					# t3 为 _wait_for_boot_hart 在固件中的偏移量
+  	add	t3, t3, t1					# t3 为	_wait_for_boot_hart 的新地址
+  1:
+  	li	t4, BOOT_STATUS_RELOCATE_DONE	# 1
+  	REG_L	t5, 0(t2)	# 读取旧的 _boot_status 的值
+  	
+  	/* Reduce the bus traffic so that boot hart may proceed faster */
+  	nop
+  	nop
+  	nop
+  	
+  	bgt     t4, t5, 1b
+  	
+  	/* 复制完成就跳转到新的 _wait_for_boot_hart*/
+  	jr	t3
+  ```
+
+---
+
+**等待的本质就是检查`_boot_status`这个标志位**，引导核初始化完毕会置位：
+
+``` assembly
 /* waiting for boot hart to be done (_boot_status == 2) */
 _wait_for_boot_hart:
-	li	t0, BOOT_STATUS_BOOT_HART_DONE
+	li	t0, BOOT_STATUS_BOOT_HART_DONE	# 1
 	lla	t1, _boot_status	# 检查 Boot Hart 是否初始化完毕
 	REG_L	t1, 0(t1)
 	/* Reduce the bus traffic so that boot hart may proceed faster */
@@ -4379,23 +5196,11 @@ _wait_for_boot_hart:
 	bne	t0, t1, _wait_for_boot_hart  # 一直循环检查
 ```
 
-##### 代码重定位
+除此之外代码中的：
 
-> 为什么需要重定位？
-
-OpenSBI 常常作为固件被上一级加载，上一级加载器可能不按 openSBI 固件中的 LMA（这里 VMA = LMA，按照 LMA 加载） 放，而是把整个固件搬到它自己选定的内存地址，比如 `0x80200000`。
-
-```text
-编译认为：0x80000000
-
-实际运行：0x80200000
-```
-
-那么代码中的：
-
-- 全局变量地址
-- 函数地址
-- GOT(Global Offset Table)
+- 全局变量地址；
+- 函数地址；
+- GOT(Global Offset Table)；
 
 都需要修正。因此：
 
@@ -4407,11 +5212,11 @@ OpenSBI 常常作为固件被上一级加载，上一级加载器可能不按 op
 运行地址
 ```
 
-对于 PIC(Position Independent Code)，主要处理`GOT(Global Offset Table)`和`dynamic relocation table`，遍历重定位表（`__rel_dyn_start` ~ `__rel_dyn_end`），把 GOT 表项修正为运行时真实地址，并把偏移存入 `_runtime_offset`。
+对于 PIC：主要处理`GOT(Global Offset Table)`和`dynamic relocation table`，遍历重定位表（`__rel_dyn_start` ~ `__rel_dyn_end`），把 GOT 表项修正为运行时真实地址，并把偏移存入 `_runtime_offset`。
 
 对于普通模式：**直接复制整个firmware到正确位置**。
 
-`_wait_relocate_copy_done`：只有 boot hart 负责 relocation。其他 hart：不能同时复制代码。流程：
+`_wait_relocate_copy_done`：只有 boot hart 负责 relocation。其他 Hart：不能同时复制代码。流程：
 
 ```
 所有hart启动
@@ -4434,7 +5239,7 @@ _boot_status=RELOCATE_DONE
 继续启动
 ```
 
-最后Boot Hart告诉其他 hart：代码已经搬迁完成，可以继续执行：
+最后 Boot Hart 告诉其他 hart：代码已经搬迁完成，可以继续执行：
 
 ```assembly
 li t1, BOOT_STATUS_RELOCATE_DONE
@@ -4484,7 +5289,7 @@ REG_S t1,0(t0)
    	blt	s4, s5, _bss_zero
    ```
 
-3. **临时 trap 处理器**：把 `mtvec` 指向 `_start_hang`——此时还没建好正式环境（scratch 未建立、stack 未建立、C 环境不存在），一旦出异常就直接挂死（便于调试）。
+3. **设置临时 trap 处理器**：把 `mtvec` 指向 `_start_hang`——此时还没建好正式环境（scratch 未建立、stack 未建立、C 环境不存在），一旦出异常就直接挂死（便于调试）。
 
    ``` assembly
    /* 设置临时的 trap handler，没有scratch，stack，C环境，出现异常直接挂死 */
@@ -4513,6 +5318,7 @@ REG_S t1,0(t0)
    MOV_5R	s0, a0, s1, a1, s2, a2, s3, a3, s4, a4
    call	fw_save_info
    MOV_5R	a0, s0, a1, s1, a2, s2, a3, s3, a4, s4
+   ```
 
 6. **平台初始化**：`call fw_platform_init`（弱符号，默认为空，平台可覆盖）。
 
@@ -4561,7 +5367,7 @@ REG_S t1,0(t0)
 
 ``` assembly
 	/* 给每个 Hart 创建 scratch，tp 以 _fw_end 开始 */
-	lla	tp, _fw_end  # openSBI 固件的结束地址 
+	lla	tp, _fw_end  # OpenSBI 固件的结束地址 
 	mul	a5, s7, s8   # s7 = hart_count, s8 = stack_size
 	add	tp, tp, a5
 	/* Keep a copy of tp */
@@ -4590,7 +5396,7 @@ _scratch_init:
 	/* 初始化 scratch space */
 	
 	/* 存储 fw_start 和 fw_size */
-	lla	a4, _fw_start	# openSBI 固件的起始地址
+	lla	a4, _fw_start	# OpenSBI 固件的起始地址
 	sub	a5, t3, a4
 	REG_S	a4, SBI_SCRATCH_FW_START_OFFSET(tp)
 	REG_S	a5, SBI_SCRATCH_FW_SIZE_OFFSET(tp)
@@ -4639,7 +5445,7 @@ _scratch_init:
 	blt	t1, s7, _scratch_init
 ```
 
-##### FDT 重定位 & 通知其他 Hart
+##### FDT 重定位
 
 如果上一启动阶段传了设备树地址（a1 ≠ 0），且**平台指定了新的 FDT 存放地址，就把设备树从源地址拷到目标地址**。核心流程：
 
@@ -4688,7 +5494,7 @@ REG_L t3,0(t0)
 REG_S t3,0(t1)
 ```
 
-4. 标记boot hart 初始化完成，Second Hart 也进入`_start_warm`，Boot Hart跳转进入 `_start_warm`：
+4. 标记 Boot Hart 初始化完成，Second Hart 也进入`_start_warm`，Boot Hart 跳转进入 `_start_warm`：
 
 ``` assembly
 # 所有核最终都汇聚到 _start_warm
@@ -4703,7 +5509,7 @@ _fdt_reloc_done:
 	j	_start_warm
 ```
 
-##### `_start_warm`：每核通用初始化 + 进入 C 
+##### `_start_warm`：每个核初始化寄存器 + 初始化`scratch` + 调用`sbi_init` 
 
 这是**每个 hart 都要走**的路径：
 
@@ -4721,7 +5527,7 @@ _fdt_reloc_done:
   ```
 
 
-- 然后**找 Hart 数量和 scratch 大小**，并**找到自己的 Hart ID**：
+- 然后**在`platform/quard-star/platform.c`中找板子的 Hart 数量和 scratch 大小**，并**找到自己的 Hart ID**：
 
   ``` assembly
   /* Find HART count and HART stack size */
@@ -4736,10 +5542,10 @@ _fdt_reloc_done:
   #endif
   
   csrr s6, CSR_MHARTID # s6 = hart_id(index)
-  REG_L	s9, SBI_PLATFORM_HART_INDEX2ID_OFFSET(a4) 		# 硬件hart_id不一定连续，openSBI需要连续；需要转换表得到 hart_index
+  REG_L	s9, SBI_PLATFORM_HART_INDEX2ID_OFFSET(a4) 		# 硬件hart_id不一定连续，OpenSBI需要连续；需要转换表得到 hart_index
   ```
 
-- **找到并设置本核 `scratch` 指针 和 `sp` 指针（此时`scratch、sp、tp`都指向`scratch space`）**：
+- **找到并设置本核 `CSR_MSCRATCH` 寄存器 和 `sp` 寄存器**（此时`CSR_MSCRATCH、sp、tp`都指向`scratch space top`），**`scratch_space`在`_fw_end`之后**，也就是紧随 OpenSBI 物理地址之后：
 
   ``` assembly
   lla tp,_fw_end 	# tp = firmware结束地址
@@ -4748,7 +5554,7 @@ _fdt_reloc_done:
   add tp,tp,a5
   
   mul a5,s8,s6   			# tp = tp - hart_index × scratch_size (current_scratch_top_address)
-  sub tp,tp,a5
+  sub tp,tp,a5			# 现在 tp 就是指向各自的 scratch space
   
   li a5,SBI_SCRATCH_SIZE	# tp = scratch_start_address
   sub tp,tp,a5
@@ -4757,7 +5563,7 @@ _fdt_reloc_done:
   add sp,tp,zero			# 设置 sp 寄存器（创建栈）
   ```
 
-- **设置`mtvec`寄存器**：`mtvec` 指向 `_trap_handler`（RV32 且带 H 扩展时用 `_trap_handler_rv32_hyp`）：
+- **设置`mtvec`寄存器**：`mtvec` 指向 `_trap_handler`（所有 Hart 都指向同一个 `trap_handler`，RV32 且带 H 扩展时用 `_trap_handler_rv32_hyp`）：
 
   ``` assembly
   lla a4,_trap_handler
@@ -4765,7 +5571,7 @@ _fdt_reloc_done:
   csrw CSR_MTVEC,a4
   ```
 
-- 进入 C 世界：
+- 进入 C 世界，**调用`sbi_init`**：
 
   ``` assembly
   csrr	a0, CSR_MSCRATCH     # a0 = 本核scratch指针
@@ -4985,7 +5791,7 @@ _trap_exit_rv32_hyp:
 
 ##### FDT内嵌
 
-- `fw_fdt_bin`：当定义了 `FW_FDT_PATH` 时，用 `.incbin` 把设备树二进制直接嵌进固件。
+- `fw_fdt_bin`：当定义了 `FW_FDT_PATH` 时，用 `.incbin` 把设备树的`.bin`直接嵌进固件。
 
 ``` assembly
 #ifdef FW_FDT_PATH
@@ -5002,7 +5808,7 @@ fw_fdt_bin:
 #endif
 ```
 
-### `/lib/sbi/`（openSBI 的主体）
+### `/lib/sbi/`（OpenSBI 的主体）
 
 > **平台无关（platform-independent）的 SBI 核心实现**
 
@@ -5052,15 +5858,37 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 
 #### `sbi_init.c`
 
-##### 总览
+前面 `fw_base.S` 中有一个 Hart 胜出。它负责的事情大致是：
 
-`fw_base.S` 的 boot hart 和 `sbi_init.c` 的 coldboot hart不是同一个概念。
+```
+fw_base.S
+    │
+    ├── 选一个 hart
+    │
+    ├── relocation
+    ├── BSS
+    ├── platform 初步准备
+    ├── 给所有 hart 建 scratch
+    ├── FDT relocation
+    │
+    └── BOOT_HART_DONE
+```
 
-coldboot 做全局一次性初始化，warm startup 做 per-hart 初始化。
+**所有 hart 最终都会进入 `_start_warm`**。然后每个 Hart 都执行：
 
-warmboot 不一定是“第一次启动的从核”，还可能是 suspended hart 的 resume。
+```assembly
+csrr a0, CSR_MSCRATCH
+call sbi_init
+```
 
-`coldboot_done + acquire/release + IPI + WFI` 构成了 C 层多 hart 初始化同步机制。
+所以此时：
+
+```
+hart0 ─┐
+hart1 ─┤
+hart2 ─┼──→ sbi_init()
+hart3 ─┘
+```
 
                                                sbi_init(scratch)
                                                       │
@@ -5194,46 +6022,7 @@ misa_extension('S')
 
 ##### 再次抽奖
 
-前面 `fw_base.S` 中有一个 hart 胜出。它负责的事情大致是：
-
-```
-fw_base.S
-    │
-    ├── 选一个 hart
-    │
-    ├── relocation
-    ├── BSS
-    ├── platform 初步准备
-    ├── 给所有 hart 建 scratch
-    ├── FDT relocation
-    │
-    └── BOOT_HART_DONE
-```
-
-这个 hart 我们暂时叫`firmware boot hart`，其他 hart 等它：
-
-```
-_wait_for_boot_hart:
-    ...
-```
-
-等完成之后，**所有 hart 最终都会进入 `_start_warm`**。你的源码明确是 boot hart 设置 `BOOT_HART_DONE` 后自己跳 `_start_warm`，其他 hart 等到状态满足后也落入 `_start_warm`。然后每个 hart 都执行：
-
-```assembly
-csrr a0, CSR_MSCRATCH
-call sbi_init
-```
-
-所以此时：
-
-```
-hart0 ─┐
-hart1 ─┤
-hart2 ─┼──→ sbi_init()
-hart3 ─┘
-```
-
-问题来了：**`sbi_init()` 里面很多全局结构仍然只能初始化一次，谁来做？**于是出现**第二次 lottery**。
+问题来了：**`sbi_init()` 里面很多全局结构仍然只能初始化一次，谁来做？**于是出现第二次 lottery。
 
 ```c
 // 初始：coldboot_lottery = 0
@@ -5253,21 +6042,14 @@ hart3 ─┘
 }
 ```
 
-假设 hart0、hart1、hart2 同时过来。hart1 最先`atomic_xchg(&coldboot_lottery, 1)`，读旧值 0 同时写入 1，于是：
+假设 Hart0、Hart1、Hart2 同时过来。Hart1 最先`atomic_xchg(&coldboot_lottery, 1)`，读旧值 0 同时写入 1，于是：
 
 ```
 返回 0
 coldboot = TRUE
 ```
 
-hart1 胜出。hart0 后来：
-
-```
-读旧值 1
-写 1
-```
-
-所以走 warmboot。这就是：
+hart1 胜出。hart0 后来：读旧值 1，写 1，所以走 WarmBoot Hart。这就是：
 
 ```
 hart0 ─┐
@@ -5285,15 +6067,11 @@ hart0 / hart2
         └── init_warmboot()
 ```
 
-源码自己也写得非常明确：
-
-> use a lottery mechanism to select coldboot HART。
-
 ##### 执行`init_coldboot(*scratch, hartid)`
 
 这个函数很长，但你千万不要逐行死记，分成 4 个阶段。
 
-- **首先建立OpenSBI 基础管理结构**：最前面两件事源码甚至特别强调：
+- **首先建立OpenSBI 基础管理结构**：
 
   ```c
   static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
@@ -5302,12 +6080,12 @@ hart0 / hart2
   	unsigned long *init_count;
   	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
   
-  	/* Note: This has to be first thing in coldboot init sequence */
+  	/* 必须最先做：初始化 scratch space */
   	rc = sbi_scratch_init(scratch);
   	if (rc)
   		sbi_hart_hang();
   
-  	/* Note: This has to be second thing in coldboot init sequence */
+  	/* 必须第二个做：初始化 Domain */
   	rc = sbi_domain_init(scratch, hartid);
   	if (rc)
   		sbi_hart_hang();
@@ -5325,7 +6103,7 @@ hart0 / hart2
   建立“哪些 hart / 内存 / 资源属于哪个 domain”
   ```
 
-- 然后**在每个 hart 的 `sbi_scratch` 扩展区域里申请一个统一 offset**：
+- 然后**在每个 hart 的 `sbi_scratch` 扩展区域里申请一个一样的offset**：
 
   ``` c
   // 全局静态变量
@@ -5502,16 +6280,19 @@ hart0 / hart2
 
   平台代码这时看到的是一个已经完整建立起来的系统。
 
-- **最后`wake_coldboot_harts()`，唤醒其他执行`wait_for_coldboot`的 warmboot**，这一步极其重要：
+- **最后`wake_ColdBoot_Harts()`，唤醒其他执行`wait_for_coldboot`的 WarmBoot Hart**，这一步极其重要：
 
-  ```
+  ```c
   wake_coldboot_harts(scratch, hartid);
   ```
 
-  `init_warmboot(scratch, hartid)`首先执行`wait_for_coldboot()`，`warmboot hart` 会：
 
-  ```c
-  static void wait_for_coldboot(struct sbi_scratch *scratch, u32 hartid)
+##### 执行`init_warmboot(*scratch, hartid)`
+
+`init_warmboot(scratch, hartid)`首先执行`wait_for_coldboot()`，`warmboot hart` 会：
+
+```c
+static void wait_for_coldboot(struct sbi_scratch *scratch, u32 hartid)
       
       unsigned long saved_mie, cmip;
   	/* Save MIE CSR */
@@ -5539,7 +6320,7 @@ hart0 / hart2
   	/* Restore MIE CSR */
   	csr_write(CSR_MIE, saved_mie);
   }
-  ```
+```
 
   这意味着 warm hart 不会一直疯狂`while (!coldboot_done)`占总线。而是：
 
@@ -5625,84 +6406,66 @@ hart0 / hart2
 
   这就是比单纯`coldboot_done = 1;`更严格的同步语义。
 
-##### 两种 `warmboot`
+`warm_startup`：这个 hart 是**第一次正常加入** OpenSBI runtime。所以它需要做：
 
-`init_warmboot()`先：
-
-``` c
-wait_for_coldboot(scratch, hartid);
-
-// 看 HSM state 来区分进入哪一种 warmboot
-hstate = sbi_hsm_hart_get_state(sbi_domain_thishart_ptr(), hartid);
-	if (hstate < 0)
-		sbi_hart_hang();
-
-	if (hstate == SBI_HSM_STATE_SUSPENDED)  // SUSPENDED
-		init_warm_resume(scratch);
-	else
-		init_warm_startup(scratch, hartid);
+```
+sbi_hsm_init
+sbi_platform_early_init
+...
 ```
 
-- `warm_startup`：这个 hart 是**第一次正常加入** OpenSBI runtime。所以它需要做：
+注意没有：
 
-  ```
-  sbi_hsm_init
-  sbi_platform_early_init
-  ...
-  ```
+```
+sbi_scratch_init
+sbi_domain_init
+sbi_ecall_init
+```
 
-  注意没有：
+因为这些全局结构已经由 coldboot hart 完成了。
 
-  ```
-  sbi_scratch_init
-  sbi_domain_init
-  sbi_ecall_init
-  ```
+`warm_resume`：这个 hart 则不同。它之前已经初始化过，只是：
 
-  因为这些全局结构已经由 coldboot hart 完成了。
+``` c
+running
+   ↓
+suspend
+   ↓
+resume
+```
 
-- `warm_resume`：这个 hart 则不同。它之前已经初始化过，只是：
+所以不需要重新初始化整套东西。它只做：
 
-  ``` c
-  running
-     ↓
-  suspend
-     ↓
-  resume
-  ```
+```c
+sbi_hsm_hart_resume_start(scratch);
 
-  所以不需要重新初始化整套东西。它只做：
+sbi_hart_reinit(scratch);
 
-  ```c
-  sbi_hsm_hart_resume_start(scratch);
-  
-  sbi_hart_reinit(scratch);
-  
-  sbi_hart_pmp_configure(scratch);
-  
-  sbi_hsm_hart_resume_finish(scratch);
-  ```
+sbi_hart_pmp_configure(scratch);
 
-  所以：
+sbi_hsm_hart_resume_finish(scratch);
+```
 
-  ```
-  warm startup
-      =
-  第一次启动这个 hart
-  
-  warm resume
-      =
-  这个 hart 以前已经起来过，
-  现在只是从 suspend 恢复
-  ```
+所以：
 
-  这是 HSM 后面非常关键的基础。
+```
+warm startup
+    =
+第一次启动这个 hart
+
+warm resume
+    =
+这个 hart 以前已经起来过，
+现在只是从 suspend 恢复
+```
+
+这是 HSM 后面非常关键的基础。
 
 ##### 最后汇合到`sbi_hart_switch_mode()`
 
-> `sbi_init()` 负责“把 OpenSBI 自己初始化好”，而 `sbi_hart_switch_mode()` 负责“把当前 hart 正式交给下一阶段”。
+> `sbi_init()` 负责“把 OpenSBI 自己初始化好”，而 `sbi_hart_switch_mode()` 负责“把当前 Hart 正式交给下一阶段”。
 
- `fw_base.S` 已经提前把 `next_arg1`、`next_addr`、`next_mode` 存入每个 Hart 的 scratch space，最后又设置好当前 hart 的 `mscratch`、栈和正式 trap handler，再调用 `sbi_init()`。
+ `fw_base.S` 已经提前把 `next_arg1`、`next_addr`、`next_mode` 存入每个 Hart 的 `scratch space`，最后又设置好当前 hart 的 `mscratch`、栈和正式 trap handler，再调用 `sbi_init()`。
 
 `coldboot hart` 最后：
 
@@ -5736,21 +6499,7 @@ __attribute__((noreturn))  sbi_hart_switch_mode(	// 永远不会正常 return �
 sbi_hart_switch_mode()
 ```
 
-这就是下一阶段：
-
-> `sbi_hart_switch_mode()` 的目标就是把 CPU 从：
->
-> ```
-> M-mode OpenSBI
-> ```
->
-> 变成：
->
-> ```
-> S-mode Linux/U-Boot
-> ```
-
-所以它本质只需要完成四件事：
+这就是下一阶段：把 M 态的 CPU 切换到 S 态。所以它本质只需要切换运行模式以及设置`mepc`然后执行`mret`跳转：
 
 - 检查下一阶段模式是否合法，然后配置 `mstatus.MPP`（执行`mret`后会回到这个寄存器存储的模式）:
 
@@ -5806,7 +6555,7 @@ Linux（S-mode）
 
 #### `sbi_ecall.c`
 
-这是目前对你来说最值得看的文件之一。上一层我们说：
+上一层我们说：
 
 ```
 a7 → EID
@@ -5820,13 +6569,7 @@ unsigned long extension_id = regs->a7;
 unsigned long func_id      = regs->a6;
 ```
 
-然后：
-
-```
-ext = sbi_ecall_find_extension(extension_id);
-```
-
-找到对应 SBI Extension 后：
+然后：`ext = sbi_ecall_find_extension(extension_id);`，找到对应 SBI Extension 后：
 
 ```
 ext->handle(extension_id, func_id, regs, &out);
@@ -5846,7 +6589,7 @@ ext->handle(extension_id, func_id, regs, &out);
 执行 handler
 ```
 
-不是类比而已，源码真的就是这样做。甚至 `mepc += 4` 也真的在那里：现在看 OpenSBI 当前源码：
+甚至 `mepc += 4` 也真的在那里：现在看 OpenSBI 当前源码：
 
 ```c
 regs->mepc += 4;
@@ -5855,17 +6598,8 @@ regs->mepc += 4;
 下一行附近就是：
 
 ```c
-regs->a0 = ret;
-regs->a1 = out.value;
-```
-
-也就是说你刚才学的：
-
-```c
-mepc += 4
-
-a0 = error
-a1 = value
+regs->a0 = ret;			// error
+regs->a1 = out.value;	// value
 ```
 
 OpenSBI 当前 `sbi_ecall_handler()` 真的就是这么干的。这个时候你应该开始有一种感觉：
@@ -5927,11 +6661,7 @@ sbi_hsm.c
 sbi_timer.c
 ```
 
-知道：
-
-> 我要设置 timer。
-
-但是它怎么知道：
+知道我要设置 timer。但是它怎么知道：
 
 ```
 QEMU virt 的 timer 在哪？
@@ -6076,12 +6806,12 @@ lib/utils/timer
 
 所以最终就形成了非常漂亮的一层层调用。
 
-## 如何移植
+## 移植步奏
 
 > 在移植之前需要明确几个东西:
 >
-> - 我们采用 openSBI 固件是 `FW_JUMP` 类型的，`openSBI`会被加载到 DRAM 处即 0x80000000 执行，因此需要编写在 Flash 上运行的代码来将 openSBI 固件加载到 DRAM 处，然后跳转执行。
-> - 需要自行编写设备树编译将设备树的地址传递给 openSBI，ROM 上的 fw_dynamic_info 用不到。
+> - 我们采用 OpenSBI 固件是 `FW_JUMP` 类型的，`OpenSBI`会被加载到 DRAM 处即 0x80000000 执行，因此需要编写在 Flash 上运行的代码来将 OpenSBI 固件加载到 DRAM 处，然后跳转执行。
+> - 需要自行编写设备树编译将设备树的地址传递给 OpenSBI，ROM 上的 fw_dynamic_info 用不到。
 
 可按照下面步骤添加名为`<xyz>`的新平台支持：
 
@@ -6093,7 +6823,14 @@ lib/utils/timer
 
 3.创建`platform/<xyz>/platform.c`文件，在其中**定义一个`struct sbi_platform`结构体实例**。
 
-4.编写设备树信息。
+4.编写设备树信息。  
+
+### OpenSBI 的入口条件
+
+- CPU 处于 M-mode；
+- OpenSBI 代码已经加载到可执行内存；
+- `a0` 携带 Hart ID、`a1` 携带有效 DTB 地址，以及进入 OpenSBI 前的中断与地址转换状态；
+- 不同固件类型对 `a2` 的使用不一样。
 
 ### 第一步：创建平台配置文件（`Kconfig、configs、defconfig`）
 
@@ -6116,9 +6853,11 @@ config PLATFORM_QUARD_STAR
 
 defconfig 的内容是指定配置支持哪些硬件，这里也是把 generic 中的内容 copy 了过来，虽然现在 quard_star 的硬件比较少，但是不管，先把所有的都添加进去。
 
-### 第二步：创建`objects.mk`文件
+### 第二步：创建`objects.mk`文件（指定固件类型）
 
-objects 的内容比较简单，**配置固件为 JUMP 类型，同时指定 jump 的地址**：
+objects 的内容比较简单，**配置固件为 JUMP 类型，同时指定 jump 的地址。**
+
+在 OpenSBI v1.2 的 `firmware/fw_jump.S` 中，`fw_next_addr()` 会读取 `_jump_addr`，而 `_jump_addr` 保存的正是 `FW_JUMP_ADDR`。因此，按照你目前的配置，正常的下一阶段入口就是 `0x0`，并不会自动寻找 Linux 或其他程序。
 
 ```makefile
 #
@@ -6127,7 +6866,7 @@ objects 的内容比较简单，**配置固件为 JUMP 类型，同时指定 jum
 
 # Compiler flags
 platform-cppflags-y =
-platform-cflags-y =
+platform-cflags-y  =
 platform-asflags-y =
 platform-ldflags-y =
 
@@ -6136,8 +6875,8 @@ platform-objs-y += platform.o
 
 # Blobs to build
 FW_JUMP=y
-FW_TEXT_START=0x80000000
-FW_JUMP_ADDR=0x0
+FW_TEXT_START=0x80000000	# 固件自身的链接运行地址
+FW_JUMP_ADDR=0x0			# jump固件类型的jump地址
 ```
 
 ### 第三步：创建`platform.c`
@@ -6161,7 +6900,7 @@ struct sbi_platform platform = {
 };
 ```
 
-#### `fw_platform_init( )`
+#### `fw_platform_init()`（解析设备树）
 
 **五个`args`依次对应上级启动阶段传递过来的参数，`a0` :存放`hartid`; `a1`:设备树的地址;`arg1`被强制转换为一个指向设备树的指针即`FDT`。**
 
@@ -6219,7 +6958,7 @@ fail:
 }
 ```
 
-#### `platform_ops` 结构体
+#### `platform_ops` 函数指针结构体（指向平台操作函数）
 
 结构体内的成员全部为**函数指针。**
 
@@ -6236,8 +6975,6 @@ const struct sbi_platform_operations platform_ops = {
 	.irqchip_init		= fdt_irqchip_init,             //初始化中断
 	.irqchip_exit		= fdt_irqchip_exit,             //中断退出
 	.ipi_init		= fdt_ipi_init,
-	.ipi_exit		= fdt_ipi_exit,
-	.ipi_init		= fdt_ipi_init,                     
 	.ipi_exit		= fdt_ipi_exit,
 	.pmu_init		= quard_star_pmu_init,              //需要
 	.pmu_xlate_to_mhpmevent = quard_star_pmu_xlate_to_mhpmevent,
@@ -6324,58 +7061,103 @@ static u64 quard_star_tlbr_flush_limit(void)
 
 ### 第四步：编写设备树
 
+> DTS 是一种描述系统硬件拓扑和配置信息的**文本格式**，需要按照解析的约束来编写节点名称。
+>
+> ``` c
+> DTS（文本文件）
+>     │
+>     │ dtc 编译器
+>     ▼
+> DTB（Flattened Device Tree Blob，二进制数据） // 解析的是二进制数据
+>     │
+>     │ Loader 加载到 RAM
+>     ▼
+> OpenSBI
+>     │
+>     │ 从 FDT 解析硬件与 Domain 配置
+>     │
+>     │ 修改必要的设备树信息
+>     ▼
+> Linux / 其他下一级程序
+> ```
+
 #### 节点/属性格式
 
-设备树是一种树形结构，**用代码来描述设备的各种信息**，如设备的类型、地址、中断、时钟等。这些代码通常保存在后缀为`.dts`或`.dtsi`的文件中，称为设备树源文件。它提供了一种与平台无关的方式来描述硬件，**将硬件信息从内核代码中分离出来**。这样当硬件发生变化时只需修改设备树文件，而不必重新编译整个内核，提高了系统的可移植性和可维护性。
+设备树是一种树形结构，**用代码来描述设备的各种信息**，如设备的类型、地址、中断、时钟等。这些代码通常保存在后缀为`.dts`或`.dtsi`的文件中。它提供了一种与平台无关的方式来描述硬件，**将硬件信息从内核代码中分离出来**。这样当硬件发生变化时只需修改设备树文件，而不必重新编译整个内核，提高了系统的可移植性和可维护性。
 
 ---
 
 **节点（Node）与属性（Property）**：这是设备树的基本元素。
 
-- **节点**：代表一个总线或设备。例如 `/` 是根节点，`i2c1`、`uart0` 是子节点。
-- **属性**：描述节点的特性。是 键=值 对。
+- **节点**：代表一个总线或设备。例如：
+
+  -  `/` 是根节点；
+  - `i2c1`、`uart0` 是子节点；
+  - `chosen`节点通常用做给内核启动传递信息；
+  - `cpus` 节点：用于描述 CPU 的相关信息，如 CPU 的数量、型号、频率等。
+  - `memory` 节点：用于描述系统内存的信息，如内存的起始地址和大小。由于不同的开发板使用的内存大小可能不同，所以这个节点通常需要板厂根据实际情况进行设置。
+
+  ``` json
+  // label 		是标号，用于在设备树中其他位置方便地引用该节点，可选；通过 &label 来引用该节点
+  // unitaddress 	是单元地址，用于标识设备的实例，也是可选的.
+  // nodename 	是节点名字，通常是硬件设备的名称，必须在设备树中唯一；
+  (label) : nodename@(unitaddress){
+      
+  }
+  ```
+
+- **属性**：描述节点的特性，是 `property = "value" or <0x0 0xb0000000>;` 格式，尤其注意：`<...>` 并不是 C 语言的数组语法，而是 DTS 的 cell 列表语法。 每一个普通 cell 为 32 位，OpenSBI 将其按高 32 位和低 32 位组合，得到：
+
+  $ \begin{aligned} A &= (\text{high}\ll32)\ |\ \text{low} =\texttt{0x00000000B0000000} \end{aligned} $
+
   - `model`：用来准确地定义这个硬件是什么。与`compatible`属性类似，但`compatible`属性表示兼容哪些驱动，`model`属性则**明确设备的具体型号**。
-  - `reg`：描述设备**在父总线地址空间内的起始地址和占据大小**。
-  - `status`：设备状态，如 `"okay"`（启用）、`"disabled"`（禁用）。
-  - `compatible`：**最重要的属性！** 外设节点的`compatible`**驱动通过这个属性的值（字符串）来匹配设备**。例如 `compatible = "fsl,imx6ull-i2c", "fsl,imx21-i2c"`。
-  - `interrupts`：设备使用的**中断号**。
 
-```json
-// label 		是标号，用于在设备树中方便地引用该节点，可选；
-// nodename 	是节点名字，通常是硬件设备的名称，必须在设备树中唯一；
-// unitaddress 	是单元地址，用于标识设备的实例，也是可选的.
-(label) : nodename@(unitaddress){
-    
-}
-```
-例如：
-``` json
-/ {
-    compatible = "my-company,my-board", "fsl,imx6ull"; // 板子兼容性
-    model = "My Awesome Board";
+  - `reg`：描述设备**在父总线地址空间**内的**起始地址和占据大小**。如果**父节点**规定：
 
-    memory@80000000 { // 内存节点
-        device_type = "memory";
-        reg = <0x80000000 0x20000000>; // 起始地址0x80000000，大小512MB
+    ``` json
+    #address-cells = <2>;
+    #size-cells = <2>;
+    ```
+
+    在子总线中定义：
+
+    ``` json
+    uart0: uart0@10000000 {
+        reg = <0x0 0x10000000 0x0 0x100>;
     };
+    ```
 
-	uart : serial@fe001000{  // uart是label，serial是节点名称，fe001000是单元地址。
+    则 `reg` 的四个 cell 分别表示：**<地址高32位 地址低32位 大小高32位 大小低32位>**，即：起始地址：0x10000000，区域大小：0x100（256 字节）。
+
+    ```json
+    base = <0x0 0x10002000>;
+    order = <8>;
+    ```
+
+    属于 OpenSBI Domain 自己定义的 binding 规则，不是所有设备树节点都可以使用的通用属性。
+
+  - `status`：设备状态，如 `"okay"`（启用）、`"disabled"`（禁用）。
+
+  - `compatible`：**最重要的属性！** **用于让软件识别节点应该由哪一种解析逻辑处理。**软件不是仅凭节点叫 `trusted-domain`、`tmem` 还是 `opensbi-domains` 决定如何解析，而是结合对应的 `compatible` 属性。
+
+    外设节点的`compatible`驱动通过这个属性的值（字符串）来匹配设备，也是 OpenSBI Domain 内存区域定义节点，例如：
+
+    ``` json
+    // 表示这是 OpenSBI Domain 配置节点
+    compatible = "opensbi,domain,config";
     
-}
-```
+    // 表示这是 OpenSBI Domain 内存区域定义节点
+    compatible = "opensbi,domain,memregion";
+    
+    // 表示这是一个具体的 OpenSBI Domain 实例
+    compatible = "opensbi,domain,instance";
+    ```
 
-**常用节点:**
-
-- **根节点**：用`/`标识，是设备树的起始点和顶层节点，包含了整个设备树的基本信息和其他子节点。
-- **cpus 节点**：用于描述 CPU 的相关信息，如 CPU 的数量、型号、频率等。
-- **memory 节点**：用于描述系统内存的信息，如内存的起始地址和大小。由于不同的开发板使用的内存大小可能不同，所以这个节点通常需要板厂根据实际情况进行设置。
-- **chosen 节点**：可以通过该节点给内核传入一些参数，通常用于设置`bootargs`属性，指定内核启动时的参数。
-
-总的来说，设备树是一种将硬件信息进行结构化描述的方式，使得内核能够方便地获取硬件设备的信息，实现了硬件和软件的分离。
+  - `interrupts`：设备使用的**中断号**。
 
 #### 编写`quard_star_sbi.dts`
 
-``` json
+```json
 /dts-v1/;
 
 / {
@@ -6396,7 +7178,7 @@ static u64 quard_star_tlbr_flush_limit(void)
 	cpus {
 		#address-cells = <0x1>;  // 用一个32位表示CPU 索引
 		#size-cells = <0x0>;
-		timebase-frequency = <0x989680>;  // 系统时钟基准频率为0x989680（10Mhz）
+		timebase-frequency = <0x989680>;  // 系统时钟基准频率为0x989680（10 MHz）
 
 		cpu0: cpu@0 {  			  // 注意cpu@之后为索引号
 			phandle = <0xf>;  	  // 设备树内部引用 节点标识符
@@ -6617,98 +7399,28 @@ static u64 quard_star_tlbr_flush_limit(void)
 };
 ```
 
-## 重写`start.S`
-
-<img src="quard-star/移植opensbi.png" alt="移植opensbi" style="zoom:80%;" />
-
-现在`start.S`代码（Loader）主要工作是**加载openSBI固件**到`0x80000000`和**设备树**到`0x82200000`，加载完毕后**跳转**到`t0 = 0x80000000`的 DRAM 起始位置处执行`openSBI`的代码，最终`t0 = 0x80000000`,`a1 = 0x82200000`，**然后openSBI通过`fw_platform_init()`**函数获取设备树的信息来划分`domain`。因此现在主要的功能需要为：
-
-- 加载` opensbi_fw.bin` 文件的内容到指定内存区域` [0x80000000:0x80200000]`。
-- 加载 `qemu_sbi.dtb` 文件的内容到指定内存区域` [0x82200000:0x82280000]`。
-
-``` assembly
-	# 循环多少次 65535
-	.macro loop, cunt
-    li		t1,	0xffff  # 65535
-    li		t2,	\cunt
-1:  
-	nop
-	addi    t1, t1, -1
-	bne		t1, x0, 1b  # 1b = 1backward，引用前面最近的 1
-    li		t1,	0xffff
-	addi    t2, t2, -1
-	bne		t2, x0, 1b
-	.endm  # 结束宏
-
-
-	.macro load_data, _src_start, _dst_start, _dst_end
-	bgeu	\_dst_start, \_dst_end, 2f  # 如果 1 中的unsigned > 2
-1:
-	lw      t0, (\_src_start) # 从 \_src_start 地址中读取数据到寄存器
-	sw      t0, (\_dst_start) # 把寄存去中的数据写入到 \_dst_start 地址
-	addi    \_src_start, \_src_start, 4
-	addi    \_dst_start, \_dst_start, 4
-	bltu    \_dst_start, \_dst_end, 1b
-2:
-	.endm
-
-	.section .text  # 将当前的汇编上下文切换到代码段
-	.globl _start
-	.type _start, @function
-
-_start:
-	# load opensbi_fw.bin 
-	# [0x20200000:0x20400000] --> [0x80000000:0x80200000]
-    li		a0,	0x202
-	slli	a0,	a0, 20      # a0 = 0x20200000
-    li		a1,	0x800
-	slli	a1,	a1, 20      # a1 = 0x80000000
-    li		a2,	0x802
-	slli	a2,	a2, 20      # a2 = 0x80200000
-	load_data a0,a1,a2
-
-	# load qemu_sbi.dtb
-	# [0x20080000:0x20100000] --> [0x82200000:0x82280000]
-    li		a0,	0x2008
-	slli	a0,	a0, 16       # a0 = 0x20080000
-    li		a1,	0x822
-	slli	a1,	a1, 20       # a1 = 0x82200000
-    li		a2,	0x8228
-	slli	a2,	a2, 16       # a2 = 0x82280000
-	load_data a0,a1,a2
-
-    csrr    a0, mhartid
-    li		t0,	0x0     
-	beq		a0, t0, _no_wait # 0 号 hart 则跳转到 openSBI 加载后的固件的地址
-	loop	0x1000
-_no_wait:
-    li		a1,	0x822
-	slli	a1,	a1, 20       # a1 = 0x82200000 设备树的地址(替代在reset_vec的操作)
-    li	    t0,	0x800
-	slli	t0,	t0, 20       # t0 = 0x80000000 跳转到openSBI加载后的地址开执行
-    jr      t0
-
-    .end
-```
 
 ## 修改`build.sh`
 
-`opensbi_fw.bin`固件由下载的文件提供，固件在 Flash 中的位置由在`build.sh`中的`fw.bin`中的偏移决定，`fw.bin`在 Flash 中的哪里由`run.sh`中命令写入。
+`fw_jump.bin`由本项目的 OpenSBI 编译生成；`build.sh`把它写入`fw.bin`的 0x200000 偏移，`run.sh`把整个镜像接到 pFlash。
 
 ``` bash
 # 获取当前脚本文件所在的目录
 SHELL_FOLDER=$(cd "$(dirname "$0")";pwd)
+export PATH="$SHELL_FOLDER/../toolchain/bin:$PATH"
 
 if [ ! -d "$SHELL_FOLDER/output" ]; then  
 mkdir $SHELL_FOLDER/output
 fi  
 
-cd qemu-8.0.2
-if [ ! -d "$SHELL_FOLDER/output/qemu" ]; then  
-./configure --prefix=$SHELL_FOLDER/output/qemu  --target-list=riscv64-softmmu --enable-gtk  --enable-virtfs --disable-gio
-fi  
-make -j16$PROCESSORS
-make install
+QEMU_BUILD_DIR="$SHELL_FOLDER/../qemu-build"
+if [ ! -x "$SHELL_FOLDER/output/qemu/bin/qemu-system-riscv64" ]; then
+    mkdir -p "$QEMU_BUILD_DIR"
+    cd "$QEMU_BUILD_DIR"
+    "$SHELL_FOLDER/qemu-11.1.1/configure" --prefix="$SHELL_FOLDER/output/qemu" --target-list=riscv64-softmmu --enable-gtk --enable-vte --disable-gio --disable-docs
+    make -j"$(nproc)"
+    make install
+fi
 
 
 # # 编译 lowlevelboot
@@ -6742,81 +7454,85 @@ mkdir $SHELL_FOLDER/output/fw
 fi  
 cd $SHELL_FOLDER/output/fw
 rm -rf fw.bin
-# 填充 32K的0
+# 填充 32 MiB 的 0
 dd of=fw.bin bs=1k count=32k if=/dev/zero   
 # # 写入 lowlevel_fw.bin 偏移量地址为 0
 dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
 # 写入 quard_star_sbi.dtb 地址偏移量为 512K，因此 fdt的地址偏移量为 0x80000
 dd of=fw.bin bs=1k conv=notrunc seek=512 if=$SHELL_FOLDER/output/opensbi/quard_star_sbi.dtb
-# 写入 fw_jump.bin 地址偏移量为 2K*1K= 0x2000000，因此 fw_jump.bin的地址偏移量为  0x2000000
+# 写入 fw_jump.bin 地址偏移量为 2K*1K= 0x200000，因此 fw_jump.bin的地址偏移量为  0x200000
 dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.bin
 ```
 
 # 添加 Domain 机制
 
-Domain 的程序运行地址/参数地址在设备树中指定，Domain 的划分也是在设备树中指定的，`opensbi_fw.bin`固件被加载后**通过设备树中指定的下级程序地址**就跳转自动运行 Domain 里的程序了。
+Domain 的程序运行地址/参数地址在设备树中指定，Domain 的划分也是在设备树中指定的，`fw_jump.bin`固件被加载后**通过设备树中指定的下级程序地址**就跳转自动运行 Domain 里的程序了。
 
 ![添加domain](quard-star/添加domain.png)
 
 ## Domain机制
 
-Domain 机制提供了一种在系统中**划分资源**（包括硬件资源）和权限的方法，以确保软件实体之间的相同隔离和安全性。核心目标是在**同一硬件平台上，实现比传统特权级（如 M/S/U 模式）更细粒度、更灵活的隔离**。它允许将系统的硬件资源（如内存、IO、中断）划分为多个相互独立的“域”，每个域可以运行独立的软件栈，彼此间实现硬件强制的安全隔离。
+Domain 机制提供了一种在系统中**划分资源**（包括硬件资源）和权限的方法，以确保软件实体之间的相同隔离和安全性。核心目标是在同一硬件平台上，实现比传统特权级（如 M/S/U 模式）**更细粒度、更灵活的隔离**。它允许将系统的硬件资源（如内存、IO、中断）划分为多个相互独立的“域”，每个域可以运行独立的软件栈，彼此间实现硬件强制的安全隔离。
 
 Domain 代表了一个软件实体，可以是一个操作系统、一个虚拟机或其他一些执行环境。每个 Domain 都有自己的一组资源和权限，包括hart、内存、设备、中断等、Domain 之间是相互隔离的，不能直接访问或干扰彼此的资源。
 
-通过 Domain 机制，openSBI 可以**实现不同软件实体的隔离和安全性**。每个 Domain 只能访问自己被授权的资源，并**支持多个软件实体在同一硬件平台上共存和运行**。
+通过 Domain 机制，OpenSBI 可以**实现不同软件实体的隔离和安全性**。每个 Domain 只能访问自己被授权的资源，并支持多个软件实体在同一硬件平台上共存和运行。
 
 ## 硬件基石
 
 Domain 机制的硬件基础是 **Smmtt（Supervisor Domain Access Protection）** 扩展，它为物理地址空间（内存和设备）提供隔离。
 
-- **Supervisor Domain Identifier (SDID)**：每个域有一个唯一标识符 **SDID**。它存储在 Hart（硬件线程）的一个 M 模式 CSR 中，用于**动态指示当前 Hart 正在哪个 Domain 中运行。**
+- **Supervisor Domain Identifier (SDID)**：每个 Domain 有一个唯一标识符 **SDID**。它存储在 Hart（硬件线程）的一个 M 模式 CSR 中，用于**动态指示当前 Hart 正在哪个 Domain 中运行。**
 
 - **Memory Tracking Table (MTT)**：这是 Smmtt 的核心数据结构，类似于一个用于物理地址的页表。它**定义了每个物理内存页或设备区域允许哪个 SDID 访问（读/写）**，从而实现硬件级的访问控制。当 Hart 发起物理地址访问时，硬件会根据其当前 SDID 和 MTT 配置进行校验，非法访问会触发 fault。
 
-  `Hart Mask`：每个 Domain 都有一个唯一的位图`Hart Mask`，每个位表示一个 Hart，可以将相应的位设置为 `1` 来表示允许对应的 Hart 可以来访问这个 Domain。
+  `Hart Mask`：每个 Domain 都有一个唯一的位图**`Hart Mask`**，每个位表示一个 Hart，可以将相应的位设置为 `1` 来表示允许对应的 Hart 可以来访问这个 Domain。
 
 - **执行环境**：**M 模式** 负责管理 SDID 和 MTT，是隔离机制的最终仲裁者。而 **Supervisor Domain Security Manager (SDSM)** 则是一段运行在 M 模式的固件，负责配置和维护域的安全策略。
 
-## 设备树划分 Domain
+## 通过设备树划分 Domain（修改设备树）
 
-​	使用**设备树**来基于 openSBI 划分 Domain。**默认情况**下所有 Hart 都划分给 Root Domain。设备树划分的 Domain 在加载`opensbi_fw.bin`固件之后就自动了。
+使用**设备树**来基于 OpenSBI 划分 Domain。**默认情况**下所有 Hart 都划分给 Root Domain。设备树划分的 Domain 在加载完毕`fw_jump.bin`固件类型的 OpenSBI 之后就自动了。
 
-``` json
+```json
 chosen {
 		stdout-path = "/soc/uart0@10000000";
 
-		opensbi-domains {  /* 定义opensbi-domains描述节点 */
-		    compatible = "opensbi,domain,config"; /* 节点名称 */
+		opensbi-domains {  /* 定义opensbi-domains节点 */
+		    compatible = "opensbi,domain,config"; /* 节点解析匹配属性 */
 
-            tmem: tmem {   /* 定义内存节点 */
-                compatible = "opensbi,domain,memregion";  /* 节点名称 */
+            tmem: tmem {   /* 定义trust memory 节点*/
+                compatible = "opensbi,domain,memregion";  /* 节点解析匹配属性 */
                 base = <0x0 0xb0000000>; /* 起始地址注意64位地址哦 */
                 order = <28>; /* 内存大小即size=2^28 */
             };
 
-            tuart: tuart {  /* 定义mmio节点 */
-                compatible = "opensbi,domain,memregion";  /* 节点名称 */
-                base = <0x0 0x10002000>; /* 起始地址 */
+            tuart: tuart {  /* 定义mmio属性的 uart 节点 */
+                compatible = "opensbi,domain,memregion";
+                base = <0x0 0x10002000>;
                 order = <8>; /* size=2^8 */
-                mmio;  /* mmio属性 */
-                devices = <&uart2>; /* 关联到设备节点上 */
+                mmio;  /* 一个布尔属性，表示这是 Memory-Mapped I/O（内存映射输入输出）区域。 */
+                devices = <&uart2>; /* 关联到uart2节点 */
             };
 
-		    allmem: allmem { /* 定义内存节点，这个节点保护所有地址 */
+		    allmem: allmem {
 		        compatible = "opensbi,domain,memregion";
 		        base = <0x0 0x0>;
 		        order = <64>;
 		    };
 
-            tdomain: trusted-domain { /* 定义domian节点 */
-                compatible = "opensbi,domain,instance";  /* 节点名称 */
+            tdomain: trusted-domain { /* 定义trust - domian节点 */
+                compatible = "opensbi,domain,instance";  /* 是一个 domain 实例 */
+                
                 possible-harts = <&cpu7>; /* dumian中允许使用的cpu core */
+                
                 regions = <&tmem 0x7>, <&tuart 0x7>, <&allmem 0x7>;/* 各个内存/mmio区域的权限，3bit读写运行权限 0x7拥有全部权限 */
                 boot-hart = <&cpu7>; /* domian中用于boot的core */
+                
                 next-arg1 = <0x0 0x00000000>; /* 下级程序的参数 */
 		        next-addr = <0x0 0xb0000000>; /* 下级程序的起始地址 */
 		        next-mode = <0x0>; /* 下级程序的允许模式 0为U模式，1为S模式 */
+                
                 system-reset-allowed; /* 允许复位 */
             };
 
@@ -6834,7 +7550,7 @@ chosen {
 	};
 ```
 
-## 编写`tdomain`中运行的程序
+## 编写`t_domain`中运行的程序
 
 ### 编写`start_up.S`
 
@@ -6936,17 +7652,20 @@ SECTIONS
 ``` sh
 # 获取当前脚本文件所在的目录
 SHELL_FOLDER=$(cd "$(dirname "$0")";pwd)
+export PATH="$SHELL_FOLDER/../toolchain/bin:$PATH"
 
 if [ ! -d "$SHELL_FOLDER/output" ]; then  
 mkdir $SHELL_FOLDER/output
 fi  
 
-cd qemu-8.0.2
-if [ ! -d "$SHELL_FOLDER/output/qemu" ]; then  
-./configure --prefix=$SHELL_FOLDER/output/qemu  --target-list=riscv64-softmmu --enable-gtk  --enable-virtfs --disable-gio
-fi  
-make -j16$PROCESSORS
-make install
+QEMU_BUILD_DIR="$SHELL_FOLDER/../qemu-build"
+if [ ! -x "$SHELL_FOLDER/output/qemu/bin/qemu-system-riscv64" ]; then
+    mkdir -p "$QEMU_BUILD_DIR"
+    cd "$QEMU_BUILD_DIR"
+    "$SHELL_FOLDER/qemu-11.1.1/configure" --prefix="$SHELL_FOLDER/output/qemu" --target-list=riscv64-softmmu --enable-gtk --enable-vte --disable-gio --disable-docs
+    make -j"$(nproc)"
+    make install
+fi
 
 
 # 编译 lowlevelboot
@@ -6994,13 +7713,13 @@ mkdir $SHELL_FOLDER/output/fw
 fi  
 cd $SHELL_FOLDER/output/fw
 rm -rf fw.bin
-# 填充 32K的0
+# 填充 32 MiB 的 0
 dd of=fw.bin bs=1k count=32k if=/dev/zero   
 # # 写入 lowlevel_fw.bin 偏移量地址为 0
 dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
 # 写入 quard_star_sbi.dtb 地址偏移量为 512K，因此 fdt的地址偏移量为 0x80000
 dd of=fw.bin bs=1k conv=notrunc seek=512 if=$SHELL_FOLDER/output/opensbi/quard_star_sbi.dtb
-# 写入 fw_jump.bin 地址偏移量为 2K*1K= 0x2000000，因此 fw_jump.bin的地址偏移量为  0x2000000
+# 写入 fw_jump.bin 地址偏移量为 2K*1K= 0x200000，因此 fw_jump.bin的地址偏移量为  0x200000
 dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.bin
 # 写入 trusted_domain.bin，地址偏移量为1K*4K = 0x400000
 dd of=fw.bin bs=1k conv=notrunc seek=4K if=$SHELL_FOLDER/output/trusted_domain/trusted_fw.bin
@@ -7039,7 +7758,7 @@ dd of=fw.bin bs=1k conv=notrunc seek=4K if=$SHELL_FOLDER/output/trusted_domain/t
 	.type _start,@function
 
 _start:
-	//load opensbi_fw.bin 
+	//load fw_jump.bin 
 	//[0x20200000:0x20400000] --> [0x80000000:0x80200000]
     li		a0,	0x202
 	slli	a0,	a0, 20      //a0 = 0x20200000
@@ -7049,7 +7768,7 @@ _start:
 	slli	a2,	a2, 20      //a2 = 0x80200000
 	load_data a0,a1,a2
 
-	//load qemu_sbi.dtb
+	//load quard_star_sbi.dtb
 	//[0x20080000:0x20100000] --> [0x82200000:0x82280000]
     li		a0,	0x2008
 	slli	a0,	a0, 16       //a0 = 0x20080000
@@ -7060,7 +7779,7 @@ _start:
 	load_data a0,a1,a2
 
 	//load trusted_fw.bin
-	//[0x20400000:0x20800000] --> [0x80200000:0x80600000]
+	//[0x20400000:0x20800000] --> [0xb0000000:0xb0400000]
     li		a0,	0x204
 	slli	a0,	a0, 20      //a0 = 0x20400000
     li		a1,	0xb00
@@ -7083,7 +7802,7 @@ _no_wait:
     .end
 ```
 
-# 调用SBI接口实现控制台输出（创建OS）
+# 调用SBI接口实现控制台输出（创建 OS）
 
 在`untrusted-domain`中运行自己写的操作系统。
 
@@ -7130,14 +7849,14 @@ next-arg1 = <0x0 0x82000000>;
 next-addr = <0x0 0x80200000>;
 ```
 
-## 创建OS
+## 编写 OS
 
 在quard-star目录下新建os文件夹，在此文件夹中编写操作系统程序：
 
 ```c
 makefile   entry.S   main.c   os.ld   sbi.c   sbi.h
 ```
-### 编写`entry.S`（栈）
+### 编写`entry.s`（入口函数，初始化栈）
 
 **定义栈并初始化`sp`寄存器**！
 
@@ -7189,9 +7908,9 @@ struct sbiret {
 
 #endif  
 ```
-#### 编写`sbi.c`（定义系统调用API）
+#### 编写`sbi.c`（定义系统调用 API）
 
-本质是通过`ecall`指令转发给 openSBI。
+本质是通过`ecall`指令转发给 OpenSBI。
 
 ``` c
 #include "sbi.h"
@@ -7278,7 +7997,6 @@ SECTIONS
 ```
 ### 编写 makefile 文件
 ``` makefile
-
 CROSS_COMPILE = riscv64-unknown-elf-
 CFLAGS = -nostdlib -fno-builtin 
 
@@ -7321,17 +8039,20 @@ clean:
 ``` sh
 # 获取当前脚本文件所在的目录
 SHELL_FOLDER=$(cd "$(dirname "$0")";pwd)
+export PATH="$SHELL_FOLDER/../toolchain/bin:$PATH"
 
 if [ ! -d "$SHELL_FOLDER/output" ]; then  
 mkdir $SHELL_FOLDER/output
 fi  
 
-cd qemu-8.0.2
-if [ ! -d "$SHELL_FOLDER/output/qemu" ]; then  
-./configure --prefix=$SHELL_FOLDER/output/qemu  --target-list=riscv64-softmmu --enable-gtk  --enable-virtfs --disable-gio
-fi  
-make -j16$PROCESSORS
-make install
+QEMU_BUILD_DIR="$SHELL_FOLDER/../qemu-build"
+if [ ! -x "$SHELL_FOLDER/output/qemu/bin/qemu-system-riscv64" ]; then
+    mkdir -p "$QEMU_BUILD_DIR"
+    cd "$QEMU_BUILD_DIR"
+    "$SHELL_FOLDER/qemu-11.1.1/configure" --prefix="$SHELL_FOLDER/output/qemu" --target-list=riscv64-softmmu --enable-gtk --enable-vte --disable-gio --disable-docs
+    make -j"$(nproc)"
+    make install
+fi
 
 
 # # 编译 lowlevelboot
@@ -7388,14 +8109,13 @@ mkdir $SHELL_FOLDER/output/fw
 fi  
 cd $SHELL_FOLDER/output/fw
 rm -rf fw.bin
-# 填充 32K的0
+# 填充 32 MiB 的 0
 dd of=fw.bin bs=1k count=32k if=/dev/zero   
 # # 写入 lowlevel_fw.bin 偏移量地址为 0
 dd of=fw.bin bs=1k conv=notrunc seek=0 if=$SHELL_FOLDER/output/lowlevelboot/lowlevel_fw.bin
 # 写入 quard_star_sbi.dtb 地址偏移量为 512K，因此 fdt的地址偏移量为 0x80000
 dd of=fw.bin bs=1k conv=notrunc seek=512 if=$SHELL_FOLDER/output/opensbi/quard_star_sbi.dtb
-# 写入 uboot.dtb,地址偏移量为 1K*1K = 0x100000
-dd of=fw.bin bs=1k conv=notrunc seek=1K if=$SHELL_FOLDER/output/uboot/quard_star_uboot.dtb
+# 当前未构建 U-Boot DTB，此区域不写入。
 # 写入 fw_jump.bin 地址偏移量为 2K*1K= 0x200000，因此 fw_jump.bin的地址偏移量为  0x200000
 dd of=fw.bin bs=1k conv=notrunc seek=2k if=$SHELL_FOLDER/output/opensbi/fw_jump.bin
 # 写入 trusted_domain.bin,地址偏移量为 1K*4K = 0x400000，因此 trusted_domain.bin的地址偏移量为  0x400000
@@ -7673,7 +8393,7 @@ void panic(char *s)
 ### 6.3.3 修改main.c
 
 ``` c
-#nclude "os,h"
+#include <timeros/os.h>
 void os_main(){
     printf("hello os !");
 }
@@ -7684,8 +8404,8 @@ void os_main(){
 ``` makefile
 SRCS_C = \
 		sbi.c \
-		main.c \ 
-		printf.c \
+		main.c \
+		printf.c
 ```
 
 # 7. 实现U模式的trap机制
@@ -7774,15 +8494,15 @@ size_t syscall(size_t id, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3){
 
 ​	该寄存器`bit[8]:SPP`位表示CPU进入S模式**之前**正在执行的特权级别。当接收到`trap`时，如果`trap`来自U模式，则`SPP`设置为0，否则设置为1。当执行一条`SRET`指令从`trap`处理程序返回时，如果`SPP`为0，则表示此次`trap`来自U模式需要返回`U`模式，如果为1，则特权级别设置为`S`模式；`SPP`设置为0。
 
-​         `bit[2]`用来使能 S 态下的所有中断，如果为 0 则屏蔽S态下的所有中断。
+​         `bit[1]`（SIE）控制 S 模式下的中断；为 0 时，CPU 在 S 模式运行期间不接收 S 模式中断。
 
 - **sepc：**
 
-​	由**硬件自动记录**了trap发生之前执行的最后一条指令的地址，**处理结束后从此寄存器中的地址恢复运行**。（ARM架构中的`r15(PC)`寄存器）
+​	发生进入 S 模式的 trap 时，硬件将被中断或触发异常的指令地址写入`sepc`；`sret`按当前`sepc`恢复执行。系统调用处理完通常需要让`sepc`越过`ecall`指令。
 
 - **stvec：**
 
-​	`stvec`寄存器用于设置发生trap时**异常处理程序的地址**。当MODE字段为0时候，`stvec`被设置为Direct模式，此时进入S模式的trap无论什么原因，trap的处理程序地址入口都是`BASE<<2`,CPU会跳转到这个地方进行异常处理；当MODE字段为1的时候，异常触发后会跳转到以BASE字段对应的**异常向量表**中，陷阱向量表是一个存储不同类型陷阱处理程序入口地址的数组，每个入口地址占据 4 字节（在 RV32 架构中）或 8 字节（在 RV64 架构中）。处理器会根据陷阱的原因（存储在 `scause` 寄存器中）来计算偏移量，然后从陷阱向量表中获取对应的处理程序入口地址。(FreeRTOS中的 `SwitchContext`)
+​	`stvec`设置 S 模式 trap 的入口。Direct 模式下，异常和中断都跳到 BASE；Vectored 模式下，同步异常仍跳到 BASE，异步中断跳到 BASE + 4 × 中断原因编号。CPU 跳到对应地址执行指令，不会从那里再读取一个处理函数地址。
 
 ---
 
@@ -9454,7 +10174,7 @@ void frame_allocator_test()
 
 ![地址转换](quard-star/地址转换.png)
 
-- 首先**从`stap`寄存器**的低 44 位取出此进程的 3 级页表的**物理页号**，`× PAGESIZE(4KB)`后得到自己的 3 级页表的物理地址，通过虚拟地址的`vpn[2]` 键对值配对找到 2 级页表的物理页号。
+- 首先**从`satp`寄存器**的低 44 位取出此进程的 3 级页表的**物理页号**，`× PAGESIZE(4KB)`后得到自己的 3 级页表的物理地址，通过虚拟地址的`vpn[2]` 键对值配对找到 2 级页表的物理页号。
 - 将 2 级物理页表号`× PAGESIZE(4KB)`后得到自己的 2 级页表的物理地址，通过虚拟地址的`vpn[1]`进行键对值匹配找到 1 级页表的物理页号。
 - 将 1 级物理页表号`× PAGESIZE(4KB)`后得到自己的 1 级页表的物理地址，通过虚拟地址的`vpn[0]`进行键对值匹配得到物理地址的页号。
 - 将实际物理页号`× PAGESIZE(4KB) + 12位的offset`就得到了最终的物理地址。
@@ -9769,7 +10489,7 @@ void kvminit()
 }
 ```
 
-开启SV39的分页模式，只需要去写`stap`寄存器的值就好了，设置为`sv39`分页模式，然后将`root_ppn`写入。
+开启SV39的分页模式，只需要去写`satp`寄存器的值就好了，设置为`sv39`分页模式，然后将`root_ppn`写入。
 
 ``` c
 #define SATP_SV39 (8L << 60)
@@ -9909,11 +10629,11 @@ time: time.c
 	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/time $^
 ```
 
-`user.ld`：将程序入口地址指明为`main`函数，链接地址为`0x1 0000`：
+`user.ld`：将程序入口符号指明为`main`，链接地址为`0x10000`：
 
 ``` assembly
 OUTPUT_ARCH(riscv)
-ENTRY(_start)
+ENTRY(main)
 BASE_ADDRESS = 0x10000;
 
 SECTIONS
@@ -10036,7 +10756,7 @@ int main() {
 
 在OS的`makefile`中添加对`build.c`进行编译：
 
-``` maekfile
+``` makefile
 build_app: build.c
 	gcc $< -o build.out
 ```
@@ -10151,7 +10871,7 @@ AppMetadata  get_app_data(size_t app_id)
 
 ## 13.1 跳板页
 
-每个任务都有自己的根页表，内核程序也有自己的根页表，satp寄存器存储的是根页表所在的物理页的地址。
+每个任务都有自己的根页表，内核程序也有自己的根页表，satp 寄存器的 PPN 字段存储根页表的物理页号。
 
 每次用户态任务刚进入`__alltrap`时，`satp`仍然存储的是用户态任务的根页表在物理空间中的地址。**只有将任务的`trapcontext`保存到用户虚拟地址空间的`trapcontext`页之后，才能把`satp`里的值更改为内核程序的根页表的地址。**（这也是为什么保存每个任务的`trapcontext`修改为了在每个任务各自的虚拟地址空间内。如果依然要保存进内核虚拟地址空间的内核栈的话则需要使用一个通用寄存器来存储`satp`的切换，而`sscratch`寄存器已经被用来换栈了。
 
@@ -10532,13 +11252,11 @@ typedef struct TaskControlBlock
 }TaskControlBlock;
 ```
 
-# 14. 解析ELF文件
+# 解析`.elf`文件
 
-## 14.1 获取文件地址
+## 获取文件地址
 
-需要获取应用程序二进制文件的开始地址和结束地址。
-
-首先定义结构体存储其文件的开始/结束地址：
+需要获取应用程序二进制文件的开始地址和具体大小，首先定义结构体存储其文件的开始/结束地址：
 
 ``` c
 typedef struct {
@@ -10572,11 +11290,11 @@ AppMetadata get_app_data(size_t app_id)
 }
 ```
 
-## 14.2 解析ELF文件
+## 解析 `.elf` 文件
 
 ELF文件中最重要的便是**文件头（ELF_Header）**与**程序头表（Program Header）**。
 
-### 14.2.1 修改TCB结构体
+### 修改 TCB 结构体
 
 由于解析ELF文件会得到程序的`ustack、entry`以及创建程序的`pagetable`；并且由于地址空间隔离，当进入内核态时 OS 无法获取`trapcontext`的地址，因此需要在`TCB`中保存这些数据：
 
@@ -10600,13 +11318,13 @@ typedef struct TaskControlBlock
 }TaskControlBlock;
 ```
 
-### 14.2.2 文件头 (Elf64_Ehdr)
+### 文件头 (`Elf64_Ehdr`)
 
-首先定义结构体存储文件头的信息：魔数+文件适配的位数与大小端；文件是什么类型；适配的处理器是什么架构；程序的入口地址；程序头表和段表头在文件中的位置（偏移），以及对应的大小与描述符的个数。
+> 只要分析 ELF 文件头，就可以得到段表和段表字符串表，从而解析整个 ELF 文件。
 
-**文件头位于 ELF 文件的地址开始处，并且结构体成员分布固定，逐字节即可进行读取**。
+首先定义结构体存储文件头的信息：**魔数** + **目标机器位数与大小端**；**文件类型**；适配的**处理器架构**；**程序的入口地址**；**程序头表和段表头在文件中的位置**（偏移），以及对应的大小与描述符的个数。
 
-只要分析 ELF文件头，就可以得到段表和段表字符串表，从而解析整个 ELF 文件。
+> **文件头位于 ELF 文件的地址开始处，并且结构体成员分布固定，逐字节即可进行读取**。
 
 ``` c
 typedef struct {
@@ -10633,7 +11351,7 @@ typedef struct {
 } elf64_ehdr_t;
 ```
 
-### 14.2.3 段表头/程序头
+### 段表头/程序头
 
 如果是可重定位的 ELF 文件则是段表头：
 
@@ -10674,7 +11392,7 @@ typedef struct {
 } elf64_phdr_t;
 ```
 
-### 14.2.4 符号表/重定位表
+### 符号表/重定位表
 全局符号 (Global): 可被其他模块引用局部符号； (Local): 仅在当前模块可见弱符号 ；(Weak): 可以被覆盖的全局符号。
 
 ``` c
@@ -10706,7 +11424,7 @@ typedef struct{
 
 **重定位操作只针对代码段（.text），数据段（.data/.bss）本身不需要被重定位。**
 
-### 14.2.5 解析函数
+### 解析函数
 
 在`loader.c`种编写ELF文件解析函数：
 
@@ -10864,7 +11582,7 @@ void proc_pagetable(struct TaskControlBlock *p)
 }
 ```
 
-## 14.3 改进trap处理函数
+## 改进trap处理函数
 
 ``` c
 #include <timeros/os.h>
@@ -10954,7 +11672,7 @@ void trap_return()
 }
 ```
 
-## 14.4 修改sys_write调用
+## 修改sys_write调用
 
 假设一个应用程序在应用地址空间调用了`sys_write`函数，其中有个参数是`char *buf`，这里字符串存储的地址是应用地址空间，而执行`sys_write`函数时已经进入了内核虚拟地址空间，因此需要我们手动查页表去访问，因此在`syscall.c`中定义了一个辅助函数：
 
@@ -11055,10 +11773,6 @@ void __sys_read(size_t fd, const char* data, size_t len)
 ```
 
 ## 15.2 内核栈修改
-
-之前内核栈为这样：
-
-![image-20251015192632813](C:/Users/CJ/AppData/Roaming/Typora/typora-user-images/image-20251015192632813.png)
 
 需要在`trampoline`页和`app0 kstack`之间加上以各`guard page`，因此修改映射内核栈的代码：
 

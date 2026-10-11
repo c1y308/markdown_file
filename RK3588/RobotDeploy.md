@@ -1,10 +1,11 @@
-​    "http.proxy": "http://127.0.0.1:7900",
-​    "http.proxyStrictSSL": false,
-​    "github.copilot.advanced": {
-​        "debug.overrideProxyServer": "http://127.0.0.1:7900"
-​    }
+```json
+{
+  "http.proxy": "http://127.0.0.1:7900",
+  "http.proxySupport": "override",
+  "http.proxyStrictSSL": false,
+  "http.noProxy": ["127.0.0.1", "localhost", "::1"]
 }
-
+```
 # 重构内核
 
 ## 卸载原内核
