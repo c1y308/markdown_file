@@ -1,4 +1,5 @@
-# RISCV 指令集
+> # RISCV 指令集
+>
 
 > RISC-V 基本思想：数据先放寄存器，计算在寄存器之间进行；访问内存主要靠 `load`/`store`；控制流程靠 `branch`/`jump`。
 >
@@ -2116,9 +2117,7 @@ t1 → 临时保存字符
 
 > saved registers
 
-如果一个函数修改了这些寄存器，通常需要先保存，在函数返回前使用修改了这些寄存器的数据，**函数调用后这些寄存器的值会恢复。**
-
-因此称为`callee-saved`寄存器。
+如果一个函数修改了这些寄存器，通常需要先保存，在函数返回前使用修改了这些寄存器的数据，**函数调用后这些寄存器的值需要恢复，需要被调用者来保存这些寄存器，**因此称为`callee-saved`寄存器。
 
 ## 一个典型函数调用
 
@@ -8124,9 +8123,9 @@ dd of=fw.bin bs=1k conv=notrunc seek=4K if=$SHELL_FOLDER/output/trusted_domain/t
 dd of=fw.bin bs=1k conv=notrunc seek=8K if=$SHELL_FOLDER/output/os/os.bin
 ```
 
-# 6.封装printk函数
+# 封装printk函数
 
-## 6.1 x86架构实现可变参数
+## x86架构实现可变参数
 
 ``` c
 // 1. 定义va_list：x86下为char*（32位，字节级指针，支持逐字节偏移）
@@ -8408,15 +8407,992 @@ SRCS_C = \
 		printf.c
 ```
 
-# 7. 实现U模式的trap机制
+# 物理内存管理
 
-## 7.1 riscv的特权级
+## xv6 的物理内存管理
 
-![特权级](quard-star/特权级.png)
+### 管理(`kmem`)
 
-其中**级别数越大特权级越高**（与FreeRTOS系统的相反）。移植的OpenSBI运行在M模式下，U模式下的程序可以通过`ecall`指令调用S模式下（操作系统）提供的服务称之为**ABI**，运行在S模式下的操作系统程序也可以通过`ecall`指令调用OpenSBI提供的服务称之为**SBI**。
+![xv6内存管理](./assets/xv6内存管理.png)
 
-<img src="quard-star/USM切换.png" alt="USM切换" style="zoom:80%;" />
+`xv6`内核的起始地址为`KERNBASE = 0X8000 0000`开始，结束的地方为`PHYSTOP = 0X8800 0000`.这之间的`128MB`的地方内核的**代码段**是**可读可执行**的，内核的**数据段**是**可读可写**的。所以实际我们可以分配和管理的地址是**从代码段结束的地方开始**（包括数据段）。下面阐述如何对空闲地址页进行管理：
+
+首先拿到可管理的内存空间的起始地址。
+
+``` c
+extern char end[];  // 首先拿到代码段结束地址
+```
+然后定义一个数据结构`kmem`，包含一个锁和一个链表。
+
+``` c
+struct run{
+    struct run *next;
+};  // 链表节点
+
+struct {
+    struct spinlock lock;
+    struct run *freelist;  // freelist 始终指向当前链表的第一个空闲页
+} kmem;  // 未命名结构体，直接声明了一个变量 kmem
+```
+
+定义`kinit()`函数，**按页大小扫描**`end-PHYSTOP`之间可用的物理内存页，将可用的物理内存页通过`kmem`维护起来，同时将可用的空闲物理页中的每个字节的数据填充，用于初始化。
+
+``` c
+void kinit(){
+    initlock(&kmem.lock, "kmem");
+    freerange(end, (void*)PHTSTOP);
+}
+
+void freerange(void *pa_start, void *pa_end){
+    char *p;
+    p = (char*) PGROUNDUP((uint64_t) pa_start);
+    for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)  // 从起始页开始按页遍历，释放每一页
+        kfree(p);
+}
+```
+### 释放(`kfree`)
+
+``` c
+/*释放需要手动传入页的地址(并非页号)，rcore项目中是传入页号*/
+void kfree(void *pa){
+    /* 检测地址是否按页对齐或者是否超出范围 */
+    if((uint64_t)pa % PGSIZE != 0 || (char*)pa < end || (uint64_t)pa >= PHYSTOP)
+        panic("kfree");
+    
+    memset(pa, 1, PGSIZE);  // 内容填充为 1
+    
+    /* 每个空闲页的指针被强制转换为 struct run*，利用页的起始空间存储 next 指针 */
+    struct run *r = (struct run*)pa;
+    
+    acquire(&kmem.lock);
+    /* 将当前页作为节点插入到链表头部 */
+    r->next = kmem.freelist;  
+    kmem.freelist = r;
+    release(&kmem.lock);
+}
+```
+
+### 分配(`kmalloc`) 
+
+与之相对的是`kalloc()`函数，返回的是分配的**一块**物理内存页的指针。逻辑为从`kmem`的链表的头部取出一个空闲页块的指针，然后将链表头部指针后移。
+
+``` c
+void *kalloc(void){
+    struct run *r;
+    
+    acquire(&kmem.lock);
+    r = kmem.freelist;
+    if(r)
+        kmem.freelist = r->next;  // 指向下一个待分配的物理内存指针
+    release(&kmem.lock);
+    
+    if(r)
+        memset((char*)r, 5, PGSIZE);
+    return (void*)r;
+}
+```
+
+## rcore 的物理内存管理
+
+**rcore**采用的是**栈式**物理页帧管理策略，**以页为单位**。核心的数据结构如下：
+
+``` c
+typedef struct 
+{
+    uint64_t  current;   //空闲内存的起始物理页号
+    uint64_t  end;       //空闲内存的结束物理页号
+    Stack recycled;      //防止current走回头路，可以让current递增
+}StackFrameAllocator;
+```
+
+其中各字段的含义为：物理页号`[current, end]`此前均**从未被分配出去过**的物理内存，而向量`recycled`以**后进先出**的方式保存了被回收的物理页号。
+
+因此为了实现这种栈式的管理，我们首先得实现一个栈的数据结构，C++中有`stack`可使用，但C语言中得自己实现。因此在`lib`目录下新建一个`stack.c`的文件，在`timeros` 目录下新建了一个`stack.h`的头文件。
+
+#### 定义栈及操作函数
+
+编写**stack.h**：
+
+``` c
+#ifndef TOS_STACK_H__
+#define TOS_STACK_H__
+
+#include "os.h"
+
+#define MAX_SIZE 10000
+
+typedef struct {  // 使用结构体实现栈的数据结构
+    u64 data[MAX_SIZE];  // 物理页号是 64 类型
+    int top;
+} Stack;
+
+bool isEmpty(Stack *stack);
+bool isFull(Stack *stack);
+void push(Stack *stack, u64 value);
+u64  pop(Stack *stack);
+u64  top(Stack *stack);
+
+#endif
+```
+
+编写**stack.c**：
+
+``` c
+#include <timeros/stack.h>
+
+// 初始化栈
+void initStack(Stack *stack) {
+    stack->top = -1;
+}
+
+// 判断栈是否为空
+bool isEmpty(Stack *stack) {
+    return stack->top == -1;
+}
+
+// 判断栈是否已满
+bool isFull(Stack *stack) {
+    return stack->top == MAX_SIZE - 1;
+}
+
+// 入栈操作
+void push(Stack *stack, u64 value) {
+    if (isFull(stack)) {
+        printk("Stack overflow\n");
+        return;
+    }
+    stack->data[++stack->top] = value;
+}
+
+// 出栈操作
+u64 pop(Stack *stack) {
+    if (isEmpty(stack)) {
+        printk("Stack underflow\n");
+        return -1; // 表示栈为空或操作失败
+    }
+    return stack->data[stack->top--];
+}
+
+// 获取栈顶元素
+u64 top(Stack *stack) {
+    if (isEmpty(stack)) {
+        printk("Stack is empty\n");
+        return -1; // 表示栈为空
+    }
+    return stack->data[stack->top];
+}
+```
+
+#### 定义地址/页及函数
+
+将`PhysAddr、VirtAddr、PhysPageNum、VirtPageNum`全部定义为结构体类型，在`Rcore`中可以为这些结构体实现操作函数，但C语言中没有面向对象的特性，因此在`address.c`中手动实现。
+
+``` c
+#ifndef TOS_ADDRESS_H
+#define TOS_ADDRESS_H
+
+#include <timeros/os.h>
+
+#define PAGE_SIZE 0x1000      // 4kb  一页的大小
+#define PAGE_SIZE_BITS   0xc  // 12   页内偏移地址长度
+
+#define PA_WIDTH_SV39 56      //物理地址长度
+#define VA_WIDTH_SV39 39      //虚拟地址长度
+#define PPN_WIDTH_SV39 (PA_WIDTH_SV39 - PAGE_SIZE_BITS)  // 物理页号 44位 [55:12]
+#define VPN_WIDTH_SV39 (VA_WIDTH_SV39 - PAGE_SIZE_BITS)  // 虚拟页号 27位 [38:12]
+
+//内核开始地址
+#define KERNBASE 0x80200000L  
+//物理地址结束地址
+#define PHYSTOP (KERNBASE + 128*1024*1024)
+
+
+// Sv39的最大地址空间 512G
+#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+
+//跳板页开始位置
+#define TRAMPOLINE (MAXVA - PAGE_SIZE)
+
+//计算应用内核栈的地址，每个应用的内核栈下都有一个无效的守卫页
+#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PAGE_SIZE)
+
+// Sv39 分页机制
+#define SATP_SV39 (8ULL << 60)
+#define MAKE_SATP(pagetable) (SATP_SV39 | (((u64)pagetable)))
+#define MAKE_PAGETABLE(satp) ( satp & (SATP_SV39 - 1) )
+//Trap页开始位置
+#define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)
+
+
+#define PGROUNDUP(sz)  (((sz)+PAGE_SIZE-1) & ~(PAGE_SIZE-1))
+#define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE-1))
+
+/* 由页表项取出物理地址与标志位 */
+#define PTE2PA(pte) (((pte) >> 10) << 12)
+#define PTE_FLAGS(pte) ((pte) & 0x3FF)
+/* 物理地址 */
+typedef struct {
+    uint64_t value; 
+} PhysAddr;
+
+/* 虚拟地址 */
+typedef struct {
+    uint64_t value;
+} VirtAddr;
+
+/* 物理页号 */
+typedef struct  {
+    uint64_t value;
+} PhysPageNum;
+
+/* 虚拟页号 */
+typedef struct {
+    uint64_t value;
+} VirtPageNum;
+
+
+/* 定义页表项 */
+typedef struct  
+{
+    uint64_t bits;
+}PageTableEntry;
+
+// 定义位掩码常量
+#define PTE_V (1 << 0)   //有效位
+#define PTE_R (1 << 1)   //可读属性
+#define PTE_W (1 << 2)   //可写属性
+#define PTE_X (1 << 3)   //可执行属性
+#define PTE_U (1 << 4)   //用户访问模式
+#define PTE_G (1 << 5)   //全局映射
+#define PTE_A (1 << 6)   //访问标志位
+#define PTE_D (1 << 7)   //脏位
+
+/* 定义页表 */
+typedef struct {
+    PhysPageNum root_ppn; //根节点
+}PageTable;
+
+
+
+
+void frame_alloctor_init();
+void kvminit();
+void kvminithart();
+PhysPageNum kalloc(void);
+void kfree(PhysPageNum ppn);
+void PageTable_map(PageTable* pt,VirtAddr va, PhysAddr pa, u64 size ,uint8_t pteflgs);
+
+VirtAddr virt_addr_from_size_t(uint64_t v);
+PhysAddr phys_addr_from_size_t(uint64_t v);
+PhysAddr phys_addr_from_phys_page_num(PhysPageNum ppn);
+VirtPageNum virt_page_num_from_virt_addr(VirtAddr virt_addr);
+VirtPageNum virt_page_num_from_size_t(uint64_t v);
+VirtPageNum floor_virts(VirtAddr virt_addr);
+/* 根据虚拟页号查找页表项, 不存在时返回 NULL (定义见 address.c) */
+PageTableEntry* find_pte(PageTable* pt, VirtPageNum vpn);
+
+/* 用户地址空间管理 (进程 fork/exec/exit 使用) */
+int uvmcopy(PageTable* old, PageTable* new, u64 sz);
+void uvmunmap(PageTable* pt, VirtPageNum vpn, u64 npages, int do_free);
+void uvmfree(PageTable* pt, u64 sz);
+void proc_freepagetable(PageTable* pagetable, u64 sz);
+#endif
+```
+
+在Rcore中可以为这些结构体实现操作函数，但是C语言没有面向对象的特性，因此在`address.c`中手动实现：
+
+``` c
+#include <timeros/address.h>
+/******* u64 与 PhysAddr/PhysPageNum之间互相转换 *************/
+PhysAddr phys_addr_from_size_t(size_t v) {
+    PhysAddr addr;
+    addr.value = v & ((1ULL << PA_WIDTH_SV39) - 1);  //PA_WIDTH_SV39为有效页的大小（56位）
+    return addr;
+}
+
+PhysPageNum phys_page_num_from_size_t(size_t v) {
+    PhysPageNum pageNum;
+    pageNum.value = v & ((1ULL << PPN_WIDTH_SV39) - 1);
+    return pageNum;
+}
+
+uint64_t size_t_from_phys_addr(PhysAddr v) {
+    return v.value;
+}
+
+uint64_t size_t_from_phys_page_num(PhysPageNum v) {
+    return v.value;
+}
+/************* 从物理页号转换为实际物理地址 ******************/
+PhysAddr phys_addr_from_phys_page_num(PhysPageNum ppn)
+{
+    PhysAddr addr;
+    addr.value = ppn.value << PAGE_SIZE_BITS ;  // 左移替代乘法
+    return addr;
+}
+
+VirtAddr virt_addr_from_size_t(uint64_t v) {
+    VirtAddr addr;
+    addr.value = v & ((1ULL << VA_WIDTH_SV39) - 1);  // 只要后39位
+    return addr;
+}
+
+VirtPageNum virt_page_num_from_size_t(uint64_t v) {
+    VirtPageNum pageNum;
+    pageNum.value = v & ((1ULL << VPN_WIDTH_SV39) - 1);  // 只要后27位
+    return pageNum;
+}
+
+uint64_t size_t_from_virt_addr(VirtAddr v) {
+    if (v.value >= (1ULL << (VA_WIDTH_SV39 - 1))) {
+        return v.value | ~((1ULL << VA_WIDTH_SV39) - 1);
+    } else {
+        return v.value;
+    }
+}
+
+uint64_t size_t_from_virt_page_num(VirtPageNum v) {
+    return v.value;
+}
+
+/* 物理地址向下取整得到物理页号 */
+PhysPageNum floor_phys(PhysAddr phys_addr) {
+    PhysPageNum phys_page_num;
+    phys_page_num.value = phys_addr.value / PAGE_SIZE;
+    return phys_page_num;
+}
+
+/* 物理地址向上取整得到物理页号 */
+PhysPageNum ceil_phys(PhysAddr phys_addr) {
+    PhysPageNum phys_page_num;
+    phys_page_num.value = (phys_addr.value + PAGE_SIZE - 1) / PAGE_SIZE;
+    return phys_page_num;
+}
+
+/* 虚拟地址向下取整转换为虚拟页号 */
+VirtPageNum virt_page_num_from_virt_addr(VirtAddr virt_addr)
+{
+    VirtPageNum vpn;
+    vpn.value =  virt_addr.value / PAGE_SIZE;
+    return vpn;
+}
+```
+#### 管理（`allocator`）
+
+首先定义一个`new`函数，用于创建`FrameAllocator`的实例，只需将区间两端设为 0， 然后创建一个初始化栈。
+
+``` c
+/* 内存分配器 */
+typedef struct 
+{
+    uint64_t current;   //空闲内存的起始物理页号
+    uint64_t  end;      //空闲内存的结束物理页号
+    Stack recycled;     // 
+}StackFrameAllocator;
+
+
+void StackFrameAllocator_new(StackFrameAllocator *allocator) {
+    allocator->current = 0;  // 页号
+    allocator->end = 0;      // 页号
+    initStack(&allocator->recycled);
+}
+```
+
+然后是`init`函数，用于将`[current, end)`初始化为可用物理页号区间：
+
+```c
+void StackFrameAllocator_init(StackFrameAllocator *allocator, PhysPageNum l, PhysPageNum r) {
+    allocator->current = l.value;
+    allocator->end = r.value;
+}
+```
+#### 页的分配（`alloc`）
+
+接下来是对物理页帧的分配实现：**首先**检查有无之前回收的页，如果有则直接弹出栈顶并返回；**否则**就分配新的页号。
+
+``` c
+PhysPageNum StackFrameAllocator_alloc(StackFrameAllocator *allocator){
+    PhysPageNum ppn;
+    if(allocator->recycled.top >= 0)	// 有回收的物理页，直接弹出这个页
+        ppn.value = pop(&(allocator->recycled));
+    else{
+        if(allocator->current == allocator->end){  // 已经分配完了
+            ppn.value = 0; // Return 0 as None
+        }else{
+            ppn.value = allocator->current++;	// 把 current 的页号分配出去
+        }
+    }
+    
+    PhysAddr addr = phys_addr_from_phys_page_num(ppn);
+    memset(addr.value, 0, PAGE_SIZE);
+    return ppn;
+}
+```
+
+#### 页的回收（`dealloc`）
+
+在进行`dealloc`的时候，需要检查回收页面的合法性，然后将其压入`recycled`栈中。回收页面合法有两个条件：
+
+- 该页面一定之前被分配出去过，因此**物理页号一定小于`current`**。
+- 该页面没有处于正在回收状态，因此**它的物理页号也不能在栈`recycled`中找到**。
+
+``` c
+void StackFrameAllocator_dealloc(StackFrameAllocator *allocator, PhysPageNum ppn) {
+    uint64_t ppnValue = ppn.value;
+    // 检查回收的页面之前一定被分配出去过
+    if (ppnValue >= allocator->current) {
+        printk("Frame ppn=%lx has not been allocated!\n", ppnValue);
+        return;
+    }
+    // 检查未在回收列表中
+    if(allocator->recycled.top >= 0)
+    {
+        for (size_t i = 0; i <= allocator->recycled.top; i++)
+        {
+            if(ppnValue ==allocator->recycled.data[i] )
+            return;
+        }
+    }
+    // 回收物理内存页号
+    push(&(allocator->recycled), ppnValue);
+}
+```
+
+编写测试代码：
+
+``` c
+static StackFrameAllocator FrameAllocatorImpl;
+void frame_allocator_test()
+{
+    StackFrameAllocator_new(&FrameAllocatorImpl);
+    StackFrameAllocator_init(&FrameAllocatorImpl, 
+            floor_phys(phys_addr_from_size_t(MEMORY_START)), 
+            ceil_phys(phys_addr_from_size_t(MEMORY_END)));
+    printk("Memoery start:%d\n",floor_phys(phys_addr_from_size_t(MEMORY_START)));
+    printk("Memoery end:%d\n",ceil_phys(phys_addr_from_size_t(MEMORY_END)));
+    PhysPageNum frame[10];
+    for (size_t i = 0; i < 5; i++)
+    {
+         frame[i] = StackFrameAllocator_alloc(&FrameAllocatorImpl);
+         printk("frame id:%d\n",frame[i].value);
+    }
+    for (size_t i = 0; i < 5; i++)
+    {
+         StackFrameAllocator_dealloc(&FrameAllocatorImpl,frame[i]);
+         printk("allocator->recycled.data.value:%d\n",FrameAllocatorImpl.recycled.data[i]);
+         printk("frame id:%d\n",frame[i].value);
+     }
+     PhysPageNum frame_test[10];
+     for (size_t i = 0; i < 5; i++)
+     {
+          frame[i] = StackFrameAllocator_alloc(&FrameAllocatorImpl);
+         printk("frame id:%d\n",frame[i].value);
+     }
+}
+```
+## RiscV 的 SV39 分页
+
+为了方便实现虚拟页面到物理页帧的地址转换，我们给每个**虚拟页面**和**物理页帧**一个编号，分别称为 **虚拟页号** (VPN, Virtual Page Number) 和 **物理页号** (PPN, Physical Page Number)**（ 页号 * pagesize(4KB) + 页内偏移就是地址 ）** 。
+
+每个应用都有一个表示地址映射关系的页表 (Page Table) ，记录了该应用每个虚拟页面映射到物理内存中的哪个物理页帧。每个物理页号（PPN）在 整个物理地址空间内是唯一的。
+
+如果将页表看成一个键值对，其键的类型为虚拟页号，值的类型则为物理页号。当 MMU 进行地址转换的时候，虚拟地址会分为两部分（虚拟页号 + 页内偏移），**MMU首先找到虚拟地址所在虚拟页面的页号，然后查当前应用的页表，根据虚拟页号找到下级页表（或物理地址）的物理页号（*4kb 也就得到了物理地址）**；最后按照虚拟地址的页内偏移，给物理页号对应的物理页帧的起始地址加上一个偏移量，这就得到了实际访问的物理地址。
+
+### `satp` 寄存器
+
+<img src="./assets/satp寄存器.png" alt="satp寄存器" style="zoom:80%;" />
+
+当 `MODE` 设置为 `0 `的时候，代表所有访存都被视为物理地址；而设置为 `8` 的时候，**SV39 分页机制被启用**，所有 U/S 特权级的访存被视为一个 `39` 位的虚拟地址，它们需要先经过 MMU 的地址转换流程，如果顺利的话，则会变成一个 `56` 位的物理地址来访问物理内存；否则则会触发异常，这体现了分页机制的内存保护能力。
+
+`39` 位的虚拟地址可以用来访问理论上最大 `512GB` 的地址空间，而 `56` 位的物理地址在理论上甚至可以访问一块大小比这个地址空间的还高出几个数量级的物理内存。但是实际上无论是虚拟地址还是物理地址，真正有意义、能够通过 MMU 的地址转换或是 CPU 内存控制单元的检查的地址仅占其中的很小一部分，因此它们的理论容量上限在目前都没有实际意义。
+
+### 地址格式与组成
+
+<img src="./assets/地址格式与组成.png" alt="地址格式与组成" style="zoom:80%;" />
+
+![为什么39](./assets/为什么39.png)
+
+### 地址转换流程
+
+多级页表可以节约内存空间，按需分配。
+
+**每一页大小为 4KB，每一个页表项大小为 8 字节（64位），因此每一页可以容纳 512 个页表项(0x1 1111 1111)，刚好 9 位，因此虚拟地址的每 9 位在每一级页表（占据一页）中一定有对应的页表项。**
+
+**物理地址由：物理页号（44位，左移12位就相当于 × 4KB） + 页内偏移（12位）组成。**
+
+![地址转换](./assets/地址转换.png)
+
+- 首先**从`satp`寄存器**的低 44 位取出此进程的 3 级页表的**物理页号**，`× PAGESIZE(4KB)`后得到自己的 3 级页表的物理地址，通过虚拟地址的`vpn[2]` 键对值配对找到 2 级页表的物理页号。
+- 将 2 级物理页表号`× PAGESIZE(4KB)`后得到自己的 2 级页表的物理地址，通过虚拟地址的`vpn[1]`进行键对值匹配找到 1 级页表的物理页号。
+- 将 1 级物理页表号`× PAGESIZE(4KB)`后得到自己的 1 级页表的物理地址，通过虚拟地址的`vpn[0]`进行键对值匹配得到物理地址的页号。
+- 将实际物理页号`× PAGESIZE(4KB) + 12位的offset`就得到了最终的物理地址。
+
+### 页表项
+
+页表项（PTE, Page Table Entry）是一个`64bit`的数据，其低10位存储的是下级物理页的属性和标志位，`10-54`44位存储的是下级页表的**物理页号**。
+
+![页表项](./assets/页表项.png)
+
+## 代码实现
+
+**将`kernelend--PHYSTOP`之间的`freememory`给`FrameAllocator`进行分配。**
+
+### 页表操作
+
+![页表项2](./assets/页表项2.png)
+
+页表项（PTE, Page Table Entry）是一个`64bit`的数据，其低10位存储的是**下级物理页**的属性和标志位，`10-54`44位存储的是下级页表所在的物理页号。
+
+在`address.h`中定义：
+
+``` c
+/* 定义页表项 */
+typedef struct  
+{
+    uint64_t bits;
+}PageTableEntry;
+
+// 定义位掩码常量
+#define PTE_V (1 << 0)   //有效位
+#define PTE_R (1 << 1)   //可读属性
+#define PTE_W (1 << 2)   //可写属性
+#define PTE_X (1 << 3)   //可执行属性
+#define PTE_U (1 << 4)   //用户访问模式
+#define PTE_G (1 << 5)   //全局映射
+#define PTE_A (1 << 6)   //访问标志位
+#define PTE_D (1 << 7)   //脏位
+```
+在`address.c`中定义PTE的操作函数：
+
+``` c
+/* 新建一个页表项（记录下级物理页地址[后44位]与下级物理页的属性[前10位]） */
+PageTableEntry PageTableEntry_new(PhysPageNum ppn, uint8_t PTEFlags) {
+    PageTableEntry entry;
+    entry.bits = (ppn.value << 10) | PTEFlags;
+    return entry;
+}
+
+/* 创建一个清空的页表项 */
+PageTableEntry PageTableEntry_empty() {
+    PageTableEntry entry;
+    entry.bits = 0;
+    return entry;
+}
+
+/* 获取下级页表的物理页号 */
+PhysPageNum PageTableEntry_ppn(PageTableEntry *entry) {
+    PhysPageNum ppn;
+    ppn.value = (entry->bits >> 10) & ((1ul << 44) - 1);
+    return ppn;
+}
+
+/* 获取页表项的标志位 */
+uint8_t PageTableEntry_flags(PageTableEntry *entry) {
+    return entry->bits & 0xFF;
+}
+
+/* 判断页表项是否有效/空 */
+bool PageTableEntry_is_valid(PageTableEntry *entry) {
+    uint8_t entryFlags = PageTableEntry_flags(entry);
+    return (entryFlags & PTE_V) != 0;
+}
+```
+### 物理页的访问方法
+
+假设我拿到了物理页号，我要去访问此物理页号对应的物理帧的内存数据。需要定义两个辅助函数：
+
+- 首先是**以一个字节作为单位访问这一页的数据**：因此拿到物理页号后转换为对应的物理地址，再将其转换为一个`uint8_t*`的指针，这样就可以根据此指针操作这一页全部的的 4096 个字节了。
+
+``` c
+uint8_t* get_bytes_array(PhysPageNum ppn)
+{
+    // 先从物理页号转换为物理地址
+    PhysAddr addr = phys_addr_from_phys_page_num(ppn);
+    return (uint8_t*) addr.value;
+}
+```
+- 然后**假设物理页帧中存储的是 PTE**，我现在要去访问这一个个PTE。同样先拿到物理页号后转换为对应的物理地址，然后将其转换为`PageTableEntry*`指针就可以了。
+``` c
+PageTableEntry* get_pte_array(PhysPageNum ppn)
+{
+    // 先从物理页号转换为物理地址
+    PhysAddr addr = phys_addr_from_phys_page_num(ppn);
+    return (PageTableEntry*) addr.value;  // 指针与数组
+}
+```
+在 C/C++ 中，**`PageTableEntry*` 指针被称为“数组”**，是因为它 **指向了一块连续内存中的多个 `PageTableEntry` 元素**，可以通过指针算术（如 `ptr[index]` 或 `ptr + offset`）像数组一样访问。这是 C/C++ 指针和数组紧密关联的核心特性之一。
+
+### 地址转换绑定
+
+一个物理页（4 KB）可以存放 512 个页表项（64bit），所以虚拟地址的每 9 位（512）作为一次寻址映射。
+
+![虚实地址映射](./assets/虚实地址映射.png)
+
+MMU在寻址的流程如上图所示，要先拿到`Virtual_address`的三级页号索引，定义如下辅助函数：
+``` c
+/* 按照 9 位划分，拿到虚拟页号的三级索引，按照从高到低的顺序返回 */
+void indexes(VirtPageNum vpn, size_t *result) 
+{
+    size_t idx[3];
+    for (int i = 2; i >= 0; i--) {  // idx[0]是高地址位
+        idx[i] = vpn.value & 0x1ff;   // 00000001_11111111 = 0x1ff
+        vpn.value >>= 9;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        result[i] = idx[i];
+    }
+}
+```
+然后我们依据拿到的虚拟地址的三级页号索引来查找页表项。
+
+在这之前需要定义一个**管理页表的结构体**：**每个应用的地址空间都对应不同的多级页表**，这也就意味着不同程序的根页表是不一样的。因此`PageTable`要保存根页表的物理页号`root_ppn`作为页表唯一的区分标志。
+
+``` c
+typedef struct {
+    PhysPageNum root_ppn; // 根页表的物理页号
+}PageTable;
+```
+然后再来看查找/填充页表项的操作：传入一个`PageTable`进`satp`寄存器，在根页表中根据虚拟地址的首 9 个索引来找到对应的页表项，如果此页表项为空，则分配一页内存，然后新建一个页表项进行填充。直到三级页表索引完毕，会返回虚拟地址最终对应的三级页表的页表项，此时三级页表的页表项是空的，在进行`map`时只需要对此页表项赋值就行。**核心思想：确保虚拟地址（`vpn`）最终映射到一个有效的物理页**，并且在映射过程中按需分配物理内存（如果尚未分配）。
+
+``` c
+PageTableEntry* find_pte_create(PageTable* pt,VirtPageNum vpn)
+{
+    // 拿到虚拟页号的三级索引，保存到idx数组中
+    size_t idx[3];
+    indexes(vpn, idx); 
+    //页表都是按照页分配的
+    PhysPageNum ppn = pt->root_ppn;
+    //从根页表开始遍历
+    for (int i = 0; i < 3; i++) 
+    {
+        PageTableEntry* pte =  &get_pte_array(ppn)[idx[i]];  
+        
+        if (i == 2) {
+            return pte;  // 此PTE记录了最终物理地址的ppn，如果要进行绑定可以人为写入ppn
+        }
+        /*********************** 没有pte，分配一页内存，然后创建 *************************/
+        if (!PageTableEntry_is_valid(pte)) {
+            // 分配一页物理内存
+            PhysPageNum frame =  StackFrameAllocator_alloc(&FrameAllocatorImpl);
+            // 在这个分配的页上创建二级页表
+            *pte =  PageTableEntry_new(frame,PTE_V);
+        }
+        // 取出下级页表的物理页号
+        ppn = PageTableEntry_ppn(pte);
+    }
+
+}
+
+PageTableEntry* find_pte(PageTable* pt, VirtPageNum vpn)
+{
+    // 拿到虚拟页号的三级索引，保存到idx数组中
+    size_t* idx;
+    indexes(vpn, idx); 
+    //根节点
+    PhysPageNum ppn = pt->root_ppn;
+    //从根节点开始遍历，如果没有pte，就分配一页内存，然后创建一个
+    for (int i = 0; i < 3; i++) 
+    {
+        //拿到具体的页表项
+        PageTableEntry* pte =  &get_pte_array(ppn)[idx[i]];
+            if (i == 2) {
+                return pte;
+            }
+        //如果此项页表为空
+            if (!PageTableEntry_is_valid(pte)) {
+                return NULL;
+            }
+        //取出进入下级页表的物理页号
+        ppn = PageTableEntry_ppn(pte);
+    }
+    
+}
+
+
+
+/* argc[0]:页表  argc[1]:虚拟地址  argc[2]:物理地址  argc[3]:需要映射多少地址 */
+void PageTable_map(PageTable* pt,VirtAddr va, PhysAddr pa, u64 size ,uint8_t pteflgs)
+{
+    if(size == 0)
+        panic("mappages: size");
+    /* 真实映射是页映射 */
+    PhysPageNum ppn = floor_phys(pa);	// 需要映射的虚拟页的起始页号
+    VirtPageNum vpn = floor_virts(va);	// 需要映射到的物理页的起始页号
+    u64 last = (va.value + size - 1) / PAGE_SIZE;	// 映射结束时的虚拟页号
+    
+    for(;;)
+    {
+        PageTableEntry* pte = find_pte_create(pt,vpn);
+        assert(!PageTableEntry_is_valid(pte));
+        *pte = PageTableEntry_new(ppn,PTE_V | pteflgs);	// 映射就是把这个虚拟页最后指向的PTE中的页指向输入的物理页号
+         
+        if( vpn.value == last )
+            break;
+        
+        // 一页一页映射
+        vpn.value += 1;
+        ppn.value += 1;
+    }
+}
+
+void PageTable_unmap(PageTable* pt, VirtPageNum vpn)
+{
+    PageTableEntry* pte = find_pte(pt,vpn);
+    assert(!PageTableEntry_is_valid(pte));
+    *pte = PageTableEntry_empty();
+}
+```
+## 内核内存映射管理
+
+<img src="./assets/内核内存布局-1792411718125-12.png" alt="内核内存布局" style="zoom:50%;" />
+
+现在的内核的地址结构如上图所示。内核的起始地址是`KERNBASE = 0x8020 0000`，内核的代码被编译器编译后由代码段和数据段组成，可以在`os.map`中看见各段的地址空间。代码段的结束地址设定为`etext`，数据段结束的地址设定为`kernelend`。然后指定从内核结束后向上约 127MB 的空间为空闲内存，可以给应用使用。上述空间指定是在`os.ld`文件中规划的（定义了两个符号：`PROVIDE(etext = .)和PROVIDE(_data_end = .)`，可以用C语言拿到值）：
+
+``` assembly
+OUTPUT_ARCH(riscv)
+ENTRY(_start)
+BASE_ADDRESS = 0x80200000;
+MEMORY
+{ 
+	ram (rxai!w) : ORIGIN = 0x80200000, LENGTH = 128M
+}
+SECTIONS
+{
+    skernel = ORIGIN(ram);   /* 定义内核起始内存地址 */
+	.text : {
+        *(.text.entry)
+        . = ALIGN(4K);
+        
+        trampoline = .;
+        *(.text.trampoline);
+        . = ALIGN(4K);
+		_strampoline = .;
+		
+		*(.text .text.*)
+		. = ALIGN(4K);
+		PROVIDE(etext = .);
+	} >ram
+
+
+	.rodata : {
+		*(.rodata .rodata.*)
+		. = ALIGN(4K);
+	} >ram
+
+
+	.data : {
+		*(.sdata .sdata.*)
+		*(.data .data.*)
+		. = ALIGN(4K);
+		PROVIDE(_data_end = .);
+	} >ram
+
+	.bss :{
+		*(.sbss .sbss.*)
+		*(.bss .bss.*)
+		*(COMMON)
+		. = ALIGN(4K);
+	} >ram
+	
+	PROVIDE(kernelend = .);
+}
+```
+
+了解完内存分布之后，就可以初始化内存了。**可用内存是从`kernelend`开始到`PHYSTOP`结束之间的大小，内核占据的`.text`代码段和`.data`数据段是不可用的**。在`address.c`中初始化可用内存：
+
+``` c
+StackFrameAllocator FrameAllocatorImpl;
+extern char kernelend[];
+#define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE-1))
+void frame_alloctor_init()
+{
+    // 初始化时 kernelend 需向上取整
+    StackFrameAllocator_new(&FrameAllocatorImpl);
+    StackFrameAllocator_init(&FrameAllocatorImpl, \
+            ceil_phys(phys_addr_from_size_t(kernelend)), \
+            ceil_phys(phys_addr_from_size_t(PHYSTOP)));
+    printk("Memoery start:%p\n",kernelend);
+    printk("Memoery end:%p\n",PHYSTOP);
+}
+```
+
+**针对 OS 的`.text`段、`.rodata`段、`.data`段、`TRAMPOLINE`段，采用恒等映射的方式**：
+
+``` c
+PageTable kernel_pagetable;
+u64 kernel_satp;
+void kvminit()	// 在 os_main()中调用这个函数
+{
+  kernel_pagetable = kvmmake();
+  kernel_satp = MAKE_SATP(kernel_pagetable.root_ppn.value);
+  printk("kernel satp:%lx\n",kernel_satp);
+}
+
+#define MAKE_SATP(pagetable) (SATP_SV39 | (((u64)pagetable)))
+
+extern char etext[];
+extern char trampoline[];
+
+PageTable kvmmake(void)
+{
+    PageTable pt;
+    PhysPageNum root_ppn =  kalloc();	// 分配一页物理页得到根页表的物理页号
+    pt.root_ppn = root_ppn;
+
+    // map kernel text executable and read-only.
+    PageTable_map(&pt,virt_addr_from_size_t(KERNBASE),phys_addr_from_size_t(KERNBASE), \
+                    (u64)etext-KERNBASE , PTE_R | PTE_X ) ;
+    // map kernel data and the physical RAM we'll make use of. 
+    PageTable_map(&pt,virt_addr_from_size_t((u64)etext),phys_addr_from_size_t((u64)etext ), \
+                    PHYSTOP - (u64)etext , PTE_R | PTE_W ) ;
+    // map the trampoline for trap entry/exit to the highest virtual address in the kernel.
+    PageTable_map(&pt, virt_addr_from_size_t(TRAMPOLINE), phys_addr_from_size_t((u64)trampoline), \
+                    PAGE_SIZE, PTE_R | PTE_X );
+
+    //allocate and map a kernel stack for each process.
+    proc_mapstacks(&pt);
+    
+    return pt;
+}
+
+```
+
+**然后遍历所有的应用程序，为每个应用程序映射一个内核栈：**内核栈的映射是两页两页跳着映射，只映射一页，另外一页用来做栈保护，如果应用程序的用户栈超过了一页就会触发缺页异常。
+
+<img src="./assets/内核栈映射.png" alt="内核栈映射" style="zoom:80%;" />
+
+``` c
+/* 为每个应用程序映射内核栈 */
+void proc_mapstacks(PageTable* kpgtbl)
+{
+  struct TaskControlBlock *p;
+  // 遍历所有应用程序
+  for(p = tasks; p < &tasks[MAX_TASKS]; p++) {
+    char *pa = (char*)phys_addr_from_phys_page_num(kalloc()).value;	// 分配一页物理地址
+    if(pa == 0)
+      panic("kalloc");
+      
+    u64 va = KSTACK((int) (p - tasks));
+    /* 槽位另一页保持未映射, 相邻未映射页即守卫页, 栈溢出会触发异常而非静默踩踏 */
+    PageTable_map(kpgtbl, virt_addr_from_size_t(va), phys_addr_from_size_t((u64)pa), \
+                  PAGE_SIZE, PTE_R | PTE_W);
+    // 给应用内核栈赋值: 栈顶在映射页高地址端, 向下生长
+    p->kstack = va + PAGE_SIZE;
+  }
+}
+
+//计算应用内核栈的地址，每个应用的内核栈下都有一个无效的守卫页
+#define KSTACK(p) (TRAMPOLINE - ( (p)+1)* 2*PAGE_SIZE)
+```
+
+开启SV39的分页模式，只需要去写`satp`寄存器的值就好了，设置为`sv39`分页模式，然后将`root_ppn`写入。（这里有快表的使用）
+
+``` c
+#define SATP_SV39 (8L << 60)
+#define MAKE_SATP(pagetable) (SATP_SV39 | (((u64)pagetable)))
+
+void kvminithart()
+{
+  // wait for any previous writes to the page table memory to finish.
+  printk("satp:%lx\n",MAKE_SATP(kernel_pagetable.root_ppn.value));
+  sfence_vma();
+  
+  w_satp(MAKE_SATP(kernel_pagetable.root_ppn.value));
+  
+  // flush stale entries from the TLB.
+  sfence_vma();
+  reg_t satp = r_satp();
+
+  printk("satp:%lx\n",satp);  
+}
+```
+
+## 应用地址空间映射管理
+
+用户态虚拟地址空间分布如图：
+
+![用户态地址空间](./assets/用户态地址空间.png)
+
+### 跳板页
+
+用户虚拟地址空间中的`trampoline`与内核虚拟地址空间中的`trampoline`映射到物理地址空间中相同的页。
+
+> `__alltraps`在换完`satp`中的页表地址之后，**还有处于用户态虚拟地址空间中的指令需要执行**（执行完`csrw satp t0`之后会自动加载下一条指令的地址执行`jr t1`），**为了保证地址空间切换时指令执行的连续性**，**用户态虚拟地址空间和内核的内核态虚拟地址空间的指令所在页的映射方式应该都将其映射在同一个物理页上**，称之为**跳板页**（`trampoline`）。（CPU 的下一个需要执行的指令的地址也需要进行MMU转换）
+>
+> 位于跳板页的内容为：
+>
+> ``` assembly
+> .section .text.trampoline
+> .globl __alltraps
+> .align 3
+> __alltraps:
+> ...
+> .globl __restore
+> .align 3
+> __restore:
+> ...
+> ```
+>
+
+### 创建页表，映射跳板页和TRAPFRAME页
+
+``` c
+TaskControlBlock* task_create_pt(size_t app_id)
+{
+  if(_top < MAX_TASKS)
+  {
+
+    // 分配 TRAPFRAME 页
+    proc_trap(&tasks[app_id]);
+    // 创建页表，映射跳板页和 TRAPFRAME 页
+    proc_pagetable(&tasks[app_id]); 
+    _top++;
+  }
+  
+  return &tasks[app_id];
+}
+
+
+/* 为应用程序分配一页物理内存存放 TrapContext，同时初始化任务上下文 */
+void proc_trap(struct TaskControlBlock *p)
+{
+  // 为每个程序分配一页trap物理内存
+  p->trap_cx_ppn = phys_addr_from_phys_page_num(kalloc()).value;
+  // 初始化任务上下文全部为0
+  memset(&p->task_context, 0 ,sizeof(p->task_context));
+}
+
+
+extern char trampoline[];
+/* 为用户程序创建页表，并映射 跳板页 和 TrapContext页*/
+void proc_pagetable(struct TaskControlBlock *p)
+{
+  // 创建一个空的用户的页表，分配一页内存
+  PageTable pagetable;
+  pagetable.root_ppn = kalloc();
+  
+  //映射跳板页
+  PageTable_map(&pagetable,virt_addr_from_size_t(TRAMPOLINE),phys_addr_from_size_t((u64)trampoline),\
+                PAGE_SIZE , PTE_R | PTE_X);
+    
+  //映射用户程序的 TrapContext 页
+  PageTable_map(&pagetable,virt_addr_from_size_t(TRAPFRAME),phys_addr_from_size_t(p->trap_cx_ppn), \
+                PAGE_SIZE, PTE_R | PTE_W );
+  p->pagetable = pagetable;
+}
+
+//跳板页开始位置
+#define TRAMPOLINE (MAXVA - PAGE_SIZE)
+//Trap页开始位置
+#define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)
+```
+
+# 实现 Trap / 内核任务切换 / 系统调用
+
+**特权级越高级别数越大**（与FreeRTOS系统的相反）。移植的 OpenSBI 运行在M模式下，U模式下的程序可以通过`ecall`指令调用S模式下（操作系统）提供的服务称之为**ABI**，运行在S模式下的操作系统程序也可以通过`ecall`指令调用 OpenSBI 提供的服务称之为**SBI**。
+
+<img src="quard-star/USM切换.png" alt="USM切换" style="zoom: 67%;" />
 
 我们编写的OS是运行在S态的，向用户态提供的接口标准称是**ABI**，用户态应用直接触发从用户态到内核态的异常的原因总体上可以分为两种：
 
@@ -8427,68 +9403,15 @@ SRCS_C = \
 
 <img src="quard-star/特权级切换机制.png" alt="特权级切换机制" style="zoom: 67%;" />
 
----
+## Trap 相关的寄存器
 
-### 7.1.1 ecall指令
-
-我们知道我们在Linux系统下编写的应用程序是去调用C库的函数去实现对应的功能，而C库呢会去使用内核提供的一组接口去访问硬件设备和操作系统资源，这组接口就被称为系统调用。**系统调用的定义**：系统调用是指**用户程序向操作系统内核请求服务的机制**。从这个角度来看，U 模式下通过`ecall`触发操作系统处理函数的过程是典型的系统调用。
-
-在 X86 平台上，Linux在用`int 0x80`进行系统调用时，调用号存在于`EAX`中，第一个参数存在于`EBX`，第二个参数存在于`ECX`，第三个参数存在于`EDX`。而在riscv平台下，系统调用是通过`ecall`指令来触发的。
-
-`syscall`与`ecall`的区别：`ecall`指令是riscv提供的硬件指令，调用此函数时会依据当前的特权级进行切换；而`syscall`是操作系统提供的抽象接口**（人为编写约定）**，是对`ecall`的人为封装，`syscall`是在U模式下执行`ecall`指令。`ecall`指令规范中没有其他参数，`syscall`的调用参数和返回值传递通常遵循如下**约定**：
-
-- 调用参数
-  - `a7`寄存器存放系统调用号，区别是哪个`syscall`。
-  - `a0-a5`寄存器依次用来表示`syscall`接口中定义的参数。
-- 返回值
-  - `a0`寄存器存放`syscall`的返回值。
-
----
-
-### 7.1.2 特权级切换涉及的寄存器（3个保存1个跳转）
-
-`syscall`指令是在U模式下执行`ecall`指令并对其进行封装，riscv架构自动完成的主要变更如下：
-
-- 处理器特权级由 U 模式提升为 S 模式，设置**`sstatus`**寄存器的`SPP`为U模式，**保存当前特权级**。
-- **保存当前指令地址**：当前指令地址保存到**`sepc`**特权寄存器，trap处理完成后跳转到此地址。
-- 设置**`scause`**特权寄存器，保存此次trap的原因。
-- **trap到目标地址**：跳转到**`stvec`**特权寄存器指向的指令地址。
-
-在 RISC - V 架构中，运行在用户模式（U 模式）下的程序使用`ecall`会触发从 U 模式到特权模式（通常是 S 模式）的切换，从而触发操作系统的处理函数用户程序。通过`ecall`来请求操作系统提供服务，例如打开文件、读取数据等。
-
-## 7.2 syscall系统调用测试
-
-将系统调用号传入到`a7`寄存器，然后将传入的三个参数分别传入到`a0,a1,a2`寄存器，然后调用`ecall`指令进入内核的异常处理程序，调用完成后内核会将返回值放在`a0`寄存器中。
-
-``` c
-#include "stddef.h"
-#include "stdint.h"
-#include "stdio.h"
-size_t syscall(size_t id, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3){
-    long ret;
-    asm volatile(
-    	"mv a7, %1\n\t"  
-        "mv a0, %2\n\t"  // 将arg1 移动到寄存器 a0
-        "mv a1, %3\n\t"  // 将arg2 移动到寄存器 a1
-        "mv a2, %4\n\t"  // 将arg3 移动到寄存器 a2
-        "ecall\n\t"
-        "mv %0, a0"  // 将 ecall 执行后寄存器 a0 的值移动到输出操作数 (ret)
-        
-        : "=r" (ret)
-        : "r" (id), "r" (arg1), "r" (arg2), "r" (arg3)
-        : "a7", "a0", "a1", "a2", "memory"  // 破坏列表
-    );
-    return ret;
-}
-```
-
-## 7.4 陷入S模式相关的寄存器（修改sepc和sscratch）
+### 相关寄存器
 
 ​	用户态的程序通过`ecall`指令陷入S态，操作系统需要对此次`ecall`进行处理，处理完毕后返回到用户态继续执行。应用程序被切换回来之后需要从发出系统调用请求的执行位置恢复应用程序上下文并继续执行，应用程序的上下文包括**通用寄存器**和**栈**两部分。
 
 ​	CPU在不同的特权级下共享一套通用寄存器，所以在运行操作系统中，操作系统也会用到这些寄存器，因此在执行操作系统的Trap处理过程之前，需要在某个地方（某内存块/内核的栈）保存这些寄存器并在Trap处理结束之后恢复这些寄存器。**使用栈来保存**。
 
-- **sstatus**：
+- **`sstatus` 寄存器**：
 
 ![sstatus寄存器](quard-star/sstatus寄存器.png)
 
@@ -8496,159 +9419,71 @@ size_t syscall(size_t id, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3){
 
 ​         `bit[1]`（SIE）控制 S 模式下的中断；为 0 时，CPU 在 S 模式运行期间不接收 S 模式中断。
 
-- **sepc：**
+- **`sepc` 寄存器：**
 
-​	发生进入 S 模式的 trap 时，硬件将被中断或触发异常的指令地址写入`sepc`；`sret`按当前`sepc`恢复执行。系统调用处理完通常需要让`sepc`越过`ecall`指令。
+​	发生进入 S 模式的 Trap 时，硬件将被中断或触发异常的指令地址写入`sepc`；`sret`按当前`sepc`寄存器恢复执行。系统调用处理完通常需要让`sepc`越过`ecall`指令。
 
-- **stvec：**
+- **`stvec` 寄存器：**
 
 ​	`stvec`设置 S 模式 trap 的入口。Direct 模式下，异常和中断都跳到 BASE；Vectored 模式下，同步异常仍跳到 BASE，异步中断跳到 BASE + 4 × 中断原因编号。CPU 跳到对应地址执行指令，不会从那里再读取一个处理函数地址。
 
----
-
-- **scause：**
+- **`scause`寄存器：**
 
 ​	`scause`寄存器记录了**S模式**下异常发生的原因，最高位为`interrupt`字段，**为 1 表示为中断类型异常，否则为同步类型异常**。
 
-在 RISC-V 架构中，异常（Exception）是指令执行过程中由 CPU 主动触发的控制流转移事件，通常分为**中断类型异常（Interrupt）**和**同步类型异常（Synchronous Exception）**两类。它们的核心区别在于触发来源和触发时机：
+在 RISC-V 架构中，异常（Exception）是指令执行过程中由 CPU 主动触发的控制流转移事件，通常分为中断类型异常（Interrupt）和同步类型异常（Synchronous Exception）两类。它们的核心区别在于触发来源和触发时机：
 
- **中断类型异常（Interrupt）**
+- **中断类型异常（Interrupt）**
 
-- 触发来源：由 **外部硬件信号** 或 **CPU 内部的异步事件** 触发，与当前执行的指令无关。
-  - 例如：定时器中断、外部设备中断（UART、GPIO 等）、软件中断等。
-- 关键特性：
-  - 异步性：中断的发生与 CPU 正在执行的指令无关，可能在任意指令执行期间被触发。
-  - 可屏蔽：通过设置 CSR（如 `mstatus` 中的 `MIE` 位）可以全局屏蔽或启用中断。
-  - 抢占性：中断会打断当前程序流，优先处理中断服务程序（ISR）。
-- 分类：
-  - 外部中断：如 PLIC（平台级中断控制器）转发的外部设备中断。
-  - 定时器中断：由 CLINT（核心本地中断器）或定时器触发。
-  - 软件中断：通过写 `msip`（Machine Software Interrupt Pending）寄存器触发。
+  - 触发来源：由 **外部硬件信号** 或 **CPU 内部的异步事件** 触发，与当前执行的指令无关。
+    - 例如：定时器中断、外部设备中断（UART、GPIO 等）、软件中断等。
 
-**同步类型异常（Synchronous Exception）**
+  - 关键特性：
+    - 异步性：中断的发生与 CPU 正在执行的指令无关，可能在任意指令执行期间被触发。
+    - 可屏蔽：通过设置 CSR（如 `mstatus` 中的 `MIE` 位）**可以全局屏蔽或启用中断**。
+    - 抢占性：中断会打断当前程序流，优先处理中断服务程序（ISR）。
 
-- 触发来源：由 **当前执行的指令** 直接触发，是指令执行过程中的错误或特殊情况。
-  
-  - 例如：非法指令、缺页异常、地址对齐错误、系统调用（ECALL）等。
-- 关键特性：
-  - 同步性：异常由特定指令的执行导致，触发时机确定（例如执行 `ecall` 时必然触发异常）。
-  - 不可屏蔽：无法通过 CSR 屏蔽，必须由软件处理。
-  - 精确异常（Precise Exception）：RISC-V 要求同步异常的 `pc` 必须精确指向触发异常的指令。
-- 常见类型：
-  
-  - 指令相关：非法指令（`illegal instruction`）、特权级违规（如用户态执行 `mret`）。
-  - 内存相关：加载/存储地址不对齐、缺页异常（Page Fault）。
-  - 控制流相关：环境调用（`ecall`）、断点异常（`ebreak`）。
-  
-  ---
-  
-- **stval：**
+  - 分类：
+    - 外部中断：如 PLIC（平台级中断控制器）转发的外部设备中断。
+    - 定时器中断：由 CLINT（核心本地中断器）或定时器触发。
+    - 软件中断：通过写 `msip`（Machine Software Interrupt Pending）寄存器触发。
+
+
+- **同步类型异常（Synchronous Exception）**
+
+  - 触发来源：由 **当前执行的指令** 直接触发，是指令执行过程中的错误或特殊情况。
+
+    - 例如：非法指令、缺页异常、地址对齐错误、系统调用（ECALL）等。
+
+  - 关键特性：
+    - 同步性：异常由特定指令的执行导致，触发时机确定（例如执行 `ecall` 时必然触发异常）。
+    - 不可屏蔽：**无法通过 CSR 屏蔽**，必须由软件处理。
+    - 精确异常（Precise Exception）：RISC-V 要求同步异常的 `pc` 必须精确指向触发异常的指令。
+
+  - 常见类型：
+
+    - 指令相关：非法指令（`illegal instruction`）、特权级违规（如用户态执行 `mret`）。
+    - 内存相关：加载/存储地址不对齐、缺页异常（Page Fault）。
+    - 控制流相关：环境调用（`ecall`）、断点异常（`ebreak`）。
+
+    ---
+
+
+- **`stval`寄存器：**
 
 ​	`stval`寄存器用于保存与异常相关的附加信息。
 
-- **sscratch：**
+- **`sscratch`寄存器：**
 
-​	`sscratch`寄存器是一个可读可写的寄存器，在`hart`执行用户代码时，用于切换上下文的栈。(ARM架构中的`psp`寄存器)
+​	`sscratch`寄存器是一个可读可写的寄存器，在`hart`执行用户代码时，**用于切换上下文的栈**。(ARM架构中的`psp`寄存器)。
 
-## 7.5 ecall硬软件会干什么
 
-当CPU执行完一条`ecall`指令并准备从U模式trap到S模式时，**硬件**会自动完成如下事情：
 
-- `sstatus`寄存器的`SPP`字段修改为当前CPU的特权级。
-- `sepc`寄存器修改为trap处理完后执行的下一条指令地址.
-- `scause/stval`分别修改成这次trap的原因以及相关的附加信息。
-
-而当CPU完成trap处理准备返回的时候，需要通过一条S特权级的特权指令**`sret`**完成，这一指令完成如下功能：
-
-- `sstatus`寄存器的`SPP`字段修改为当前CPU的特权级。
-- CPU跳转到`sepc`寄存器指向的那条指令。
-
-由于执行完毕后需要恢复到原来的地址继续执行，所以需要保存寄存器的值来恢复trap前上下文信息。因此需要定义一个栈来保存用户态的寄存器值。所以OS需要做的软件工作：
-
-- OS保存被打断的应用程序的上下文
-
-- OS根据trap相关的CSR寄存器内容，完成系统调用服务的分发与处理
-
-- 完成系统调用服务后，需要恢复被打断的应用程序的trap的上下文并通过`sret`让应用程序继续执行。
-
-## 7.6 代码实现
-
-### 7.6.1 定义数据类型
-
-创建`types.h`文件：
+### 定义操作寄存器的代码
 
 ``` c
-#ifndef __TYPE_H_
-#define __TYPE_H_
-
-typedef unsigned char    uint8_t;
-typedef unsigned short   uint16_t;
-typedef unsigned int     uint32_t;
-typedef unsigned long    long uint64_t;
-    
-typedef uint64_t reg_t;
-
-#endif
-
-```
-
-创建`context.h`定义`pt_regs`结构体保存寄存器的值：
-
-``` c
-#ifndef __CONTEXT_H__
-#define __CONTEXT_H__
-
-#include "os.h"
-
-/*S模式的trap上下文*/
-typedef struct pt_regs {
-	reg_t x0;
-	reg_t ra;
-	reg_t sp;
-	reg_t gp;
-	reg_t tp;
-	reg_t t0;
-	reg_t t1;
-	reg_t t2;
-	reg_t s0;
-	reg_t s1;
-	reg_t a0;
-	reg_t a1;
-	reg_t a2;
-	reg_t a3;
-	reg_t a4;
-	reg_t a5;
-	reg_t a6;
-	reg_t a7;
-	reg_t s2;
-	reg_t s3;
-	reg_t s4;
-	reg_t s5;
-	reg_t s6;
-	reg_t s7;
-	reg_t s8;
-	reg_t s9;
-	reg_t s10;
-	reg_t s11;
-	reg_t t3;
-	reg_t t4;
-	reg_t t5;
-	reg_t t6;
-	/* S模式下的寄存器 */
-	reg_t sstatus;
-	reg_t sepc;
-}pt_regs;
-
-#endif
-```
-
-### 7.6.2 定义获取寄存器函数
-
-创建`riscv.h`文件：
-
-``` c
-#ifndef __RISCV_H__
-#define __RISCV_H__
+#ifndef TOS_RISCV_H__
+#define TOS_RISCV_H__
 
 #include "os.h"
 
@@ -8675,6 +9510,12 @@ static inline reg_t r_stval()
   asm volatile("csrr %0, stval" : "=r" (x) );
   return x;
 }
+
+#define SSTATUS_SPP (1L << 8)  // Previous mode, 1=Supervisor, 0=User
+#define SSTATUS_SPIE (1L << 5) // Supervisor Previous Interrupt Enable
+#define SSTATUS_UPIE (1L << 4) // User Previous Interrupt Enable
+#define SSTATUS_SIE (1L << 1)  // Supervisor Interrupt Enable
+#define SSTATUS_UIE (1L << 0)  // User Interrupt Enable
 
 /* sstatus记录S模式下处理器内核的运行状态*/
 static inline reg_t r_sstatus()
@@ -8703,485 +9544,852 @@ static inline reg_t r_stvec()
   return x;
 }
 
+// Supervisor Interrupt Enable
+#define SIE_SEIE (1L << 9) // external
+#define SIE_STIE (1L << 5) // timer
+#define SIE_SSIE (1L << 1) // software
+
+static inline reg_t r_sie()
+{
+  reg_t x;
+  asm volatile("csrr %0, sie" : "=r" (x) );
+  return x;
+}
+
+static inline void w_sie(reg_t x)
+{
+  asm volatile("csrw sie, %0" : : "r" (x));
+}
+
+static inline reg_t r_mtime()
+{
+  reg_t x;
+  asm volatile("rdtime %0" : "=r"(x));
+  // asm volatime("csrr %0, 0x0C01" : "=r" (x) )
+  return x;
+}
+
+
+// supervisor address translation and protection;
+// holds the address of the page table.
+static inline void w_satp(reg_t x)
+{
+  asm volatile("csrw satp, %0" : : "r" (x));
+}
+
+static inline reg_t r_satp()
+{
+  reg_t x;
+  asm volatile("csrr %0, satp" : "=r" (x) );
+  return x;
+}
+
+// 刷新 TLB.
+static inline void sfence_vma()
+{
+  // the zero, zero means flush all TLB entries.
+  asm volatile("sfence.vma zero, zero");
+}
+
+// 关闭中断
+static inline void intr_off()
+{
+  w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+}
+
+// 打开中断
+static inline void intr_on()
+{
+  w_sstatus(r_sstatus() | SSTATUS_SIE);
+}
+
+// are device interrupts enabled?
+static inline int
+intr_get()
+{
+  reg_t x = r_sstatus();
+  return (x & SSTATUS_SIE) != 0;
+}
 #endif
 ```
 
-### 7.6.3 代码逻辑
+## `syscall` 系统调用
 
-定义栈：
-
-``` c
-#define USER_STACK_SIZE (4096 * 2)  // 程序自己用的
-#define KERNEL_STACK_SIZE (4096 * 2)  // 存储用户程序寄存器的值
-uint8_t KernelStack[KERNEL_STACK_SIZE];
-uint8_t UserStack[USER_STACK_SIZE];
-```
-
-**先`__restore`再`__alltraps`。**
-
-**通过`__restore`函数从S态返回U态进行函数执行，返回地址设置为`testsys()`函数的地址。**首先在`main.c`文件的`os_main`函数中调用`app_init_context()`：
-
-在此函数中先指定`__restore`返回的指令地址/栈指针的地址。
+将系统调用号传入到`a7`寄存器，然后将传入的三个参数分别传入到`a0,a1,a2`寄存器，然后调用`ecall`指令进入内核的异常处理程序，调用完成后内核会将返回值放在`a0`寄存器中。
 
 ``` c
-void app_init_context(){
-    reg_t user_sp = &UserStack + USER_STACK_SIZE;
-
-    reg_t stvec = r_stvec();  
-    w_stvec( (reg_t)__alltraps );  // 设置trap去哪
-
-    reg_t sstatus = r_sstatus();
-    /* 设置 sstatus 寄存器第8位即SPP位为0 表示返回之后为U模式 */
-    sstatus &= (0U << 8);
-    w_sstatus(sstatus);
-
-    tasks.sepc = (reg_t)testsys;  // tasks 是保存寄存器状态的结构体变量
-    tasks.sstatus = sstatus;
-    tasks.sp = user_sp;
-
-    /* cx_ptr指针永远指向内核栈内pt_regs结构体的地址 */
-    pt_regs* cx_ptr = &KernelStack[0] + KERNEL_STACK_SIZE - sizeof(pt_regs);
-    /* 设置返回地址、trap前的模式、用户栈的sp */
-    cx_ptr->sepc = tasks.sepc;
-    cx_ptr->sstatus = tasks.sstatus;
-    cx_ptr->sp = tasks.sp;
-
-    __restore(cx_ptr);
-}
-```
-
-### 7.6.4 Trap上下文的保存与恢复
-
-创建`kerneltrap.S`文件：
-
-进入`__alltrap`函数时`sp`指向用户栈，`sscratch`寄存器中保存内核栈的栈顶，因此首先进行交换，**把应用程序寄存器的值存储到内核栈**。
-
-``` assembly
-.globl __alltraps
-.align 4
-__alltraps:
-    # 从sscratch获取内核栈的栈顶(SP)，把 U 模式下的SP保存到sscratch寄存器中
-    csrrw sp, sscratch, sp
-    # now sp->kernel stack, sscratch->user stack
-    # allocate a TrapContext on kernel stack
-    addi sp, sp, -34*8
-    # save general-purpose registers
-    sd x1, 1*8(sp)
-    # skip sp(x2), we will save it later
-    sd x3, 3*8(sp)
-    # skip tp(x4), application does not use it
-    # save x5~x31
-    sd x4, 4*8(sp)
-    sd x5, 5*8(sp)
-    sd x6, 6*8(sp)
-    sd x7, 7*8(sp)
-    sd x8, 8*8(sp)
-    sd x9, 9*8(sp)
-    sd x10,10*8(sp)
-    sd x11, 11*8(sp)
-    sd x12, 12*8(sp)
-    sd x13, 13*8(sp)
-    sd x14, 14*8(sp)
-    sd x15, 15*8(sp)
-    sd x16, 16*8(sp)
-    sd x17, 17*8(sp)
-    sd x18, 18*8(sp)
-    sd x19, 19*8(sp)
-    sd x20, 20*8(sp)
-    sd x21, 21*8(sp)
-    sd x22, 22*8(sp)
-    sd x23, 23*8(sp)
-    sd x24, 24*8(sp)
-    sd x25, 25*8(sp)
-    sd x26, 26*8(sp)
-    sd x27, 27*8(sp)
-    sd x28, 28*8(sp)
-    sd x29, 29*8(sp)
-    sd x30, 30*8(sp)
-    sd x31, 31*8(sp)
-
-    # we can use t0/t1/t2 freely, because they were saved on kernel stack
-    csrr t0, sstatus
-    csrr t1, sepc
-    sd t0, 32*8(sp)
-    sd t1, 33*8(sp)
-    # read user stack from sscratch and save it on the kernel stack
-    csrr t2, sscratch
-    sd t2, 2*8(sp)
-    # set input argument of trap_handler(cx: &mut TrapContext)
-    mv a0, sp
-    # 因此在trap_handler函数中可以通过 a0 的值(trap_handler的形参)访问内核栈中存储的用户态寄存器值
-    call trap_handler
-
-
-/* __restore函数的定义为__restore(pt_regs *next),所以将 sp 指向内核栈中保存用户态寄存器结构体的地址 */
-.globl __restore
-.align 4
-__restore:
-    # case1: start running app by __restore
-    # case2: back to U after handling trap
-    
-    mv sp, a0  # 下一节这里就不需要了：已经恢复了taskcontext中保存的sp，并且a0寄存器保存的值发生了改变，为__switch函数的参数，指向taskcontext
-    
-    # now sp->kernel stack(after allocated), sscratch->user stack
-    # restore sstatus/sepc
-    ld t0, 32*8(sp)
-    ld t1, 33*8(sp)
-    ld t2, 2*8(sp)
-    csrw sstatus, t0
-    csrw sepc, t1
-    csrw sscratch, t2
-    # restore general-purpuse registers except sp/tp
-    ld x1, 1*8(sp)
-    ld x3, 3*8(sp)
-    ld x4, 4*8(sp)
-    ld x5, 5*8(sp)
-    ld x6, 6*8(sp)
-    ld x7, 7*8(sp)
-    ld x8, 8*8(sp)
-    ld x9, 9*8(sp)
-    ld x10,10*8(sp)
-    ld x11, 11*8(sp)
-    ld x12, 12*8(sp)
-    ld x13, 13*8(sp)
-    ld x14, 14*8(sp)
-    ld x15, 15*8(sp)
-    ld x16, 16*8(sp)
-    ld x17, 17*8(sp)
-    ld x18, 18*8(sp)
-    ld x19, 19*8(sp)
-    ld x20, 20*8(sp)
-    ld x21, 21*8(sp)
-    ld x22, 22*8(sp)
-    ld x23, 23*8(sp)
-    ld x24, 24*8(sp)
-    ld x25, 25*8(sp)
-    ld x26, 26*8(sp)
-    ld x27, 27*8(sp)
-    ld x28, 28*8(sp)
-    ld x29, 29*8(sp)
-    ld x30, 30*8(sp)
-    ld x31, 31*8(sp)
-
-    # release TrapContext on kernel stack
-    addi sp, sp, 34*8
-    # now sp->user stack, sscratch->kernel stack
-    csrrw sp, sscratch, sp
-    sret
-```
-
-### 7.6.5 编写Trap处理函数
-
-创建`trap.c`:
-
-`trap_handler(pt_reg* cx)`函数是由`__alltraps`函数调用的。
-
-``` c
-#include "os.h"
-#include "context.h"
-#include "riscv.h"
-
-extern void __alltraps(void);
-
-
-/* call trap_handler 汇编会被转换为 jal ra 1876*/
-/* 执行两个操作：将当前PC+8存到ra寄存器，然后跳转到和当前地址相差1876的地方执行（trap_handler）的地址 */
-/* 因此执行完trap_handler函数后就会跳转到call trap_handler的下一条指令，也就是__restore(cx) */
-pt_regs* trap_handler(pt_regs* cx)
-{
-    reg_t scause = r_scause() ;
-    /* 实际会依据scause异常的不同而进行不同的处理，中断异常会再编写一个
-    __syscall函数依据a7寄存器的值对不同的系统调用号编写不同的处理函数*/
-    printf("cause:%x\n",scause);
-	printf("a0:%x\n",cx->a0);
-	printf("a1:%x\n",cx->a1);
-	printf("a2:%x\n",cx->a2);
-	printf("a7:%x\n",cx->a7);
-	printf("sepc:%x\n",cx->sepc);
-	printf("sstatus:%x\n",cx->sstatus);
-	printf("sp:%x\n",cx->sp);
-    
-    return cx;
-}
-
-
-void trap_init()
-{
-	/*
-	 * 设置 trap 时调用函数的基地址
-	 */
-	w_stvec( (reg_t)__alltraps );
-}
-```
-
-### 7.6.6 整体应用测试程序
-
-创建`batch.c`：
-
-``` c
-#include <stddef.h>
-#include "os.h"
-#include "context.h"
-#define USER_STACK_SIZE (4096 * 2)
-#define KERNEL_STACK_SIZE (4096 * 2)
-#define APP_BASE_ADDRESS 0x80600000
-
-/*********************************应用测试程序***************************************/
-size_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
+#include "stddef.h"
+#include "stdint.h"
+#include "stdio.h"
+size_t syscall(size_t id, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3){
     long ret;
-    asm volatile (
-        "mv a7, %1\n\t"   // Move syscall id to a0 register
-        "mv a0, %2\n\t"   // Move args[0] to a1 register
-        "mv a1, %3\n\t"   // Move args[1] to a2 register
-        "mv a2, %4\n\t"   // Move args[2] to a3 register
-        "ecall\n\t"       // Perform syscall
-        "mv %0, a0"       // Move return value to 'ret' variable
+    asm volatile(
+    	"mv a7, %1\n\t"  
+        "mv a0, %2\n\t"  // 将arg1 移动到寄存器 a0
+        "mv a1, %3\n\t"  // 将arg2 移动到寄存器 a1
+        "mv a2, %4\n\t"  // 将arg3 移动到寄存器 a2
+        "ecall\n\t"
+        "mv %0, a0"  // 将 ecall 执行后寄存器 a0 的值移动到输出操作数 (ret)
+        
         : "=r" (ret)
         : "r" (id), "r" (arg1), "r" (arg2), "r" (arg3)
-        : "a7", "a0", "a1", "a2", "memory"
+        : "a7", "a0", "a1", "a2", "memory"  // 破坏列表
     );
     return ret;
 }
-
-void testsys() {
-    
-    // //int len = strlen(message);
-    //reg_t sstatus = r_sstatus();
-    //printf("sstatus:%x\n", sstatus);
-    int ret = syscall(2,3,4,5);
-    while (1)
-    {
-        /* code */
-    }
-    
-    //printf("ret:%d\n",ret);
-}
-/********************************************************************************/
-
-/* 定义用户栈/内核栈 */
-uint8_t KernelStack[KERNEL_STACK_SIZE];
-uint8_t UserStack[USER_STACK_SIZE]={0};
-
-extern void __restore(pt_regs *next);
-
-struct pt_regs tasks;
-
-/* 在main.c中调用 */
-void app_init_context()
-{
-
-    reg_t user_sp = &UserStack + USER_STACK_SIZE;
-    printf("user_sp:%p\n", user_sp);
-
-    reg_t stvec = r_stvec();
-    printf("stvec:%x\n", stvec);
-
-    /* 设置 trap 时调用函数的基地址 */
-    trap_init();
-
-    reg_t sstatus = r_sstatus();
-    /* 设置 sstatus 寄存器第8位即SPP位为0 表示为U模式 */
-    sstatus &= (0U << 8);
-    w_sstatus(sstatus);
-    printf("sstatus:%x\n", sstatus);
-
-    /* 设置trap完之后的返回地址 */
-    tasks.sepc = (reg_t)testsys;
-    printf("tasks sepc:%x\n", tasks.sepc);
-
-    tasks.sstatus = sstatus;
-
-    tasks.sp = user_sp;
-    
-    /* cx_ptr指针永远指向内核栈内pt_regs结构体的地址 */
-    pt_regs* cx_ptr = &KernelStack[0] + KERNEL_STACK_SIZE - sizeof(pt_regs);
-    printf("pt_regs: %d\n",sizeof(pt_regs));
-    cx_ptr->sepc = tasks.sepc;
-    printf("cx_ptr sepc :%x\n", cx_ptr->sepc);
-    printf("cx_ptr sepc adress:%x\n", &(cx_ptr->sepc));
-    cx_ptr->sstatus = tasks.sstatus;
-    cx_ptr->sp = tasks.sp;
-    // *cx_ptr = tasks[0];
-    printf("cx_ptr adress:%x\n", cx_ptr);
-    /* 将sp的值设置为cx_ptr */
-    __restore(cx_ptr); 
-
-}
-
 ```
 
-修改`main.c`：
+## 实现 Trap
+
+<img src="./assets/OS的完整启动流程.png" alt="OS的完整启动流程" style="zoom:80%;" />
+
+### 定义`TaskControlBlock`
 
 ``` c
-#include "os.h"
+typedef enum TaskState
+{
+	UnInit, // 未初始化
+    Ready, // 准备运行
+    Running, // 正在运行
+    Zombie, // 已退出(僵尸态, 等待父进程 wait 回收)
+}TaskState;
 
+typedef struct TaskControlBlock
+{
+    TaskState task_state;       //任务状态
+    int pid;                    //进程 ID
+    struct TaskControlBlock* parent;  //父进程
+    TaskContext task_context;   //任务上下文
+    u64 trap_cx_ppn;            //Trap 上下文所在物理地址
+    u64  base_size;             //应用数据大小
+    u64  kstack;                //应用内核栈的虚拟地址
+    u64  ustack;                //应用用户栈的虚拟地址
+    u64  entry;                 //应用程序入口地址
+    PageTable pagetable;        //应用页表所在物理页
+    u64 exit_code;              //进程退出码
+}TaskControlBlock;
+```
+
+### 初始化`TrapContext` 和 `TaskContext`
+
+启动时 `os_main()` 先把 `stvec` 设为内核 trap 入口：
+
+``` c
 void os_main()
 {
-   printf("hello timer os!\n");
-   app_init_context();
-   while (1)
-   {
-      
-   }
+   printk("hello timer os!\n");
+
+   // 内存分配器初始化
+   frame_alloctor_init();
+   
+   //初始化内存
+   kvminit();
+
+   //初始化磁盘
+   virtio_disk_init();
+
+   //初始化进程控制块
+   procinit();
+
+   //加载 initproc 进程(app_0)
+   load_app(0);
+   app_init(0);
+   //映射内核
+   kvminithart();
+
+   // 禁止发生 Trap
+   set_kernel_trap_entry();
+
+   //解析并打印所有应用的名字
+   get_app_names();
+   
+
+   timer_init();
+	
+   // 触发一次内核任务的上下文切换，从临时构造的任务切换到task[0]运行
+   run_first_task();
+
+}
+
+
+void set_kernel_trap_entry()
+{
+	w_stvec((reg_t)trap_from_kernel);
+}
+
+void trap_from_kernel()
+{
+	panic("a trap from kernel!\n");
+}
+
+
+void run_first_task()
+{
+    tasks[0].task_state = Running;
+    struct TaskContext *next_task_cx_ptr = &(tasks[0].task_context);	// task[0]
+    struct TaskContext _unused ;	// 临时任务的 taskcontext
+    __switch(&_unused,next_task_cx_ptr);
+    panic("unreachable in run_first_task!");
 }
 ```
 
-修改`main.h`：
+首先通过`app_init()`函数对每个 task 的` TrapContext `和 `TaskContext` 进行初始化：
+
+<img src="./assets/trapcontext布局.png" alt="trapcontext布局" style="zoom: 80%;" />
+
+这段代码同时准备了两套状态。第一套是 `TrapContext`，它决定用户程序开始运行时的寄存器状态：
+
+- `sepc`：用户程序入口地址。
+- `sstatus`：执行 `sret` 时应恢复的状态。
+- `sp`：用户栈指针。
+
+每个任务都有自己的根页表，内核程序也有自己的根页表。每次用户态任务刚进入`__alltrap`时，`satp`仍然存储的是用户态任务的根页表，假设把`sscratch`寄存器选为栈`sp`的切换，把`TrapContext`保存在内核栈中，就算成功切换了栈`sp`，由于`satp`还是用户的根页表还是无法找到`TrapContext`，也就无法切换`satp`；**因此只有将任务的`TrapContext`保存到用户虚拟地址空间的`TrapContext`页**。
+
+由于将`TrapContext`保存在用户虚拟地址空间中，因此**`sscratch`寄存器作用：存储`TRAMPFRAME`，用户虚拟地址空间存储`TrapContext`页的地址。**（`__alltrap`时读取`sscratch`中应用程序空间中保存`TrapContext`页的虚拟地址，`__restore`时通过`a0`寄存器将`TrapContext`页的地址写入`sscratch`寄存器）。
+
+切换完`satp`之后需要将`SP`指向内核地址空间中的内核栈，因此需要在`TrapContext`中添加一个元素来保存应用程序的内核栈`SP`。因此在`TrapContext`中需要有：
 
 ``` c
-#ifndef __OS_H__
-#define __OS_H__
-
-
-
-#include <stddef.h>
-#include <stdarg.h>
-#include "types.h"
-#include "context.h"
-#include "riscv.h"
-/* printf.c */
-extern int  printf(const char* s, ...);
-extern void panic(char *s);
-extern void sbi_console_putchar(int ch);
-
-/* batch.c */
-extern void app_init_context();
-
-/* trap.c */
-extern void trap_init();
-#endif /* __OS_H__ */
+/* mmu 相关 */
+reg_t kernel_satp;     	//内核地址空间的satp值
+reg_t kernel_sp;       	//内核栈的虚拟地址
+reg_t trap_handler;    	//内核中 trap handler 入口的虚拟地址
 ```
 
-### 7.6.7 修改makefile文件
+然后：
 
-``` makefile
+- 执行下一条指令`sfence.vma`更新快表。
+- 执行下一条指令`jr t1`。(`t1`中存储的内核虚拟地址空间中`trap_handler`的地址)
 
-CROSS_COMPILE = riscv64-unknown-elf-
-CFLAGS = -nostdlib -fno-builtin -mcmodel=medany
-
-# riscv64-unknown-elf-gcc 工具链可以同时编译汇编和 C 代码
-CC = ${CROSS_COMPILE}gcc
-OBJCOPY = ${CROSS_COMPILE}objcopy
-OBJDUMP = ${CROSS_COMPILE}objdump
-
-SRCS_ASM = \
-	entry.S \
-	kerneltrap.S \
-
-SRCS_C = \
-	sbi.c \
-	main.c \
-	printf.c \
-	batch.c \
-	trap.c \
-
-# 将源文件替换为 .o 文件
-OBJS = $(SRCS_ASM:.S=.o)
-OBJS += $(SRCS_C:.c=.o)
-
-
-os.elf: ${OBJS}
-	${CC} ${CFLAGS} -T os.ld -Wl,-Map=os.map -o os.elf $^
-	${OBJCOPY} -O binary os.elf os.bin
-
-%.o : %.c
-	${CC} ${CFLAGS} -c -o $@ $<
-
-%.o : %.S
-	${CC} ${CFLAGS} -c -o $@ $<
-
-
-.PHONY : clean
-clean:
-	rm -rf *.o *.bin *.elf
-
-```
-
-# 8. 实现协作式任务调度
-
-## 8.1 实现sys_write
-
-### 8.1.1 代码逻辑
-
-新建一个`app.c`（用户调用的函数，写的代码等），上一节中用于`trap`测试的`batch.c`中的内容可以干掉了。
-
-**逻辑**：应用程序调用`sys_write()`函数传入`fd, buf, len`等相关信息与系统调用号`__NR_write`，`sys_write()`本质上是`syscall()`系统调用的封装，将`sys_write()`的参数传入到寄存器：系统调用号传入`a7`寄存器，参数传入`a0,a1,a2`寄存器；并触发`trap`也就是调用`__alltrap`：**首先**将应用程序的寄存器值保存进内核栈,**其次**将`a0`寄存器指向内核栈中保存用户态寄存器结构体的地址（使`__SYSCALL()`可以进行处理）；**最后**调用`trap_handler(TrapContext* cx)`；如果`scause`为 8 则调用`__SYSCALL()`依据内核栈中保存的用户态寄存器结构体值对不同系统调用号调用相关处理函数，如`__sys_write(arg1, arg2, arg3)`进行处理。
 
 ``` c
-#include "os.h" // 此内定义系统调用号
-size_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
-    long ret;
-    asm volatile (
-        "mv a7, %1\n\t"   // Move syscall id to a7 register
-        "mv a0, %2\n\t"   // Move args[0] to a0 register
-        "mv a1, %3\n\t"   // Move args[1] to a1 register
-        "mv a2, %4\n\t"   // Move args[2] to a2 register
-        "ecall\n\t"       // Perform syscall
-        "mv %0, a0"       // Move return value to 'ret' variable
-        : "=r" (ret)
-        : "r" (id), "r" (arg1), "r" (arg2), "r" (arg3)
-        : "a7", "a0", "a1", "a2", "memory"
-    );
-    return ret;
+extern u64 kernel_satp;
+void app_init(size_t app_id)
+{
+    TrapContext* cx_ptr = (TrapContext*)tasks[app_id].trap_cx_ppn;
+    reg_t sstatus = r_sstatus();
+    // 设置 sstatus 寄存器第8位即SPP位为0 表示为U模式
+    sstatus &= ~SSTATUS_SPP;
+    sstatus |= SSTATUS_SPIE;
+    // 设置程序入口地址
+    cx_ptr->sepc = tasks[app_id].entry;
+    // 
+    cx_ptr->sstatus = sstatus; 
+    // 设置用户栈虚拟地址
+    cx_ptr->sp = tasks[app_id].ustack;
+    // 设置内核根页表的物理地址
+    cx_ptr->kernel_satp = kernel_satp;
+    // 设置内核栈虚拟地址
+    cx_ptr->kernel_sp = tasks[app_id].kstack;
+    // 设置内核trap_handler的地址
+    cx_ptr->trap_handler = (u64)trap_handler;
+
+    /* 构造每个任务任务控制块中的任务上下文，设置 ra 寄存器为 trap_return 的入口地址,
+       sp 必须为内核栈顶(kstack), 而非 trap 上下文地址 */
+    tasks[app_id].task_context = tcx_init((reg_t)tasks[app_id].kstack);
+    // 初始化 TaskStatus 字段为 Ready
+    tasks[app_id].task_state = Ready;
+    /* 分配 pid */
+    tasks[app_id].pid = allocpid();
+}
+```
+
+---
+
+第二套是初始化 `TaskContext`，它决定调度器第一次切换到这个任务时，从哪个内核执行位置开始：
+
+``` c
+// 初始化 TaskContext
+struct TaskContext tcx_init(reg_t kstack_ptr) {
+    struct TaskContext task_ctx;
+
+    task_ctx.ra = (reg_t)trap_return;	// 切到 trap_return
+    task_ctx.sp = kstack_ptr;			// 指向传入的kstack
+    task_ctx.s0 = 0;
+    task_ctx.s1 = 0;
+    task_ctx.s2 = 0;
+    task_ctx.s3 = 0;
+    task_ctx.s4 = 0;
+    task_ctx.s5 = 0;
+    task_ctx.s6 = 0;
+    task_ctx.s7 = 0;
+    task_ctx.s8 = 0;
+    task_ctx.s9 = 0;
+    task_ctx.s10 = 0;
+    task_ctx.s11 = 0;
+
+    return task_ctx;
+}
+```
+
+### 通过`__switch.S`切换内核任务上下文
+
+<img src="./assets/切换上下文.png" alt="切换上下文" style="zoom:67%;" />
+
+假设 CPU 正在运行任务 A，此时操作系统决定切换到任务 B。任务 A 和任务 B 都需要保存自己的执行状态，否则任务 A 下次恢复执行时，CPU 就不知道应该从哪里继续、使用哪个栈，以及此前保存的寄存器值是什么。因此每个任务都有一个 `TaskContext` 结构体：
+
+``` c
+/* S模式的任务上下文 */
+typedef struct TaskContext
+{
+	reg_t ra;	// 返回地址
+	reg_t sp;	// 栈指针
+	reg_t s0;	//	s0 - s11 是 callee-saved registers，需要被调用者保存（调用完毕后进行恢复）
+	reg_t s1;
+	reg_t s2;
+	reg_t s3;
+	reg_t s4;
+	reg_t s5;
+	reg_t s6;
+	reg_t s7;
+	reg_t s8;
+	reg_t s9;
+	reg_t s10;
+	reg_t s11;
+}TaskContext;
+```
+
+`__switch.S`接收两个参数,通过`a0`和`a1`寄存器进行传递：`a0`：`current_task_cx_ptr（当前任务的 TaskContext 地址）`。`a1`：` next_task_cx_ptr（下一个任务的 TaskContext 地址）`。
+
+**首先保存当前任务的上下文：**
+
+``` assembly
+# save ra & s0~s11 of current execution
+sd ra, 0(a0)	# ra 是当前任务 A 在本次 __switch 完成之后本应继续执行的位置。
+# save kernel stack of current task
+sd sp, 8(a0)
+
+sd s0,  16(a0)
+sd s1,  24(a0)
+sd s2,  32(a0)
+sd s3,  40(a0)
+sd s4,  48(a0)
+sd s5,  56(a0)
+sd s6,  64(a0)
+sd s7,  72(a0)
+sd s8,  80(a0)
+sd s9,  88(a0)
+sd s10, 96(a0)
+sd s11, 104(a0)
+```
+
+**然后是恢复下一个任务的上下文：**
+
+``` assembly
+ld ra, 0(a1)
+ld s0, 16(a1)
+ld s1, 24(a1)
+...
+ld s11, 104(a1)
+
+ld sp, 8(a1)	# 内核栈切换为任务 B 的。
+```
+
+此时，CPU 的状态已经变为：
+
+```c
+ra      = 任务 B 的返回地址
+sp      = 任务 B 的内核栈指针
+s0~s11  = 任务 B 保存的寄存器值
+```
+
+最后执行`ret`指令，也就是`jalr x0, 0(ra)`，将`PC`跳转到`ra`中的地址去执行。
+
+> 为什么上下文只保存 ra、sp 和 s0～s11，不保存其他寄存器？
+
+RISC-V 的 ABI（Application Binary Interface，应用程序二进制接口）规定了不同寄存器的保存责任。
+
+| 寄存器      | ABI 属性               | 此处是否保存 |
+| ----------- | ---------------------- | ------------ |
+| `ra`        | 返回地址寄存器         | 是           |
+| `sp`        | 被调用者须保持         | 是           |
+| `s0`～`s11` | Callee-saved           | 是           |
+| `a0`～`a7`  | Caller-saved           | 否           |
+| `t0`～`t6`  | Caller-saved           | 否           |
+| `gp`、`tp`  | 特殊用途，通常保持不变 | 否           |
+
+对符合 ABI 的正常函数调用而言，调用者本来就不能假设 `a0`～`a7`、`t0`～`t6` 在函数返回后保持原值。因此，`__switch` 只需要显式保存和恢复维持内核函数执行连续性所必需的寄存器。
+
+其中 `ra` 虽然不属于普通意义上的 Callee-saved 寄存器，但它决定了当前任务未来恢复时的执行位置，因此必须保存。
+
+不过，这里需要严格区分两种上下文：
+
+- Task Context（任务上下文）：用于内核任务之间的协作式切换，这段代码保存的就是这种上下文。
+- Trap Context（陷入上下文）：用于异常、中断以及用户态与内核态切换，往往需要保存更完整的寄存器状态，以及 `sepc`、`sstatus` 等 CSR。
+
+---
+
+这里最终是切换到`trap_return()`函数，**这里还没有进入用户态。CPU 仍然在 S 模式，使用内核页表和内核栈**：
+
+``` c
+void trap_return()  
+{  
+    /* 把 stvec 设置为内核和应用地址空间共享的跳板页面的起始地址 */  
+    set_user_trap_entry();
+    /* Trap 上下文在应用地址空间中的虚拟地址 */  
+    u64 trap_cx_ptr = TRAPFRAME;  
+    /* 要继续执行的应用地址空间的 token */  
+    u64  user_satp = current_user_token();  
+	/* 计算_restore函数的虚拟地址 */
+    u64  restore_va = (u64)__restore - (u64)__alltraps + TRAMPOLINE;  
+	asm volatile (    
+			"fence.i\n\t"    
+			"mv a0, %0\n\t"  // 将trap_cx_ptr传递给 a0 寄存器  
+			"mv a1, %1\n\t"  // 将user_satp传递给   a1 寄存器  
+			"jr %2\n\t"      // 跳转到restore_va的位置执行代码  
+			:    
+			: "r" (trap_cx_ptr),    
+			"r" (user_satp),
+			"r" (restore_va)
+			: "a0", "a1"
+		);
+  
 }
 
+void set_user_trap_entry()
+{
+	w_stvec((reg_t)TRAMPOLINE);  
+}
+//跳板页开始位置
+#define TRAMPOLINE (MAXVA - PAGE_SIZE)
+// Sv39的最大地址空间 512G
+#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+#define PAGE_SIZE 0x1000      // 4kb  一页的大小
+
+
+/* 返回当前执行的应用程序的satp token*/
+u64 current_user_token()
+{
+   return MAKE_SATP(tasks[_current].pagetable.root_ppn.value);
+}
+```
+
+这段代码准备了三个关键量：
+
+| 变量或寄存器             | 含义                                     |
+| ------------------------ | ---------------------------------------- |
+| `trap_cx_ptr`，传入 `a0` | TrapContext 的虚拟地址                   |
+| `user_satp`，传入 `a1`   | 用户地址空间的页表 token                 |
+| `restore_va`             | trampoline 映射下的 `__restore` 入口地址 |
+
+`restore_va` 的计算是：$ \text{restore\_va} =\text{TRAMPOLINE} +(\_\_restore-\_\_alltraps) $，它利用两个符号之间的偏移量，找到跳板页面中的 `__restore`。例如，假设：
+
+```c
+TRAMPOLINE = 0x3ffffff000
+__restore - __alltraps = 0x100
+```
+
+那么：
+
+```
+restore_va = 0x3ffffff100
+```
+
+为什么不能简单使用普通的 `__restore` 链接地址？因为切换页表之后，CPU 还需要继续执行跳板代码。通常内核页表与用户页表都会把同一个 trampoline 物理页面映射到相同的虚拟地址，因此这段代码可以跨越 `satp` 切换继续运行。
+
+``` assembly
+.section .text.trampoline
+.globl __alltraps
+.align 3
+__alltrap
+
+
+.globl __restore
+.align 3
+__restore:
+...
+```
+
+### 通过`__restore`回到用户态
+
+先看开头：
+
+```assembly
+.globl __restore
+.align 3
+__restore:
+    # a0: *TrapContext in user space
+    # a1: user space token
+
+    csrw satp, a1
+    sfence.vma
+
+    csrw sscratch, a0
+    mv sp, a0
+```
+
+**首先切换到用户页表：**
+
+```assembly
+csrw satp, a1	# trap_return 中进行了设置
+sfence.vma
+```
+
+`csrw satp, a1` 将用户页表的物理地址写入 `satp`，切换到用户进程的地址空间。这里的 `satp` 是 Supervisor Address Translation and Protection 寄存器，包含页表模式和页表根页号等信息。
+
+`sfence.vma` 用于同步地址转换相关状态，避免继续使用不适当的旧 TLB 翻译结果。
+
+但需要注意：切换到用户页表不等于立刻进入 U 模式。 此时 CPU 仍在 S 模式，只是使用的页表已经变成用户进程的页表。
+
+**设置 `sscratch`：**
+
+```assembly
+csrw sscratch, a0
+mv sp, a0
+```
+
+这两条指令是整个上下文恢复过程的关键。假设：
+
+```assembly
+a0 = TRAPFRAME
+```
+
+执行后：
+
+```assembly
+sscratch = TRAPFRAME
+sp       = TRAPFRAME
+```
+
+注意，此时的 `sp` 不是内核栈顶，也不是用户栈顶，而是 TrapContext 的虚拟地址。接下来，**`__restore` 会把`sp`当作基地址，从内存中恢复各个寄存器。**
+
+> 为什么要把 `sscratch` 也设置成 `TRAPFRAME`？
+>
+> 因为用户程序恢复执行后，未来再次从 U 模式陷入内核时，`__alltraps` 将使用：
+>
+> ```
+> csrrw sp, sscratch, sp
+> ```
+>
+> 这条指令交换 `sp` 与 `sscratch`。只要 `sscratch` 事先保存了 `TRAPFRAME` 的地址，就能在用户栈和陷入上下文之间完成切换，这是 `sscratch` 的核心用途。
+
+**恢复 `sstatus` 和 `sepc`**：
+
+```assembly
+ld t0, 32*8(sp)
+ld t1, 33*8(sp)
+
+csrw sstatus, t0
+csrw sepc, t1
+```
+
+- `sepc` 决定返回后的 PC。
+- `sstatus` 决定返回后的特权级及中断状态。
+
+在首次启动时，在 `app_init()` 中已经设置：
+
+```c
+sstatus &= ~SSTATUS_SPP;
+sstatus |= SSTATUS_SPIE;
+cx_ptr->sepc = tasks[app_id].entry;
+```
+
+因此，恢复后 `SPP=0`，为 `sret` 返回到 U 模式做好准备。
+
+**恢复通用寄存器**：
+
+```assembly
+ld x1, 1*8(sp)
+ld x3, 3*8(sp)
+ld x4, 4*8(sp)
+...
+ld x31, 31*8(sp)
+```
+
+每条 `ld` 都从 `TrapContext` 对应的槽位恢复一个通用寄存器。为什么不恢复 `x0`？因为 RISC-V 的 `x0` 永远为零，不能被普通指令修改，所以不需要保存和恢复。
+
+> 为什么暂时不恢复 `x2`，也就是 `sp`？
+>
+> 因为当前的 `sp` 还要充当访问 `TrapContext` 的基地址。如果过早恢复用户栈指针，后面的 `ld` 就会访问错误的位置。因此，代码**把用户栈指针放到最后恢复**。
+
+**最后恢复用户栈并执行 `sret`**：
+
+```assembly
+ld sp, 2*8(sp)
+
+sret
+```
+
+第一条指令从 `TRAPFRAME+16` 读取用户栈指针，然后将其写入 `sp`。最后：`sret`进入 U 模式，这是整个首次启动链路中真正进入 U 模式的指令。其关键效果是：
+
+1. PC 恢复为 `sepc`。
+2. 特权级恢复为 `sstatus.SPP` 指定的模式。
+3. `SPP=0` 时返回 U 模式。
+4. `SIE` 从 `SPIE` 恢复，并按架构规则更新状态位。
+
+所以第一次执行 `sret` 后：
+
+```c
+PC  = tasks[0].entry
+sp  = tasks[0].ustack
+Mode = U
+```
+
+至此，用户程序开始运行。
+
+### 发生异常通过`__alltraps` 陷入
+
+用户程序运行后，可能发生定时器中断、系统调用或异常。这时就需要另一段汇编：`__alltraps`。例如当 CPU 执行完一条`ecall`指令准备从 U 模式 Trap 到 S 模式时，硬件会自动完成如下事情：
+
+- `sstatus`寄存器的`SPP`字段修改为**当前 CPU 的特权级**（Trap 回来后是什么优先级）;
+- `sepc`寄存器修改为 Trap 处理完后执行的**下一条指令地址**（Trap 回来后回到哪里去）；
+- `scause/stval`分别**记录 Trap 的原因**以及相关的附加信息（给 OS/OpenSBI 信息，如何处理这次 Trap）；
+
+而当CPU完成 Trap 处理准备返回的时候，需要通过一条S特权级的特权指令**`sret`**完成，这一指令完成如下功能：
+
+- `sstatus`寄存器的`SPP`字段修改为当前CPU的特权级。
+- CPU跳转到`sepc`寄存器指向的那条指令。
+
+但是，**硬件不会自动切换页表，也不会自动切换栈指针，更不会自动保存所有通用寄存器。**这正是 `__alltraps` 存在的原因。
+
+---
+
+**首先读取`sscratch`寄存器中存储的 `TAPFRAME`页虚拟地址（所有 APP 的虚拟地址都一样）：**
+
+``` assembly
+.section .text.trampoline
+.globl __alltraps
+.align 3
+
+__alltraps:
+    csrrw sp, sscratch, sp
+```
+
+执行前：
+
+```c
+sp       = 用户栈顶
+sscratch = TRAPFRAME
+```
+
+执行后：
+
+```c
+sp       = TRAPFRAME
+sscratch = 用户栈顶
+```
+
+这一步特别重要。此时 `sp` 指向的是 `TrapContext`，而不是内核栈。因为 CPU 还没有切换到内核页表，`__alltraps` 仍然运行在 trampoline 的映射下。它先把用户寄存器保存在 `TRAPFRAME`，等保存完必要状态后，再切换到内核页表和内核栈。
+
+---
+
+**然后保存用户通用寄存器：**
+
+``` assembly
+sd x1, 1*8(sp)
+sd x3, 3*8(sp)
+sd x4, 4*8(sp)
+...
+sd x31, 31*8(sp)
+```
+
+代码最后通过：
+
+```assembly
+csrr t2, sscratch
+sd t2, 2*8(sp)
+```
+
+把用户栈指针保存到 `TrapContext.x[2]` 所在的位置。
+
+---
+
+**然后保存`sstatus`和`sepc`寄存器：**
+
+``` assembly
+csrr t0, sstatus
+csrr t1, sepc
+
+sd t0, 32*8(sp)
+sd t1, 33*8(sp)
+```
+
+---
+
+**读取内核根页表物理地址、内核栈的虚拟地址和`trap_handler`的虚拟地址：**
+
+接下来是：
+
+```assembly
+ld t0, 34*8(sp)	# TrapContext.kernel_satp
+ld t1, 36*8(sp)	# TrapContext.trap_handler
+ld sp, 35*8(sp) # TrapContext.kernel_sp
+```
+
+这时，`sp` 从 `TRAPFRAME` 地址变成了内核栈指针。请注意指令的顺序：`kernel_satp` 和 `trap_handler` 先被读入 `t0`、`t1`，然后才覆盖 `sp`。因此，后续不再需要通过原来的 `sp` 访问 TrapContext 中的这两个字段。接下来：
+
+```assembly
+csrw satp, t0
+sfence.vma
+jr t1
+```
+
+依次完成：
+
+1. **切换到内核页表**。
+2. 同步地址转换状态。（这里需要跳板页的存在）
+3. **跳转到 `trap_handler`**。
+
+---
+
+> 跳板页的作用
+
+我们假设这三条指令的位置分别是：
+
+| 虚拟地址     | 指令            |
+| ------------ | --------------- |
+| `0x40001000` | `csrw satp, t0` |
+| `0x40001004` | `sfence.vma`    |
+| `0x40001008` | `jr t1`         |
+
+第一步：执行 `csrw satp, t0`，此时 CPU：
+
+```assembly
+PC   = 0x40001000
+satp = 用户页表
+```
+
+执行结束后：satp = 内核页表。但是！CPU 的 PC 并没有发生跳转，下一条取指的指令仍然位于：
+
+```
+PC = 0x40001004
+```
+
+第二步：CPU 尝试执行 `sfence.vma`，CPU 必须先取出虚拟地址 `0x40001004` 对应的指令。但是此时：
+
+```c
+satp = 内核页表
+```
+
+因此 CPU 会通过内核页表翻译：
+
+```c
+VA = 0x40001004
+```
+
+问题来了：内核页表根本没有映射这个地址！于是 CPU 无法正常完成取指，可能触发指令页故障（Instruction Page Fault）。
+
+此时甚至还没有执行到 `jr t1`。因此，`t1` 中保存了正确的 `trap_handler` 地址，也没有任何用处，因为 CPU 还没来得及执行跳转指令。
+
+---
+
+至此，CPU 已经具备在内核环境中执行陷入处理函数的条件。
+
+``` c
+void trap_handler()
+{
+    set_kernel_trap_entry();
+    TrapContext* cx = (TrapContext*)get_current_trap_cx();
+    reg_t scause = r_scause();
+    reg_t cause_code = scause & 0xfff;
+
+    if (scause & 0x8000000000000000ULL) {
+        switch (cause_code) {
+        case 5:
+            set_next_trigger();
+            schedule();
+            break;
+        default:
+            printk("undefined interrupt scause:%lx\n", scause);
+            panic("unexpected user interrupt");
+        }
+    } else {
+        switch (cause_code) {
+        case 8: {
+            /* exec 会覆写 sepc，必须先跳过 4 字节的 ecall 指令。 */
+            cx->sepc += 4;
+            uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
+            /* 调度可能切换当前进程，返回值写入当前 trap 上下文。 */
+            cx = (TrapContext*)get_current_trap_cx();
+            cx->a0 = result;
+            break;
+        }
+        default:
+            printk("undefined exception scause:%lx sepc:%lx stval:%lx\n",
+                   scause, cx->sepc, r_stval());
+            panic("unexpected user exception");
+        }
+    }
+    trap_return();
+}
+
+
+void trap_return()  
+{  
+    /* 把 stvec 设置为内核和应用地址空间共享的跳板页面的起始地址 */  
+    set_user_trap_entry();
+    /* Trap 上下文在应用地址空间中的虚拟地址 */  
+    u64 trap_cx_ptr = TRAPFRAME;  
+    /* 要继续执行的应用地址空间的 token */  
+    u64  user_satp = current_user_token();  
+	/* 计算_restore函数的虚拟地址 */
+    u64  restore_va = (u64)__restore - (u64)__alltraps + TRAMPOLINE;  
+	asm volatile (    
+			"fence.i\n\t"    
+			"mv a0, %0\n\t"  // 将trap_cx_ptr传递给a0寄存器  
+			"mv a1, %1\n\t"  // 将user_satp传递给a1寄存器  
+			"jr %2\n\t"      // 跳转到restore_va的位置执行代码  
+			:    
+			: "r" (trap_cx_ptr),    
+			"r" (user_satp),
+			"r" (restore_va)
+			: "a0", "a1"
+		);
+  
+}
+```
+
+## 实现各种系统调用
+
+应用程序调用`sys_write()`函数，传入`fd`, `buf`, `len`等相关信息与系统调用号`__NR_write`，`sys_write()`本质上是`syscall()`系统调用的封装，将系统调用号传入`a7`寄存器，参数传入`a0,a1,a2`寄存器：
+
+``` c
 size_t sys_wirte(size_t fd, const char* buf, size_t len)
 {
     syscall(__NR_write, fd, buf, len);  // 传入__NR_write系统调用号，在trap_handler中对此调用号进行处理
 }
 ```
 
-在`trap_handler`中对系统调用号进行分发：
+然后触发`trap`也就是调用`__alltrap`：
 
-``` c
-TrapContext* trap_handler(TrapContext* cx)
-{
-    reg_t scause = r_scause();
-	switch (scause)
-	{
-        case 8:  // 触发异常，原因为 8 （中断异常）
-                __SYSCALL(cx->a7,cx->a0,cx->a1,cx->a2);  // 读取 a7 寄存器中的值：判断是什么系统调用
-            break;
-        default:
-                printf("undfined scause:%d\n",scause);
-                //panic("error!");
-            break;
-	}
-	
-	cx->sepc += 8;
+- 首先从`sscratch`寄存器获取保存`trapcontext`的地址，将应用程序的寄存器值保存进内核栈；
 
-	return cx;
-}
-```
+- 其次将`a0`寄存器指向内核栈中保存用户态寄存器结构体的地址（使`__SYSCALL()`可以进行处理）；
 
-### 8.1.2 实现系统调用号处理函数
+- 最后调用`trap_handler(TrapContext* cx)`；如果`scause`为 8 则调用`__SYSCALL()`依据内核栈中保存的用户态寄存器结构体值对不同系统调用号调用相关处理函数，如`__sys_write(arg1, arg2, arg3)`进行处理。
+
+### 实现系统调用号处理函数
 
 新建`syscall.c`：
 
 ``` c
-#include "os.h"
+char * translated_byte_buffer(const char* data , size_t len)
+{
+    u64  user_satp = current_user_token();  
+    PageTable  pt ;
+    pt.root_ppn.value = MAKE_PAGETABLE(user_satp);
 
-void __SYSCALL(size_t syscall_id, reg_t arg1, reg_t arg2, reg_t arg3) {
-        switch (syscall_id)
-        {
-        case __NR_write:
-            __sys_write(arg1, arg2, arg3);
-            break;
-        case __NR_sched_yield:
-            __sys_yield();
-            break;
-        default:
-            printk("Unsupported syscall id:%d\n",syscall_id);
-            break;
-        }
+    u64 start_va = (u64)data;
+    u64 end_va = start_va + len;
+    VirtPageNum vpn = floor_virts(virt_addr_from_size_t(start_va));
+    PageTableEntry* pte = find_pte(&pt , vpn);
+    
+    //拿到物理页地址
+    int mask = ~( (1 << 10) -1 );
+    u64 phyaddr = ( pte->bits & mask) << 2 ;
+    //拿到偏移地址
+    u64 page_offset = start_va & 0xFFF;
+    u64 data_d = phyaddr + page_offset;
+    return (char*) data_d;
 }
-
-
 void __sys_write(size_t fd, const char* data, size_t len)
 {
-    if(fd ==1)
+
+    if(fd == stdout || fd == stderr)
     {
-        printk(data);
+
+       char* str =  translated_byte_buffer(data,len);
+       printk("%s",str);
     }
     else
     {
@@ -9189,38 +10397,136 @@ void __sys_write(size_t fd, const char* data, size_t len)
     }
 }
 
-/*************************************/
+void __sys_read(size_t fd, const char* data, size_t len)
+{
+    if(fd == stdin)
+    {
+        int c ;
+        assert( len == 1);
+        while (1)
+        {
+            c = sbi_console_getchar();
+            if(c != -1)
+                break;
+            schedule();
+            continue;
+        }
+        char* str = translated_byte_buffer(data , len);
+        str[0]  = c;
+    }
+}
+
 void __sys_yield()
-{    
+{
     schedule();
 }
 
-void schedule()  // 运行在S态
+uint64_t __sys_gettime()
 {
-	if (_top <= 0) {
-		panic("Num of task should be greater than zero!\n");
-		return;
-	}
-    
-    /* 轮转调度 */
-    int next = _current + 1;
-    next = next % _top;
-
-    if(tasks[next].task_state == Ready)
-    {
-        struct TaskContext *current_task_cx_ptr = &(tasks[_current].task_context);
-        struct TaskContext *next_task_cx_ptr = &(tasks[next].task_context);
-        tasks[next].task_state = Running;
-        tasks[_current].task_state = Ready;
-        _current = next;
-        __switch(current_task_cx_ptr,next_task_cx_ptr);
-    }
-    
+    return get_time_us();
 }
-/*************************************/
+
+int __sys_exec(const char* name)
+{
+    char* app_name = translated_byte_buffer(name, 0);
+    printk("exec app_name:%s\n", app_name);
+    return exec(app_name);
+}
+
+void __sys_exit(u64 exit_code)
+{
+    exit_current_and_run_next(exit_code);
+}
+
+int __sys_wait()
+{
+    return wait();
+}
+
+uint64_t __SYSCALL(size_t syscall_id, reg_t arg1, reg_t arg2, reg_t arg3) {
+        switch (syscall_id)
+        {
+        
+        case __NR_write:
+            __sys_write(arg1, (const char*)arg2, arg3);
+            return arg3;
+        case __NR_read:
+            __sys_read(arg1, (const char*)arg2, arg3);
+            return arg3;
+        case __NR_sched_yield:
+            __sys_yield();
+            return 0;
+        case __NR_gettimeofday:
+            return __sys_gettime();
+        case __NR_exit:
+            __sys_exit(arg1);
+            return 0;
+        case __NR_clone:
+            return __sys_fork();
+        case __NR_execve:
+            return __sys_exec((const char*)arg2);
+        case __NR_waitid:
+            return __sys_wait();
+        default:
+            printk("Unsupported syscall id:%d\n",syscall_id);
+            return (uint64_t)-1;
+        }
+}
 ```
 
-### 8.1.3 重写strlen/memcpy*
+### 用户态 printf 实现
+
+因为之前的`printf()`函数是调用 OpenSBI 的指令来输出的，因此现在将之前的`printf()`修改名称为`printk()`作为内核输出函数。
+
+之前的应用程序是调用的`uint64_t sys_write(size_t fd, const char* buf, size_t len)`函数进行输出，因此把`sys_write()`封装为为`printf()`函数，用户态程序调用`printf()`先调用`sys_write()`再调用`printk()`函数进行输出。
+
+``` c
+int printf(const char* s, ...)
+{
+	int res = 0;
+	va_list vl;
+	va_start(vl, s);
+	res = vprintf(s, vl);
+	va_end(vl);
+	return res;
+}
+
+static char out_buf[1000];
+static int vprintf(const char* s, va_list vl)
+{
+	int res = _vsnprintf(NULL, -1, s, vl);
+	_vsnprintf(out_buf, res + 1, s, vl);
+	sys_write(stdout,out_buf,res + 1);  // 将 uart_puts 改成 sys_write就可以
+	return res;
+}
+```
+
+``` c
+int printk(const char* s, ...)
+{
+	int res = 0;
+	va_list vl;
+	va_start(vl, s);
+	res = _vprintf(s, vl);
+	va_end(vl);
+	return res;
+}
+
+static char out_buf[1000]; // buffer for _vprintf()
+static int _vprintf(const char* s, va_list vl)
+{
+	int res = _vsnprintf(NULL, -1, s, vl);
+	if (res+1 >= sizeof(out_buf)) {
+		uart_puts("error: output string size overflow\n");
+		while(1) {}
+	}
+	_vsnprintf(out_buf, res + 1, s, vl);
+	uart_puts(out_buf);
+	return res;
+}
+```
+
+### 重写 strlen/memcpy
 
 创建`string.c`：
 
@@ -9250,7 +10556,9 @@ void* memcpy(void* dest, const void* src, size_t count)
 }
 ```
 
-## 8.2 实现协作式多任务
+# 实现协作式任务调度
+
+## 实现协作式多任务
 
 <img src="quard-star/trap.png" alt="trap"  />
 
@@ -9264,54 +10572,7 @@ void* memcpy(void* dest, const void* src, size_t count)
 
 只有第一次执行应用程序A的时候的`ra`是`__restore`，当A任务执行完毕`__switch`后，它的`ra`就变成了`__switch`的下一条地址，就是`schedule()`函数执行完毕了。第二次B任务调用`__switch`切换回A的时候，此时就会返回到`__switch`的下一条地址执行，我们是在`__sys_yield()`中调用`schedule()`的，所以会依次完成函数调用返回，从`schedule()`返回`__sys_yield()`，再返回到`__SYSCALL`，最后返回到`trap_handler()`，而在本文开头提到过`trap_handler`执行完毕后会去执行`__restore`，所以这样A才能返回到用户空间程序继续执行。
 
----
 
-### 8.2.1 定义结构体类型
-创建`task.h`：
-
-``` c
-#ifndef __TASK_H__
-#define __TASK_H__
-
-#include "os.h"
-typedef enum TaskState
-{
-	UnInit, // 未初始化
-    Ready, // 准备运行
-    Running, // 正在运行
-    Exited, // 已退出
-}TaskState;
-
-typedef struct TaskControlBlock  // 每个任务保存自己状态/寄存器的地方
-{
-    TaskState task_state; 
-    TaskContext task_context; 
-}TaskControlBlock;
-
-#endif
-
-/* S模式的任务上下文 */
-/* __switch本质上是函数调用，需要遵守riscv的函数调用规范，因为switch是汇编函数所以得手动保存 */
-typedef struct TaskContext
-{
-	reg_t ra;  // 记录__switch函数返回之后跳转到哪里执行
-	reg_t sp;  // 寻址到对应的trap_context
-	reg_t s0;
-	reg_t s1;
-	reg_t s2;
-	reg_t s3;
-	reg_t s4;
-	reg_t s5;
-	reg_t s6;
-	reg_t s7;
-	reg_t s8;
-	reg_t s9;
-	reg_t s10;
-	reg_t s11;
-}TaskContext;
-
-#endif
-```
 
 ### 8.2.2 定义栈与初始化函数
 
@@ -9332,52 +10593,6 @@ uint8_t KernelStack[MAX_TASKS][KERNEL_STACK_SIZE];
 uint8_t UserStack[MAX_TASKS][USER_STACK_SIZE];
 
 struct TaskControlBlock tasks[MAX_TASKS];  // 每个任务保存自己状态/上下文的地方
-```
-
-### 8.2.3 switch.S实现
-
-创建`switch.S`：1.进行换栈操作，把`SP`指向新的任务的内核栈中保存`trapcontext`的地址，在之后的`__restore`函数中通过新的`SP`恢复切换后内核栈中的`trapcontext`：恢复`ra`的值，`__switch`结束后运行此地址的指令。
-
-对于一个任务来说，是它先调用的`__syscall()/schdule()/__switch`函数，所以函数的`ra`值都保存在她的内核栈中，当其他任务调用`__switch`把它切换回来（换成它的内核栈）之后，也就知道了`__switch`函数返回之后需要返回到哪里。
-
-``` assembly
-.altmacro
-.macro SAVE_SN n
-    sd s\n, (\n+2)*8(a0)
-.endm
-.macro LOAD_SN n
-    ld s\n, (\n+2)*8(a1)
-.endm
-    .section .text
-    .globl __switch
-__switch:
-    # 阶段 [1]  保存
-    # __switch(
-    #     current_task_cx_ptr: *mut TaskContext,  // 传入的参数更改了trap_handler传入a0的值
-    #     next_task_cx_ptr: *const TaskContext
-    # )
-    # 阶段 [2]
-    # save kernel stack of current task
-    sd sp, 8(a0)
-    # save ra & s0~s11 of current execution
-    sd ra, 0(a0)
-    .set n, 0
-    .rept 12
-        SAVE_SN %n
-        .set n, n + 1
-    .endr
-    # 阶段 [3]  恢复
-    # restore ra & s0~s11 of next execution
-    ld ra, 0(a1)
-    .set n, 0
-    .rept 12
-        LOAD_SN %n
-        .set n, n + 1
-    .endr
-    # restore kernel stack of next task
-    ld sp, 8(a1)
-    # 阶段 [4]
-    ret
 ```
 
 ### 8.2.4 实现系统调用号处理函数
@@ -9686,830 +10901,6 @@ TrapContext* trap_handler(TrapContext* cx)
 }
 ```
 
-# 10. 用户态printf实现及物理内存管理
-
-## 10.1 用户态printf实现
-
-在此对文件编译体系进行修改：
-
-将头文件放在`include/timeros`下，内核的源码放在`src`目录下，`lib`目录下存放一些通用的函数库，例如`string.c`以及即将加入的`printf.c`代码。
-
-因为之前的`printf()`函数是调用 OPENSBI 的指令来输出的，因此现在将之前的`printf()`修改名称为`printk()`作为内核输出函数。
-
-之前的应用程序是调用的`uint64_t sys_write(size_t fd, const char* buf, size_t len)`函数进行输出，因此把`sys_write()`封装为为`printf()`函数，用户态程序调用`printf()`先调用`sys_write()`再调用`printk()`函数进行输出。
-
-``` c
-int printf(const char* s, ...)
-{
-	int res = 0;
-	va_list vl;
-	va_start(vl, s);
-	res = vprintf(s, vl);
-	va_end(vl);
-	return res;
-}
-
-static char out_buf[1000];
-static int vprintf(const char* s, va_list vl)
-{
-	int res = _vsnprintf(NULL, -1, s, vl);
-	_vsnprintf(out_buf, res + 1, s, vl);
-	sys_write(stdout,out_buf,res + 1);  // 将 uart_puts 改成 sys_write就可以
-	return res;
-}
-```
-
-``` c
-int printk(const char* s, ...)
-{
-	int res = 0;
-	va_list vl;
-	va_start(vl, s);
-	res = _vprintf(s, vl);
-	va_end(vl);
-	return res;
-}
-
-static char out_buf[1000]; // buffer for _vprintf()
-static int _vprintf(const char* s, va_list vl)
-{
-	int res = _vsnprintf(NULL, -1, s, vl);
-	if (res+1 >= sizeof(out_buf)) {
-		uart_puts("error: output string size overflow\n");
-		while(1) {}
-	}
-	_vsnprintf(out_buf, res + 1, s, vl);
-	uart_puts(out_buf);
-	return res;
-}
-```
-
-## 物理内存管理
-
-### xv6的物理内存管理
-
-####  管理与释放(`kfree`)
-
-![xv6内存管理](quard-star/xv6内存管理.png)
-
-`xv6`内核的起始地址为`KERNBASE = 0X8000 0000`开始，结束的地方为`PHYSTOP = 0X8800 0000`.这之间的`128MB`的地方内核的代码段是可读可执行的，内核的数据段代码是可读**可写**的。所以实际我们可以分配和管理的地址是从代码段结束的地方开始的（包括数据段）。
-
-下面阐述如何对空闲地址页进行管理：
-
-首先拿到可管理的内存空间的起始地址。
-
-``` c
-extern char end[];  // 首先拿到代码段结束地址
-```
-然后定义一个数据结构`kmem`，包含一个锁和一个链表。
-
-``` c
-struct run{
-    struct run *next;
-};  // 链表节点
-
-struct {
-    struct spinlock lock;
-    struct run *freelist;  // freelist 始终指向当前链表的第一个空闲页
-} kmem;  // 未命名结构体，直接声明了一个变量 kmem
-```
-
-定义`kinit()`函数，扫描`end-PHYSTOP`之间可用的物理内存页，将可用的物理内存页通过`kmem`维护起来，同时将可用的空闲物理页中的每个字节的数据填充，用于初始化。
-
-``` c
-void kinit(){
-    initlock(&kmem.lock, "kmem");
-    freerange(end, (void*)PHTSTOP);
-}
-
-void freerange(void *pa_start, void *pa_end){
-    char *p;
-    p = (char*) PGROUNDUP((uint64_t) pa_start);
-    for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)  // 从起始页开始按页遍历，释放每一页
-        kfree(p);
-}
-
-/*释放需要手动传入页的地址(并非页号)，rcore项目中是传入页号*/
-void kfree(void *pa){
-    /* 检测地址是否按页对齐或者是否超出范围 */
-    if((uint64_t)pa % PGSIZE != 0 || (char*)pa < end || (uint64_t)pa >= PHYSTOP)
-        panic("kfree");
-    
-    memset(pa, 1, PGSIZE);  // 内容填充为 1
-    /* 每个空闲页的指针被强制转换为 struct run*，利用页的起始空间存储 next 指针 */
-     struct run *r = (struct run*)pa;
-    acquire(&kmem.lock);
-    /* 将当前页作为节点插入到链表头部 */
-    r->next = kmem.freelist;  
-    kmem.freelist = r;
-    release(&kmem.lock);
-}
-```
-####  分配(`kmalloc`) 
-
-与之相对的是`kalloc()`函数，返回的是分配的**一块**物理内存页的指针。逻辑为从`kmem`的链表的头部取出一个空闲页块的指针，然后将链表头部指针后移。
-
-``` c
-void *kalloc(void){
-    struct run *r;
-    acquire(&kmem.lock);
-    r = kmem.freelist;
-    if(r)
-        kmem.freelist = r->next;  // 指向下一个待分配的物理内存指针
-    release(&kmem.lock);
-    
-    if(r)
-        memset((char*)r, 5, PGSIZE);
-    return (void*)r;
-}
-```
-
-### rcore的物理内存管理
-
-**rcore**采用的是**栈式**物理页帧管理策略，**以页为单位**。核心的数据结构如下：
-
-``` c
-typedef struct 
-{
-    uint64_t  current;   //空闲内存的起始物理页号
-    uint64_t  end;       //空闲内存的结束物理页号
-    Stack recycled;      //防止current走回头路，可以让current递增
-}StackFrameAllocator;
-```
-
-其中各字段的含义为：物理页号`[current, end]`此前均**从未被分配出去过**的物理内存，而向量`recycled`以**后进先出**的方式保存了被回收的物理页号。
-
-因此为了实现这种栈式的管理，我们首先得实现一个栈的数据结构，C++中有`stack`可使用，但C语言中得自己实现。因此在`lib`目录下新建一个`stack.c`的文件，在`timeros` 目录下新建了一个`stack.h`的头文件。
-
-#### 定义栈及函数
-
-编写**stack.h**：
-
-``` c
-#ifndef TOS_STACK_H__
-#define TOS_STACK_H__
-
-#include "os.h"
-
-#define MAX_SIZE 10000
-
-typedef struct {  // 使用结构体实现栈的数据结构
-    u64 data[MAX_SIZE];  // 物理页号是 64 类型
-    int top;
-} Stack;
-
-bool isEmpty(Stack *stack);
-bool isFull(Stack *stack);
-void push(Stack *stack, u64 value);
-u64 pop(Stack *stack);
-u64 top(Stack *stack);
-
-#endif
-```
-
-编写**stack.c**：
-
-``` c
-#include <timeros/stack.h>
-
-// 初始化栈
-void initStack(Stack *stack) {
-    stack->top = -1;
-}
-
-// 判断栈是否为空
-bool isEmpty(Stack *stack) {
-    return stack->top == -1;
-}
-
-// 判断栈是否已满
-bool isFull(Stack *stack) {
-    return stack->top == MAX_SIZE - 1;
-}
-
-// 入栈操作
-void push(Stack *stack, u64 value) {
-    if (isFull(stack)) {
-        printk("Stack overflow\n");
-        return;
-    }
-    stack->data[++stack->top] = value;
-}
-
-// 出栈操作
-u64 pop(Stack *stack) {
-    if (isEmpty(stack)) {
-        printk("Stack underflow\n");
-        return -1; // 表示栈为空或操作失败
-    }
-    return stack->data[stack->top--];
-}
-
-// 获取栈顶元素
-u64 top(Stack *stack) {
-    if (isEmpty(stack)) {
-        printk("Stack is empty\n");
-        return -1; // 表示栈为空
-    }
-    return stack->data[stack->top];
-}
-```
-
-#### 定义地址/页及函数
-
-将`PhysAddr、VirtAddr、PhysPageNum、VirtPageNum`全部定义为结构体类型，在`Rcore`中可以为这些结构体实现操作函数，但C语言中没有面向对象的特性，因此在`address.c`中手动实现。
-
-``` c
-#ifndef TOS_ADDRESS_H
-#define TOS_ADDRESS_H
-
-#include <timeros/os.h>
-#include <timeros/stack.h>
-#include <timeros/string.h>
-#include <timeros/assert.h>
-
-#define PAGE_SIZE 0x1000      // 4kb  一页的大小
-#define PAGE_SIZE_BITS   0xc  // 12   页内偏移地址长度
-#define PA_WIDTH_SV39 56      //物理地址长度
-#define VA_WIDTH_SV39 39      //虚拟地址长度
-
-#define PPN_WIDTH_SV39 (PA_WIDTH_SV39 - PAGE_SIZE_BITS)  // 物理页号 44位 [55:12]
-#define VPN_WIDTH_SV39 (VA_WIDTH_SV39 - PAGE_SIZE_BITS)  // 虚拟页号 27位 [38:12]
-
-#define MEMORY_END 0x80800000    // 0x80400000 ~ 0x80800000
-#define MEMORY_START 0x80400000  
-
-/* 物理地址 */
-typedef struct {
-    uint64_t value; 
-} PhysAddr;
-
-/* 虚拟地址 */
-typedef struct {
-    uint64_t value;
-} VirtAddr;
-
-/* 物理页号 */
-typedef struct {
-    uint64_t value;
-} PhysPageNum;
-
-/* 虚拟页号 */
-typedef struct {
-    uint64_t value;
-} VirtPageNum;
-
-#endif
-```
-
-在Rcore中可以为这些结构体实现操作函数，但是C语言没有面向对象的特性，因此在`address.c`中手动实现：
-
-``` c
-#include <timeros/address.h>
-/******* u64 与 PhysAddr/PhysPageNum之间互相转换 *************/
-PhysAddr phys_addr_from_size_t(size_t v) {
-    PhysAddr addr;
-    addr.value = v & ((1ULL << PA_WIDTH_SV39) - 1);  //PA_WIDTH_SV39为有效页的大小（56位）
-    return addr;
-}
-
-PhysPageNum phys_page_num_from_size_t(size_t v) {
-    PhysPageNum pageNum;
-    pageNum.value = v & ((1ULL << PPN_WIDTH_SV39) - 1);
-    return pageNum;
-}
-
-uint64_t size_t_from_phys_addr(PhysAddr v) {
-    return v.value;
-}
-
-uint64_t size_t_from_phys_page_num(PhysPageNum v) {
-    return v.value;
-}
-/************* 从物理页号转换为实际物理地址 ******************/
-PhysAddr phys_addr_from_phys_page_num(PhysPageNum ppn)
-{
-    PhysAddr addr;
-    addr.value = ppn.value << PAGE_SIZE_BITS ;  // 左移替代乘法
-    return addr;
-}
-
-VirtAddr virt_addr_from_size_t(uint64_t v) {
-    VirtAddr addr;
-    addr.value = v & ((1ULL << VA_WIDTH_SV39) - 1);  // 只要后39位
-    return addr;
-}
-
-VirtPageNum virt_page_num_from_size_t(uint64_t v) {
-    VirtPageNum pageNum;
-    pageNum.value = v & ((1ULL << VPN_WIDTH_SV39) - 1);  // 只要后27位
-    return pageNum;
-}
-
-uint64_t size_t_from_virt_addr(VirtAddr v) {
-    if (v.value >= (1ULL << (VA_WIDTH_SV39 - 1))) {
-        return v.value | ~((1ULL << VA_WIDTH_SV39) - 1);
-    } else {
-        return v.value;
-    }
-}
-
-uint64_t size_t_from_virt_page_num(VirtPageNum v) {
-    return v.value;
-}
-
-/* 物理地址向下取整得到物理页号 */
-PhysPageNum floor_phys(PhysAddr phys_addr) {
-    PhysPageNum phys_page_num;
-    phys_page_num.value = phys_addr.value / PAGE_SIZE;
-    return phys_page_num;
-}
-
-/* 物理地址向上取整得到物理页号 */
-PhysPageNum ceil_phys(PhysAddr phys_addr) {
-    PhysPageNum phys_page_num;
-    phys_page_num.value = (phys_addr.value + PAGE_SIZE - 1) / PAGE_SIZE;
-    return phys_page_num;
-}
-
-/* 虚拟地址向下取整转换为虚拟页号 */
-VirtPageNum virt_page_num_from_virt_addr(VirtAddr virt_addr)
-{
-    VirtPageNum vpn;
-    vpn.value =  virt_addr.value / PAGE_SIZE;
-    return vpn;
-}
-```
-#### 页的管理
-
-首先定义一个`new`函数，用于创建`FrameAllocator`的实例，只需将区间两端设为 0， 然后创建一个初始化栈。
-
-``` c
-void StackFrameAllocator_new(StackFrameAllocator *allocator) {
-    allocator->current = 0;  // 页号
-    allocator->end = 0;      // 页号
-    initStack(&allocator->recycled);
-}
-```
-
-然后是`init`函数，用于将`[current, end)`初始化为可用物理页号区间：
-
-```c
-void StackFrameAllocator_init(StackFrameAllocator *allocator, PhysPageNum l, PhysPageNum r) {
-    allocator->current = l.value;
-    allocator->end = r.value;
-}
-```
-#### 页的分配
-
-接下来是对物理页帧的分配实现：**首先**检查有无之前回收的页，如果有则直接弹出栈顶并返回；**否则**就分配新的页号。
-
-``` c
-PhysPageNum StackFrameAllocator_alloc(StackFrameAllocator *allocator){
-    PhysPageNum ppn;
-    if(allocator->recycled.top >= 0)
-        ppn.value = pop(&(allocator->recycled));
-    else{
-        if(allocator->current == allocator->end){  // 已经分配完了
-            ppn.value = 0; // Return 0 as None
-        }else{
-            ppn.value = allocator->current++;
-        }
-    }
-    
-    PhysAddr addr = phys_addr_from_phys_page_num(ppn);
-    memset(addr.value, 0, PAGE_SIZE);
-    return ppn;
-}
-```
-
-#### 页的回收
-
-在进行`dealloc`的时候，需要检查回收页面的合法性，然后将其压入`recycled`栈中。回收页面合法有两个条件：
-
-- 该页面一定之前被分配出去过，因此**物理页号一定小于`current`**。
-- 该页面没有处于正在回收状态，因此**它的物理页号也不能在栈`recycled`中找到**。
-
-``` c
-void StackFrameAllocator_dealloc(StackFrameAllocator *allocator, PhysPageNum ppn) {
-    uint64_t ppnValue = ppn.value;
-    // 检查回收的页面之前一定被分配出去过
-    if (ppnValue >= allocator->current) {
-        printk("Frame ppn=%lx has not been allocated!\n", ppnValue);
-        return;
-    }
-    // 检查未在回收列表中
-    if(allocator->recycled.top >= 0)
-    {
-        for (size_t i = 0; i <= allocator->recycled.top; i++)
-        {
-            if(ppnValue ==allocator->recycled.data[i] )
-            return;
-        }
-    }
-    // 回收物理内存页号
-    push(&(allocator->recycled), ppnValue);
-}
-```
-
-编写测试代码：
-
-``` c
-static StackFrameAllocator FrameAllocatorImpl;
-void frame_allocator_test()
-{
-    StackFrameAllocator_new(&FrameAllocatorImpl);
-    StackFrameAllocator_init(&FrameAllocatorImpl, 
-            floor_phys(phys_addr_from_size_t(MEMORY_START)), 
-            ceil_phys(phys_addr_from_size_t(MEMORY_END)));
-    printk("Memoery start:%d\n",floor_phys(phys_addr_from_size_t(MEMORY_START)));
-    printk("Memoery end:%d\n",ceil_phys(phys_addr_from_size_t(MEMORY_END)));
-    PhysPageNum frame[10];
-    for (size_t i = 0; i < 5; i++)
-    {
-         frame[i] = StackFrameAllocator_alloc(&FrameAllocatorImpl);
-         printk("frame id:%d\n",frame[i].value);
-    }
-    for (size_t i = 0; i < 5; i++)
-    {
-         StackFrameAllocator_dealloc(&FrameAllocatorImpl,frame[i]);
-         printk("allocator->recycled.data.value:%d\n",FrameAllocatorImpl.recycled.data[i]);
-         printk("frame id:%d\n",frame[i].value);
-     }
-     PhysPageNum frame_test[10];
-     for (size_t i = 0; i < 5; i++)
-     {
-          frame[i] = StackFrameAllocator_alloc(&FrameAllocatorImpl);
-         printk("frame id:%d\n",frame[i].value);
-     }
-}
-```
-## 10.3 risc-v的分页机制
-
-​    为了方便实现虚拟页面到物理页帧的地址转换，我们给每个**虚拟页面**和**物理页帧**一个编号，分别称为 **虚拟页号** (VPN, Virtual Page Number) 和 **物理页号** (PPN, Physical Page Number)**（ 页号*pagesize(4KB) + 页内偏移就是地址 ）** 。每个应用都有一个表示地址映射关系的页表 (Page Table) ，记录了该应用每个虚拟页面映射到物理内存中的哪个物理页帧。每个物理页号（PPN）在 整个物理地址空间内是唯一的。
-
-​    如果将页表看成一个键值对，其键的类型为虚拟页号，值的类型则为物理页号。当 MMU 进行地址转换的时候，虚拟地址会分为两部分（虚拟页号，页内偏移），**MMU首先找到虚拟地址所在虚拟页面的页号索引，然后查当前应用的页表，根据虚拟页号索引找到下级页表（或物理地址）的物理页号（*4kb也就得到了物理地址）**；最后按照虚拟地址的页内偏移，给物理页号对应的物理页帧的起始地址加上一个偏移量，这就得到了实际访问的物理地址。
-
-### 10.3.1 satp寄存器
-
-![satp寄存器](quard-star/satp寄存器.png)
-
-  当 `MODE` 设置为 `0 `的时候，代表所有访存都被视为物理地址；而设置为 `8` 的时候，**SV39 分页机制被启用**，所有 U/S 特权级的访存被视为一个 `39` 位的虚拟地址，它们需要先经过 MMU 的地址转换流程，如果顺利的话，则会变成一个 `56` 位的物理地址来访问物理内存；否则则会触发异常，这体现了分页机制的内存保护能力。
-
-  `39` 位的虚拟地址可以用来访问理论上最大 `512GB` 的地址空间，而 `56` 位的物理地址在理论上甚至可以访问一块大小比这个地址空间的还高出几个数量级的物理内存。但是实际上无论是虚拟地址还是物理地址，真正有意义、能够通过 MMU 的地址转换或是 CPU 内存控制单元的检查的地址仅占其中的很小一部分，因此它们的理论容量上限在目前都没有实际意义。
-
-### 10.3.2 地址格式与组成
-
-<img src="quard-star/地址格式与组成.png" alt="地址格式与组成" style="zoom:80%;" />
-
-![为什么39](quard-star/为什么39.png)
-
-### 10.3.3 地址转换流程*
-
-多级页表可以节约内存空间，按需分配。
-
-**每一页大小为4KB，每一个页表项大小为8字节（64位），因此每一页可以容纳 512 个页表项(0x1 1111 1111)，刚好9位，因此虚拟地址的每 9 位在每一级页表中都有对应的页表项。**
-
-**物理地址由：物理页号（44位，左移12位就相当于×4KB） + 页内偏移（12位）组成。**
-
-![地址转换](quard-star/地址转换.png)
-
-- 首先**从`satp`寄存器**的低 44 位取出此进程的 3 级页表的**物理页号**，`× PAGESIZE(4KB)`后得到自己的 3 级页表的物理地址，通过虚拟地址的`vpn[2]` 键对值配对找到 2 级页表的物理页号。
-- 将 2 级物理页表号`× PAGESIZE(4KB)`后得到自己的 2 级页表的物理地址，通过虚拟地址的`vpn[1]`进行键对值匹配找到 1 级页表的物理页号。
-- 将 1 级物理页表号`× PAGESIZE(4KB)`后得到自己的 1 级页表的物理地址，通过虚拟地址的`vpn[0]`进行键对值匹配得到物理地址的页号。
-- 将实际物理页号`× PAGESIZE(4KB) + 12位的offset`就得到了最终的物理地址。
-
-### 10.3.4 页表项
-
-页表项（PTE, Page Table Entry）是一个`64bit`的数据，其低10位存储的是下级物理页的属性和标志位，`10-54`44位存储的是下级页表的**物理页号**。
-
-![页表项](quard-star/页表项.png)
-
-# 11. 实现内存映射机制
-
-**将`kernelend--PHYSTOP`之间的`freememory`给`FrameAllocator`进行分配。**
-
-## 11.1 页表操作
-
-![页表项2](quard-star/页表项2.png)
-
-页表项（PTE, Page Table Entry）是一个`64bit`的数据，其低10位存储的是**下级物理页**的属性和标志位，`10-54`44位存储的是下级页表所在的物理页号。
-
-在`address.h`中定义：
-
-``` c
-/* 定义页表项 */
-typedef struct  
-{
-    uint64_t bits;
-}PageTableEntry;
-
-// 定义位掩码常量
-#define PTE_V (1 << 0)   //有效位
-#define PTE_R (1 << 1)   //可读属性
-#define PTE_W (1 << 2)   //可写属性
-#define PTE_X (1 << 3)   //可执行属性
-#define PTE_U (1 << 4)   //用户访问模式
-#define PTE_G (1 << 5)   //全局映射
-#define PTE_A (1 << 6)   //访问标志位
-#define PTE_D (1 << 7)   //脏位
-```
-在`address.c`中定义PTE的操作函数：
-
-``` c
-/* 新建一个页表项（记录下级物理页地址[后44位]与下级物理页的属性[前10位]） */
-PageTableEntry PageTableEntry_new(PhysPageNum ppn, uint8_t PTEFlags) {
-    PageTableEntry entry;
-    entry.bits = (ppn.value << 10) | PTEFlags;
-    return entry;
-}
-/* 创建一个清空的页表项 */
-PageTableEntry PageTableEntry_empty() {
-    PageTableEntry entry;
-    entry.bits = 0;
-    return entry;
-}
-/* 获取下级页表的物理页号 */
-PhysPageNum PageTableEntry_ppn(PageTableEntry *entry) {
-    PhysPageNum ppn;
-    ppn.value = (entry->bits >> 10) & ((1ul << 44) - 1);
-    return ppn;
-}
-/* 获取页表项的标志位 */
-uint8_t PageTableEntry_flags(PageTableEntry *entry) {
-    return entry->bits & 0xFF;
-}
-/* 判断页表项是否有效/空 */
-bool PageTableEntry_is_valid(PageTableEntry *entry) {
-    uint8_t entryFlags = PageTableEntry_flags(entry);
-    return (entryFlags & PTE_V) != 0;
-}
-```
-## 11.2 物理页的访问方法*
-
-假设我依据依据PTE拿到了物理页号，我要去访问此物理页号对应的物理帧的内存数据。需要定义两个辅助函数：
-
-- 首先是**以一个字节作为单位访问这一页的数据**，拿到物理页号后转换为对应的物理地址，其转换为一个`uint8_t*`的指针，这样就可以根据此指针操作这一页全部的的4096个字节了。
-
-``` c
-uint8_t* get_bytes_array(PhysPageNum ppn)
-{
-    // 先从物理页号转换为物理地址
-    PhysAddr addr = phys_addr_from_phys_page_num(ppn);
-    return (uint8_t*) addr.value;
-}
-```
-- 然后**假设物理页帧中存储的是PTE**，我现在要去访问这一个个PTE。同样先拿到物理页号后转换为对应的物理地址，然后将其转换为`PageTableEntry*`指针就可以了。
-``` c
-PageTableEntry* get_pte_array(PhysPageNum ppn)
-{
-    // 先从物理页号转换为物理地址
-    PhysAddr addr = phys_addr_from_phys_page_num(ppn);
-    return (PageTableEntry*) addr.value;  // 指针与数组
-}
-```
-在 C/C++ 中，**`PageTableEntry*` 指针被称为“数组”**，是因为它 **指向了一块连续内存中的多个 `PageTableEntry` 元素**，可以通过指针算术（如 `ptr[index]` 或 `ptr + offset`）像数组一样访问。这是 C/C++ 指针和数组紧密关联的核心特性之一。
-
-## 11.3  虚实地址映射
-
-一个物理页（4 KB）可以存放 512 个页表项（64bit），所以每 9 位（512）作为一次寻址映射。
-
-![虚实地址映射](quard-star/虚实地址映射.png)
-
-MMU在寻址的流程如上图所示，要先拿到`Virtual_address`的三级页号索引，定义如下辅助函数：
-``` c
-/* 拿到虚拟页号的三级索引，按照从高到低的顺序返回 */
-void indexes(VirtPageNum vpn, size_t *result) 
-{
-    size_t idx[3];
-    for (int i = 2; i >= 0; i--) {  // idx[0]是高地址位
-        idx[i] = vpn.value & 0x1ff;   // 1_1111_1111 = 0x1ff
-        vpn.value >>= 9;
-    }
-
-    for (int i = 0; i < 3; i++) {
-        result[i] = idx[i];
-    }
-}
-```
-然后我们依据拿到的虚拟地址的三级页号索引来查找页表项。
-
-在这之前需要定义一个**管理页表的结构体**：每个应用的地址空间都对应一个不同的多级页表，这也就意味着不同页表的起始地址（即页表根节点的地址）是不一样的。因此`PageTable`要保存它根节点的物理页号`root_ppn`作为页表唯一的区分标志。
-
-``` c
-typedef struct {
-    PhysPageNum root_ppn; //根节点
-}PageTable;
-```
-然后再来看查找/填充页表项的操作：传入一个`PageTable`，根据此页表的根节点开始遍历，根节点的物理页号是保存在`satp`寄存器中的，从页表中根据虚拟地址的页表项索引来取出具体的页表项，如果此页表项为空，则分配一页内存，然后新建一个页表项进行填充。直到三级页表索引完毕，会返回虚拟地址最终对应的三级页表的页表项，此时三级页表的页表项是空的，在进行`map`时只需要对此页表项赋值就行。**核心思想：确保虚拟地址（`vpn`）最终映射到一个有效的物理页**，并且在映射过程中按需分配物理内存（如果尚未分配）。
-
-``` c
-PageTableEntry* find_pte_create(PageTable* pt,VirtPageNum vpn)
-{
-    // 拿到虚拟页号的三级索引，保存到idx数组中
-    size_t idx[3];
-    indexes(vpn, idx); 
-    //页表都是按照页分配的
-    PhysPageNum ppn = pt->root_ppn;
-    //从根节点开始遍历，如果没有pte，就分配一页内存，然后创建一个
-    for (int i = 0; i < 3; i++) 
-    {
-        PageTableEntry* pte =  &get_pte_array(ppn)[idx[i]];  // 每个虚拟地址都对应了不同的页表项
-        if (i == 2) {
-            return pte;  // 此PTE记录了最终物理地址的ppn，如果要进行绑定可以人为写入ppn
-        }
-        /*********************** 如果此页表项为空 *************************/
-        if (!PageTableEntry_is_valid(pte)) {
-            //分配一页物理内存
-            PhysPageNum frame =  StackFrameAllocator_alloc(&FrameAllocatorImpl);
-           //新建一个页表项，并把新分配的物理内存作为目标地址
-           *pte =  PageTableEntry_new(frame,PTE_V);
-        }
-        /****************************************************************/
-        //取出进入下级页表的物理页号
-        ppn = PageTableEntry_ppn(pte);
-    }
-
-}
-
-PageTableEntry* find_pte(PageTable* pt, VirtPageNum vpn)
-{
-    // 拿到虚拟页号的三级索引，保存到idx数组中
-    size_t* idx;
-    indexes(vpn, idx); 
-    //根节点
-    PhysPageNum ppn = pt->root_ppn;
-    //从根节点开始遍历，如果没有pte，就分配一页内存，然后创建一个
-    for (int i = 0; i < 3; i++) 
-    {
-        //拿到具体的页表项
-        PageTableEntry* pte =  &get_pte_array(ppn)[idx[i]];
-            if (i == 2) {
-                return pte;
-            }
-        //如果此项页表为空
-            if (!PageTableEntry_is_valid(pte)) {
-                return NULL;
-            }
-        //取出进入下级页表的物理页号
-        ppn = PageTableEntry_ppn(pte);
-    }
-    
-}
-
-/* 建立虚实映射关系，更改虚拟地址通过页表转换之后指向的物理地址 */
-//void PageTable_map(PageTable* pt,VirtPageNum vpn, PhysPageNum ppn, uint8_t pteflgs)
-//{
-//    PageTableEntry* pte = find_pte_create(pt,vpn);
-//    assert(!PageTableEntry_is_valid(pte));
-//    *pte = PageTableEntry_new(ppn,PTE_V | pteflgs);
-//}
-
-/* argc[0]:页表  argc[1]:虚拟地址  argc[2]:物理地址  argc[3]:需要映射多少地址 */
-void PageTable_map(PageTable* pt,VirtAddr va, PhysAddr pa, u64 size ,uint8_t pteflgs)
-{
-    if(size == 0)
-        panic("mappages: size");
-    /* 真实映射是页映射 */
-    PhysPageNum ppn = floor_phys(pa);
-    VirtPageNum vpn = floor_virts(va);
-    u64 last = (va.value + size - 1) / PAGE_SIZE;
-    
-    for(;;)
-    {
-        PageTableEntry* pte = find_pte_create(pt,vpn);
-        assert(!PageTableEntry_is_valid(pte));
-        *pte = PageTableEntry_new(ppn,PTE_V | pteflgs);
-         
-        if( vpn.value == last )
-            break;
-        
-        // 一页一页映射
-        vpn.value += 1;
-        ppn.value += 1;
-    }
-}
-
-void PageTable_unmap(PageTable* pt, VirtPageNum vpn)
-{
-    PageTableEntry* pte = find_pte(pt,vpn);
-    assert(!PageTableEntry_is_valid(pte));
-    *pte = PageTableEntry_empty();
-}
-```
-<img src="quard-star/内核内存布局.png" alt="内核内存布局" style="zoom: 67%;" />
-
-现在的内核的地址结构如上图所示。内核的起始地址是`KERNBASE = 0x8020 0000`，内核的代码被编译器编译后由代码段和数据段组成，可以在`os.map`中看见各段的地址空间。代码段的结束地址设定为`etext`，数据段结束的地址设定为`kernelend`。然后指定从内核结束后向上 128 M的空间为空闲内存，可以给应用使用。上述空间指定是在`os.ld`文件中规划的(定义了两个符号：`PROVIDE(etext = .)和PROVIDE(_data_end = .)`，可以用C语言拿到值)：
-
-``` assembly
-OUTPUT_ARCH(riscv)
-ENTRY(_start)
-BASE_ADDRESS = 0x80200000;
-MEMORY
-{ 
-	ram (rxai!w) : ORIGIN = 0x80200000, LENGTH = 128M
-}
-SECTIONS
-{
-    skernel = .;   /* 定义内核起始内存地址，.代表的是当前地址计数器，会随着段的分配自动增长 */
-	.text : {
-		*(.text .text.*)
-	. = ALIGN(0x1000);  // text结束的地址按页对齐
-    PROVIDE(etext = .);
-	} >ram
-
-	.rodata : {
-		*(.rodata .rodata.*)
-	} >ram
-
-	.data : {
-		. = ALIGN(4096);
-		*(.sdata .sdata.*)
-		*(.data .data.*)
-		PROVIDE(_data_end = .);
-	} >ram
-
-	.bss :{
-		*(.sbss .sbss.*)
-		*(.bss .bss.*)
-		*(COMMON)
-	} >ram
-
-	PROVIDE(kernelend = .);
-}
-```
-
-了解完内存分布之后，就可以初始化内存了。可用内存是从`kernelend`开始到`PHYSTOP`结束之间的大小，内核占据的代码段和数据段是不可用的。在`address.c`中初始化可用内存：
-
-``` c
-StackFrameAllocator FrameAllocatorImpl;
-extern char kernelend[];
-#define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE-1))
-void frame_alloctor_init()
-{
-    // 初始化时 kernelend 需向上取整
-    StackFrameAllocator_new(&FrameAllocatorImpl);
-    StackFrameAllocator_init(&FrameAllocatorImpl, \
-            ceil_phys(phys_addr_from_size_t(kernelend)), \
-            ceil_phys(phys_addr_from_size_t(PHYSTOP)));
-    printk("Memoery start:%p\n",kernelend);
-    printk("Memoery end:%p\n",PHYSTOP);
-}
-```
-
-先采用内存恒等映射方式：
-
-``` c
-extern char etext[];
-
-PageTable kvmmake(void)
-{
-    PageTable pt;
-    PhysPageNum root_ppn =  StackFrameAllocator_alloc(&FrameAllocatorImpl);
-    pt.root_ppn = root_ppn;
-    printk("root_ppn:%p\n",phys_addr_from_phys_page_num(root_ppn));
-
-    printk("etext:%p\n",(u64)etext);
-    // map kernel text executable and read-only.
-    PageTable_map(&pt,virt_addr_from_size_t(KERNBASE),phys_addr_from_size_t(KERNBASE), \
-                    (u64)etext-KERNBASE , PTE_R | PTE_X ) ;
-    printk("finish kernel text map!\n");
-    // map kernel data and the physical RAM we'll make use of. 
-    PageTable_map(&pt,virt_addr_from_size_t((u64)etext),phys_addr_from_size_t((u64)etext ), \
-                    PHYSTOP - (u64)etext , PTE_R | PTE_W ) ;
-    printk("finish kernel data and physical RAM map!\n");
-    return pt;
-}
-
-PageTable kernel_pagetable;
-
-void kvminit()
-{
-  kernel_pagetable = kvmmake();
-}
-```
-
-开启SV39的分页模式，只需要去写`satp`寄存器的值就好了，设置为`sv39`分页模式，然后将`root_ppn`写入。
-
-``` c
-#define SATP_SV39 (8L << 60)
-#define MAKE_SATP(pagetable) (SATP_SV39 | (((u64)pagetable)))
-
-void kvminithart()
-{
-  // wait for any previous writes to the page table memory to finish.
-  printk("satp:%lx\n",MAKE_SATP(kernel_pagetable.root_ppn.value));
-  sfence_vma();
-  
-  w_satp(MAKE_SATP(kernel_pagetable.root_ppn.value));
-  
-  // flush stale entries from the TLB.
-  sfence_vma();
-  reg_t satp = r_satp();
-
-  printk("satp:%lx\n",satp);  
-}
-```
 
 # 12. 应用程序的装载
 
@@ -10865,391 +11256,6 @@ AppMetadata  get_app_data(size_t app_id)
 
     return metadata;
 }
-```
-
-# 13. 内核和用户程序的映射逻辑
-
-## 13.1 跳板页
-
-每个任务都有自己的根页表，内核程序也有自己的根页表，satp 寄存器的 PPN 字段存储根页表的物理页号。
-
-每次用户态任务刚进入`__alltrap`时，`satp`仍然存储的是用户态任务的根页表在物理空间中的地址。**只有将任务的`trapcontext`保存到用户虚拟地址空间的`trapcontext`页之后，才能把`satp`里的值更改为内核程序的根页表的地址。**（这也是为什么保存每个任务的`trapcontext`修改为了在每个任务各自的虚拟地址空间内。如果依然要保存进内核虚拟地址空间的内核栈的话则需要使用一个通用寄存器来存储`satp`的切换，而`sscratch`寄存器已经被用来换栈了。
-
-由于将`trapcontext`保存在用户虚拟地址空间中，因此**修改`sscratch`寄存器作用：将其用来存储用户虚拟地址空间`trapcontext`页的地址**（`__alltrap`时读取`sscratch`寄存器中保存的应用程序保存`trapcontext`页的地址，`__restore`时将传入的应用程序虚拟地址空间`trapcontext`页的地址写入`sscratch`寄存器），这也是为什么需要在`trapcontext`中添加一个元素来保存应用程序自己内核栈的`SP`，切换完`satp`之后需要将`SP`指向内核地址空间中的内核栈）。然后：
-
-- 执行下一条指令`sfence.vma`更新快表。
-
-- 执行下一条指令`jr t1`。(t1中存储的内核虚拟地址空间中`trap_handler`的地址)
-
-因此我们知道在换完`satp`中的页表之后，**还有处于用户态虚拟地址空间中的指令需要执行**（执行完`csrw satp t0`之后会自动加载下一条指令的地址执行`jr t1`），为了保证地址空间切换时指令执行的连续性，用户态虚拟地址空间和内核的内核态虚拟地址空间的指令所在页的映射方式应该都将其映射在同一个物理页上，称之为跳板页（`trampoline`）.
-
-因此在`trapcontext`中添加以下三项：
-
-``` c
-typedef struct TrapContext {
-    /*保存寄存器*/
-	...
-	/* MMU相关 */
-    reg_t kernel_sp;     // 内核栈的SP（之前在sscarch寄存器）
-	reg_t kernel_satp;   // 内核根页表的地址（用户态跟页表的地址存储在TCB中）
-	reg_t trap_handler;
-    
-}TrapContext;
-```
-并且修改`kerneltrap.S`文件：
-
-``` assembly
-.section .text.trampoline
-.globl __alltraps
-.align 3
-__alltraps:
-    # 从sscratch获取U模式下的trapcontext的地址，把U模式下的SP保存到sscratch寄存器中
-    csrrw sp, sscratch, sp
-    # save general-purpose registers
-    sd x1, 1*8(sp)
-    # skip sp(x2), we will save it later
-    sd x3, 3*8(sp)
-    # skip tp(x4), application does not use it
-    # save x5~x31
-    sd x4, 4*8(sp)
-    sd x5, 5*8(sp)
-    sd x6, 6*8(sp)
-    sd x7, 7*8(sp)
-    sd x8, 8*8(sp)
-    sd x9, 9*8(sp)
-    sd x10,10*8(sp)
-    sd x11, 11*8(sp)
-    sd x12, 12*8(sp)
-    sd x13, 13*8(sp)
-    sd x14, 14*8(sp)
-    sd x15, 15*8(sp)
-    sd x16, 16*8(sp)
-    sd x17, 17*8(sp)
-    sd x18, 18*8(sp)
-    sd x19, 19*8(sp)
-    sd x20, 20*8(sp)
-    sd x21, 21*8(sp)
-    sd x22, 22*8(sp)
-    sd x23, 23*8(sp)
-    sd x24, 24*8(sp)
-    sd x25, 25*8(sp)
-    sd x26, 26*8(sp)
-    sd x27, 27*8(sp)
-    sd x28, 28*8(sp)
-    sd x29, 29*8(sp)
-    sd x30, 30*8(sp)
-    sd x31, 31*8(sp)
-
-    # we can use t0/t1/t2 freely, because they were saved on kernel stack
-    csrr t0, sstatus
-    csrr t1, sepc
-    sd t0, 32*8(sp)
-    sd t1, 33*8(sp)
-    # 保存U模式下的SP寄存器
-    csrr t2, sscratch
-    sd t2, 2*8(sp)
-    # load kernel_satp into t0
-    ld t0, 34*8(sp)
-    # load trap_handler into t1
-    ld t1, 36*8(sp)
-    # 切换到kernel stack的 sp
-    ld sp, 35*8(sp)
-    # switch to kernel space（依依不舍）
-    csrw satp, t0
-    sfence.vma
-    # jump to trap_handler
-    jr t1
-
-
-/*在解析ELF文件时分配trapcontext物理内存页并映射，将*trapcontext的虚拟地址（constant）保存在任务的TCB*/
-/*传入参数为：*TrapContext, user space token*/
-.globl __restore
-.align 3
-__restore:
-    # a0: *TrapContext in user space(Constant); a1: user space token
-    
-    # switch to user space（马上离开）
-    csrw satp, a1
-    sfence.vma
-    csrw sscratch, a0
-    mv sp, a0
-    # now sp->user space trapcontext, sscratch->user space trapcontext
-    # restore sstatus/sepc
-    ld t0, 32*8(sp)
-    ld t1, 33*8(sp)
-    csrw sstatus, t0
-    csrw sepc, t1
-    # restore general-purpuse registers except sp/tp
-    ld x1, 1*8(sp)
-    ld x3, 3*8(sp)
-    ld x4, 4*8(sp)
-    ld x5, 5*8(sp)
-    ld x6, 6*8(sp)
-    ld x7, 7*8(sp)
-    ld x8, 8*8(sp)
-    ld x9, 9*8(sp)
-    ld x10,10*8(sp)
-    ld x11, 11*8(sp)
-    ld x12, 12*8(sp)
-    ld x13, 13*8(sp)
-    ld x14, 14*8(sp)
-    ld x15, 15*8(sp)
-    ld x16, 16*8(sp)
-    ld x17, 17*8(sp)
-    ld x18, 18*8(sp)
-    ld x19, 19*8(sp)
-    ld x20, 20*8(sp)
-    ld x21, 21*8(sp)
-    ld x22, 22*8(sp)
-    ld x23, 23*8(sp)
-    ld x24, 24*8(sp)
-    ld x25, 25*8(sp)
-    ld x26, 26*8(sp)
-    ld x27, 27*8(sp)
-    ld x28, 28*8(sp)
-    ld x29, 29*8(sp)
-    ld x30, 30*8(sp)
-    ld x31, 31*8(sp)
-
-    # back to user stack
-    ld sp, 2*8(sp)
-
-    sret
-```
-
-``` c
-void trap_handler()
-{
-	set_kernel_trap_entry();  // 如果发生trap则跳转到panic("a trap from kernel!\n");
-	TrapContext* cx = get_current_trap_cx();
-
-    reg_t scause = r_scause();
-	reg_t cause_code = scause & 0xfff;
-	if(scause & 0x8000000000000000)
-	{
-		switch (cause_code)
-		{
-		/* rtc 中断*/
-		case 5:
-			set_next_trigger();
-			schedule();
-			break;
-		default:
-			printk("undfined interrrupt scause:%x\n",scause);
-			break;
-		}
-	}
-	else
-	{
-		switch (cause_code)
-		{
-		/* U模式下的syscall */
-		case 8:
-			cx->a0 = __SYSCALL(cx->a7,cx->a0,cx->a1,cx->a2);
-			cx->sepc += 8;
-			break;
-		default:
-			printk("undfined exception scause:%x\n",scause);
-			break;
-		}
-	}
-	trap_return();
-}
-
-void trap_return()  
-{  
-    /* 把 stvec 设置为内核和应用地址空间共享的跳板页面的起始地址( w_stvec((reg_t)TRAMPOLINE); ) */  
-    set_user_trap_entry();
-    /* Trap 上下文在应用地址空间中的虚拟地址 */  
-    u64 trap_cx_ptr = TRAPFRAME;  
-    /* 要继续执行的应用地址空间的 token（记录在TCB） */  
-    u64  user_satp = current_user_token();  
-	/* 计算_restore函数的虚拟地址 */
-    u64  restore_va = (u64)__restore - (u64)__alltraps + TRAMPOLINE;  
-	asm volatile (    
-			"fence.i\n\t"    
-			"mv a0, %0\n\t"  // 将TRAPFRAME传递给a0寄存器（用户虚拟地址空间中trapcontext页）  
-			"mv a1, %1\n\t"  // 将user_satp传递给a1寄存器  
-			"jr %2\n\t"      // 跳转到restore_va的位置执行代码  
-			:    
-			: "r" (trap_cx_ptr),    
-			"r" (user_satp),
-			"r" (restore_va)
-			: "a0", "a1"
-		);
-  
-}
-
-/*在app_init函数内调用*/
-struct TaskContext tcx_init(reg_t kstack_ptr) {
-    struct TaskContext task_ctx;
-
-    task_ctx.ra = trap_return;
-    task_ctx.sp = kstack_ptr;
-    task_ctx.s0 = 0;
-    task_ctx.s1 = 0;
-    task_ctx.s2 = 0;
-    task_ctx.s3 = 0;
-    task_ctx.s4 = 0;
-    task_ctx.s5 = 0;
-    task_ctx.s6 = 0;
-    task_ctx.s7 = 0;
-    task_ctx.s8 = 0;
-    task_ctx.s9 = 0;
-    task_ctx.s10 = 0;
-    task_ctx.s11 = 0;
-
-    return task_ctx;
-}
-```
-
-用户态虚拟地址空间分布如图：（用户虚拟地址空间中的`trampoline`与内核虚拟地址空间中的`trampoline`映射到物理地址空间中相同的页）
-![用户态地址空间](quard-star/用户态地址空间.png)
-
-修改内核的链接文件：将`trampoline`加载到物理地址中去（在`.text`段中，在`.text.entry`段之前。并提供`trampoline`符号标记`trampoline`的物理地址）。
-
-``` assembly
-OUTPUT_ARCH(riscv)
-ENTRY(_start)
-BASE_ADDRESS = 0x80200000;
-MEMORY
-{ 
-	ram (rxai!w) : ORIGIN = 0x80200000, LENGTH = 128M
-}
-SECTIONS
-{
-    skernel = .;   /* 定义内核起始内存地址 */
-	.text : {
-        *(.text.entry)
-        . = ALIGN(4K);
-        trampoline = .;
-        *(.text.trampoline);
-        . = ALIGN(4K);
-		_strampoline = .;
-		*(.text .text.*)
-		. = ALIGN(4K);
-		PROVIDE(etext = .);
-	} >ram
-
-
-
-	.rodata : {
-		*(.rodata .rodata.*)
-		. = ALIGN(4K);
-	} >ram
-
-
-	
-	.data : {
-		*(.sdata .sdata.*)
-		*(.data .data.*)
-		. = ALIGN(4K);
-		PROVIDE(_data_end = .);
-	} >ram
-
-	.bss :{
-		*(.sbss .sbss.*)
-		*(.bss .bss.*)
-		*(COMMON)
-		. = ALIGN(4K);
-	} >ram
-	
-
-
-	PROVIDE(kernelend = .);
-}
-```
-
-在`PageTable kvmake(void)`将内核态的虚拟地址空间中的`trampoline`页映射到物理地址空间中在`ld`文件中指定的物理页：
-
-``` c
-extern char etext[];
-extern char trampoline[];
-PageTable kvmmake(void)
-{
-    PageTable pt;
-    PhysPageNum root_ppn =  StackFrameAllocator_alloc(&FrameAllocatorImpl);
-    pt.root_ppn = root_ppn;
-    printk("root_ppn:%p\n",phys_addr_from_phys_page_num(root_ppn));
-
-    printk("etext:%p\n",(u64)etext);
-    // map kernel text executable and read-only.
-    PageTable_map(&pt,virt_addr_from_size_t(KERNBASE),phys_addr_from_size_t(KERNBASE), \
-                    (u64)etext-KERNBASE , PTE_R | PTE_X ) ;
-    printk("finish kernel text map!\n");
-    // map kernel data and the physical RAM we'll make use of. 
-    PageTable_map(&pt,virt_addr_from_size_t((u64)etext),phys_addr_from_size_t((u64)etext ), \
-                    PHYSTOP - (u64)etext , PTE_R | PTE_W ) ;
-    printk("finish kernel data and physical RAM map!\n");
-
-    PageTable_map(&pt, virt_addr_from_size_t(TRAMPOLINE), phys_addr_from_size_t((u64)trampoline), \
-    PAGE_SIZE, PTE_R | PTE_X );
-    return pt;
-}
-```
-
-在`address.h`中定义有关地址的宏：
-
-``` c
-// Sv39的最大地址空间 512G
-#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
-
-//跳板页开始位置
-#define TRAMPOLINE (MAXVA - PAGE_SIZE)
-```
-
-简化`alloc`函数：
-
-``` c
-PhysPageNum kalloc(void){
-    PhysPageNum frame = StackFrameAllocator_alloc(&FrameAllocatorImpl);
-    return frame;
-}
-```
-
----
-
-## 13.2 程序内核栈的创建与映射
-
-在`task.c`中添加对应用程序内核栈的映射：
-
-`struct TaskControlBlock tasks[MAX_TASKS]`数组是位于内核虚拟地址空间中的结构体数组，存储的是任务的`TCB`。
-
-首先获取物理地址空间中空闲的页，然后计算得到内核态虚拟地址空间中每个任务的内核栈所在的虚拟地址（`trampoline`页下面），进行映射，然后把内核栈在内核虚拟地址空间中的虚拟地址在任务的`TCB`中记录下来。
-
-``` c
-//计算应用内核栈的地址，每个应用的内核栈下都有一个无效的守卫页
-#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PAGE_SIZE)
-
-
-/* 为每个应用程序映射内核栈,内核空间以及进行了映射 */
-void proc_mapstacks(PageTable* kpgtbl)
-{
-  struct TaskControlBlock *p;
-  
-  for(p = tasks; p < &tasks[MAX_TASKS]; p++) {
-    char *pa = (char*)phys_addr_from_phys_page_num(kalloc()).value;
-    if(pa == 0)
-      panic("kalloc");
-    u64 va = KSTACK((int) (p - tasks));  // 得到内核栈的虚拟地址
-    PageTable_map(kpgtbl, virt_addr_from_size_t(va + PAGE_SIZE), phys_addr_from_size_t((u64)pa), \
-                  PAGE_SIZE, PTE_R | PTE_W);
-    // 给应用内核栈赋值 
-    p->kstack = va + 2 * PAGE_SIZE;
-  }
-}
-```
-
-为`TaskControlBlock`添加存储内核栈虚拟地址的变量：
-
-``` c
-typedef struct TaskControlBlock
-{
-    TaskState task_state;       //任务状态
-    TaskContext task_context;   //任务上下文
-    
-    u64  kstack;                //应用内核栈的虚拟地址
-}TaskControlBlock;
 ```
 
 # 解析`.elf`文件
