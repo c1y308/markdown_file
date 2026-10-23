@@ -73,7 +73,7 @@ bear make  # 会在当前目录生成compile_commands.json
 
 ​								$\boxed{\text{Shell = 你和 Linux 内核/程序之间的命令解释器}}$   
 
-**Shell 本身也是一个进程**。例如输入：
+**Shell 本身是一个进程，每一个独立的终端窗口 ，都会启动一个独立的 bash（或者 zsh/fish）shell 进程。**例如输入：
 
 ``` shell
 ip link set eth0 up
@@ -425,7 +425,7 @@ which ls
 export CPU=7
 ```
 
-如果`./config.sh`，Shell 通常会启动一个新的进程运行它。脚本结束后，里面设置的环境可能不会留在当前父 Shell 中，因为**当前 Shell 进程是父进程，环境变量无法向上传递**。如果：
+如果`./config.sh`，Shell 通常会启动一个新的进程运行它。脚本结束后，里面设置的环境可能不会传递给当前父 Shell 中，因为**当前 Shell 进程是父进程，环境变量无法向上传递**。因此：
 
 ```
 source config.sh
@@ -456,6 +456,8 @@ source ~/.bashrc
 目的就是：
 
 > 不重新登录，直接让当前 Shell 重新读取配置。
+>
+> **图形界面新开终端窗口（GNOME Terminal、Konsole 等）是交互式非登录 shell，bash 会自动读取并执行 `~/.bashrc`，等价于自动 source**GNU。
 
 ## 输入/输出源
 
@@ -4693,9 +4695,7 @@ FreeRTOS中最简单的方式：把结果直接放入**队列**，消费者从�
 
 `std::future<T>`：代表一个**唯一**的异步结果持有者，**只能移动，不可拷贝**。
 
-- 通过 `get()` **获取结果**：
-  - 若结果尚未就绪，**阻塞**当前线程直到结果可用；若已就绪，立即返回。
-  - **只能调用一次**，调用后 `valid()` 变为 `false`。
+- 通过 `get()` 获取结果，**只能调用一次**，调用后 `valid()` 变为 `false`。若结果尚未就绪，**阻塞**当前线程直到结果可用；若已就绪，立即返回。
 - 也可用 `wait()` **等待但不取值**，`wait_for()` 和 `wait_until()` 实现限时等待。
 
 ```c++
@@ -4708,7 +4708,7 @@ std::cout << fut.get();  // 42，调用后 fut.valid() 为 false
 
 `std::shared_future<T>`：允许多个消费者共享同一个结果，**可拷贝**。
 
-- `get()` 可多次调用，每次返回相同的结果（或反复抛出存储的异常）。
+- `get()` **可多次调用**，每次返回相同的结果（或反复抛出存储的异常）。
 - 通常通过 `share()` 转移所有权，或用 `std::shared_future` 构造函数从 `future` 移动创建。
 
 ``` c++
@@ -4749,7 +4749,7 @@ int main() {
 
 **关键点**：
 
-- `get_future()` 只能调用一次，之后 `promise` 和 `future` 通过**共享状态**关联。
+- `get_future()` 关联`future<T>`对象只能调用一次，之后 `promise` 和 `future` 通过**共享状态**关联。
 - 如果 promise 在析构前没有设置值或异常，析构时将设置 `std::future_error` 异常（`broken_promise`），导致 `future.get()` 抛出异常。
 - promise 本身**不可拷贝，只能移动**。
 
@@ -5139,15 +5139,17 @@ echo 1 > /sys/class/gpio/gpio52/value
 
 ### 终端
 
+> **shell 进程只能和 TTY 设备进行交互。**
+
 <img src="Linux开发/终端.png" alt="终端" style="zoom:50%;" />
 
 **物理终端：**最原始的终端形式，指的是 实际的硬件设备 ：早期：电传打字机 (Teletype, TTY)，后来：显示器 + 键盘组合的终端设备在现代个人电脑上，物理终端就是直接的显示器和键盘 ，没有经过软件虚拟化层。
 
 **虚拟终端：**Linux 内核提供的软件模拟的终端 ，可以在一个物理显示器上运行多个独立的命令行会话，Ctrl + Alt + F1 ~ F6 切换到虚拟终端 1-6 (纯文本模式)；Ctrl + Alt + F7 切换回图形界面 (X11/Wayland)；
 
-**伪终端**：图形界面下`Ctrl+Alt+T`打开的是**用户态的图形应用**，它本身不是内核管理的 TTY 设备 —— 如果没有**伪终端**，`shell`就找不到 “可交互的终端载体”，因此伪终端是内核提供的 “主 - 从成对的软件设备”：
+**伪终端**：图形界面下`Ctrl+Alt+T`打开的是**用户态的图形应用**，它本身不是内核管理的 TTY 设备 —— 但如果没有**伪终端**，`shell`就找不到 “可交互的终端载体”，因此伪终端是内核提供的 “主 - 从成对的软件设备”：
 
-- **主端（图形窗口）**：由终端模拟器（ “一个可以输入输出的交互窗口”）控制，负责接收你在图形窗口里的输入、并显示`shell`的输出，是**应用程序**。
+- **主端（用户态的图形应用）**：由终端模拟器（ “一个可以输入输出的交互窗口”）控制，负责接收你在图形窗口里的输入、并显示`shell`的输出，是**应用程序**。
 
 - **从端（伪终端）**：关联`shell`，让`shell`以为自己在和真实的 TTY 设备交互，终端模拟器（图形应用）就能通过伪终端“伪装” 成`shell`能识别的 TTY 设备 。
 
@@ -5461,8 +5463,6 @@ int main(){
 ```
 
 # RT-Linux
-
-对于你现在的 **RK3588 + EtherCAT 1 kHz 控制器**，`mlockall()` 是应该考虑的基础实时措施之一，但更关键的是把它和 **预分配（preallocation）+ prefault/touch + SCHED_FIFO + CPU affinity + RT 线程禁止动态分配/日志 I/O** 作为一个整体来做。
 
 ## `mlockall()`（锁内存页）
 
@@ -5805,284 +5805,9 @@ fork()
 
 合理得多。
 
-## 设置实时线程调度优先级
+## 绑核
 
-### 核心作用
-
-**告诉 Linux scheduler，当多个 runnable thread 同时竞争 CPU 时，哪一个线程应该优先运行。**它最主要的目的**不是“让线程计算得更快”**，而是：
-
-> **让时间敏感的实时线程在需要运行时，能够尽快抢到 CPU，从而降低 scheduling latency 和 jitter。**
-
-### 调度策略
-
-Linux 常见 scheduling policy 包括：
-
-```text
-SCHED_OTHER       普通 Linux 调度
-
-SCHED_BATCH       batch workload
-
-SCHED_IDLE        极低优先级普通任务
-
-SCHED_FIFO        实时 FIFO
-SCHED_RR          实时 Round-Robin
-
-SCHED_DEADLINE    deadline-based RT scheduling
-```
-
-### 如何使用
-
-#### `pthread_setschedparam()`（设置策略和优先级）
-
-你的 C++ pthread 程序里最常见的是：
-
-```c++
-#include <pthread.h>
-
-int pthread_setschedparam(
-    pthread_t thread,					// 线程
-    int policy,							// 调度策略
-    const struct sched_param *param		// 优先级
-);
-
-
-struct sched_param {
-    int sched_priority;
-};
-```
-
-`pthread_setschedparam()` 同时设置：$\boxed{ \text{scheduling policy} + \text{scheduling priority} }$。
-
-#### `pthread_setschedprio()`（设置优先级）
-
-如果线程已经是$\boxed{SCHED\_FIFO}$，只是想修改优先级，可以：
-
-```c++
-pthread_setschedprio(thread, 80);
-```
-
-#### 查询系统支持的优先级
-
-``` c
-int min_priority =
-    sched_get_priority_min(SCHED_FIFO);
-
-
-
-int max_priority =
-    sched_get_priority_max(SCHED_FIFO);
-```
-
-### `chrt`（查看线程优先级）
-
-例如查看进程：
-
-```shell
-chrt -p <pid>
-```
-
-可能得到：
-
-```shell
-pid 1234's current scheduling policy: SCHED_FIFO
-pid 1234's current scheduling priority: 80
-```
-
-`chrt` 可以查看或设置 `SCHED_OTHER`、`SCHED_FIFO`、`SCHED_RR` 等调度策略。也可以直接启动：
-
-```
-sudo chrt -f 80 ./robot_controller
-```
-
-意思：
-
-```
--f
- ↓
-SCHED_FIFO
-
-80
- ↓
-priority 80
-```
-
-### 注意事项
-
-#### 解决锁带来的优先级翻转
-
-解决经典 priority inversion 的一个办法是：$\boxed{\text{Priority Inheritance}}$，mutex 可以配置：
-
-```c++
-PTHREAD_PRIO_INHERIT
-```
-
-例如：
-
-```c++
-pthread_mutexattr_t attr;
-
-pthread_mutexattr_init(&attr);
-
-pthread_mutexattr_setprotocol(
-    &attr,
-    PTHREAD_PRIO_INHERIT
-);
-
-
-pthread_mutex_init(&mutex, &attr);
-```
-
-现在：
-
-```
-L priority 40
-持有 mutex
-```
-
-H开始等待这个 mutex，系统临时把 L 提升：
-
-```
-L:
-
-40
- ↓
-80 temporarily
-```
-
-于是 M priority 60 无法再抢占 L。
-
-L 可以赶快：
-
-```
-finish critical section
-      ↓
-unlock
-      ↓
-H 获取 mutex
-```
-
-然后 L 再恢复原来的：
-
-```
-priority 40
-```
-
-POSIX 定义的 `PTHREAD_PRIO_INHERIT` 正是通过让 mutex owner 临时继承等待者的更高优先级，来限制这类 priority inversion。PREEMPT_RT 内核中的 `rtmutex` 也大量利用 priority inheritance。
-
-#### 注意中断饿死
-
-和MCU中的中断可以永远打断FreeRTOS的调度不同，PREEMPT_RT 很重要的一项改造是：$\boxed{\text{大多数 IRQ handler 被线程化}}$​，即：
-
-```
-NIC hardware interrupt
-       ↓
-minimal hard IRQ
-       ↓
-wake IRQ thread
-       ↓
-IRQ thread 由 scheduler 调度
-```
-
-内核当前文档说明，**PREEMPT_RT 中默认 threaded IRQ handler 使用**：
-
-```
-SCHED_FIFO
-priority = 50
-```
-
-（具体系统仍应实际检查配置。）
-
-于是你的系统可能实际存在：
-
-```
-EtherCAT RT thread      FIFO 80
-
-EtherCAT NIC IRQ        FIFO 50
-```
-
-这时候就出现**用户 RT priority 太高可能反过来饿死设备 IRQ**。假设：
-
-```
-EtherCAT RT  = FIFO 80
-NIC IRQ      = FIFO 50
-```
-
-如果 EtherCAT RT thread：
-
-```
-while (...) {
-    busy_wait();
-}
-```
-
-因为：80>50那么 IRQ thread甚至可能无法运行。于是出现：
-
-```
-RT thread 等 NIC 数据
-       ↑
-       │
-NIC IRQ thread 想处理数据
-       │
-       └── 被 RT 80 抢占
-```
-
-变成：$\boxed{\text{自己把自己依赖的 producer 饿死}}$所以 realtime priority 设计绝不能只看：
-
-> “谁最重要？”
-
-而应该看：$\boxed{\text{dependency graph}}$即：
-
-> 谁依赖谁先完成工作？
-
-以EtherCAT电机控制为例，现在大致是：
-
-```
-EtherCAT / motor RT    1 kHz
-Policy                 50 Hz
-IMU
-diagnostics
-logger
-```
-
-类似这样的优先级关系通常比较合理：
-
-```
-时间敏感程度
-
-EtherCAT RT
-    │
-    │ high
-    ▼
-Policy
-    │
-    ▼
-IMU / auxiliary RT
-    │
-    ▼
-monitor
-    │
-    ▼
-logger
-```
-
-例如作为初始实验配置：
-
-```
-EtherCAT RT       FIFO 80
-Policy            FIFO 70
-IMU               FIFO 60 或普通
-Monitor           SCHED_OTHER
-Logger            SCHED_OTHER
-```
-
-
-## CPU affinity（绑核）
-
-### 核心作用
-
-​								$\boxed{CPU \  affinity = 限制某个线程在哪些CPU \ core上运行}$
-
-比如一台 8 核机器逻辑 CPU 编号为：
+$\boxed{CPU \  affinity = 限制某个线程在哪些CPU \ core上运行}$，比如一台 8 核机器逻辑 CPU 编号为：
 
 ```
 CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
@@ -6102,9 +5827,7 @@ Linux scheduler 以后只能在 CPU6 上调度它。
 
 > 我的 RT thread 已经是 `SCHED_FIFO + priority 80` 了，为什么还需要 affinity？
 
-因为这是**完全不同的问题**。`SCHED_FIFO + priority` 决定：$\boxed{\text{同一个 CPU 上，谁优先运行}}$；而 CPU affinity 决定：$\boxed{\text{这个线程允许去哪些 CPU 上运行}}$。
-
-例如：
+因为这是**完全不同的问题**。`SCHED_FIFO + priority` 决定：$\boxed{\text{同一个 CPU 上，谁优先运行}}$；而 CPU affinity 决定：$\boxed{\text{这个线程允许去哪些 CPU 上运行}}$。例如：
 
 ```
 Thread A: RT EtherCAT, FIFO 80
@@ -6158,9 +5881,7 @@ L2: controller          L2: ???
  RT thread migrates ────────>
 ```
 
-CPU6 的本地 cache 中很可能没有这些数据。
-
-于是要重新：
+CPU6 的本地 cache 中很可能没有这些数据。于是要重新：
 
 ```
 L1 miss
@@ -6221,7 +5942,7 @@ allowed CPUs = {4, 6}
 具体代码（**相关操作宏的参数都是先CPU序号，再集合**）：
 
 ``` c++
-#include<pthread.h>
+#include<pthread.h>			// 哪个线程		// 多少个 cpu			// cpu 集合
 int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
 
 #include<sched.h>
@@ -6235,23 +5956,40 @@ for (const int cpu : options.cpu_ids) {  // options.cpu_ids 是一个 vector 容
 
 result = pthread_setaffinity_np(self, sizeof(expected), &expected);
 
-
-cpu_set_t actual;
-CPU_ZERO(&actual);
-
-result = pthread_getaffinity_np(self, sizeof(actual), &actual);
-
 if (result != 0) {
     return thread_setup_error("pthread_getaffinity_np", result);
 }
-if (!CPU_EQUAL(&expected, &actual)) {
-    return thread_setup_error("thread affinity verification", 0);
-}
 ```
 
+验证是否绑核成功：
 
+``` c
+    // 验证 CPU 绑核是否成功
+    cpu_set_t actual;
+    CPU_ZERO(&actual);
+    result = pthread_getaffinity_np(self, sizeof(actual), &actual);
+    if (result != 0) {
+        return thread_setup_error("pthread_getaffinity_np", result);
+    }
+    if (!CPU_EQUAL(&expected, &actual)) {
+        return thread_setup_error("thread affinity verification", 0);
+    }
+```
 
 #### `lscpu`（查看核分布）
+
+RK3588（瑞芯微 Rockchip RK3588）采用 8 核 ARM CPU，4 个 Cortex-A76 大核 + 4 个 Cortex-A55 小核，属于异构多核（Heterogeneous Multi-Core）架构。
+
+| CPU 编号 | 核心类型   | 最高标称频率 | 性能定位 | 调频策略组 |
+| -------- | ---------- | ------------ | -------- | ---------- |
+| CPU0     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU1     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU2     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU3     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU4     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
+| CPU5     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
+| CPU6     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
+| CPU7     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
 
 ``` shell
 cat@lubancat:~/robot_deploy$ lscpu -e
@@ -6379,6 +6117,268 @@ IRQ affinity
 这些和 thread affinity 是配套关系。可以先把它理解成三个层级：
 
 $\boxed{Thread \ affinity→CPU \ isolation→IRQ \ | \ kernel \ housekeeping \  isolation}$
+
+## 调度策略与优先级
+
+告诉 Linux scheduler，当多个 runnable thread 同时竞争 CPU 时，哪一个线程应该优先运行。它最主要的目的不是“让线程计算得更快”，而是：**让时间敏感的实时线程在需要运行时，能够尽快抢到 CPU，从而降低 scheduling latency 和 jitter。**
+
+### 调度策略
+
+Linux 常见 scheduling policy 包括：
+
+```text
+SCHED_OTHER    0   普通 Linux 调度
+
+SCHED_BATCH    3   batch workload
+
+SCHED_IDLE     5   极低优先级普通任务
+
+SCHED_FIFO     1   实时 FIFO
+SCHED_RR       2   实时 Round-Robin
+
+SCHED_DEADLINE  6  deadline-based RT scheduling
+```
+
+### 如何使用
+
+#### 查询系统支持的优先级
+
+``` c
+int min_priority = sched_get_priority_min(SCHED_FIFO);
+
+int max_priority = sched_get_priority_max(SCHED_FIFO);
+```
+
+#### `pthread_setschedparam()`（设置策略和优先级）
+
+你的 C++ pthread 程序里最常见的是：
+
+```c++
+#include <pthread.h>
+
+int pthread_setschedparam(
+    pthread_t thread,					// 线程
+    int policy,							// 调度策略
+    const struct sched_param *param		// 优先级
+);
+```
+
+`pthread_setschedparam()` 同时设置：$\boxed{ \text{scheduling policy} + \text{scheduling priority} }$。
+
+描述优先级的数据结构为：
+
+``` c
+struct sched_param {
+    int sched_priority;
+};
+```
+
+#### `pthread_setschedprio()`（只设置优先级）
+
+如果线程已经是$\boxed{SCHED\_FIFO}$，只是想修改优先级，可以：
+
+```c++
+pthread_setschedprio(thread, 80);
+```
+
+#### `chrt`（查看线程优先级）
+
+例如查看进程：
+
+```shell
+chrt -p <pid>
+```
+
+可能得到：
+
+```shell
+pid 1234's current scheduling policy: SCHED_FIFO
+pid 1234's current scheduling priority: 80
+```
+
+`chrt` 可以查看或设置 `SCHED_OTHER`、`SCHED_FIFO`、`SCHED_RR` 等调度策略。也可以直接启动：
+
+```
+sudo chrt -f 80 ./robot_controller
+```
+
+意思：
+
+```
+-f
+ ↓
+SCHED_FIFO
+
+80
+ ↓
+priority 80
+```
+
+### 注意事项
+
+#### 解决锁带来的优先级翻转
+
+解决经典 priority inversion 的一个办法是：$\boxed{\text{Priority Inheritance}}$，mutex 可以配置：
+
+```c++
+PTHREAD_PRIO_INHERIT
+```
+
+例如：
+
+```c++
+pthread_mutexattr_t attr;
+
+pthread_mutexattr_init(&attr);
+
+pthread_mutexattr_setprotocol(
+    &attr,
+    PTHREAD_PRIO_INHERIT
+);
+
+pthread_mutex_init(&mutex, &attr);
+```
+
+现在：
+
+```
+L priority 40
+持有 mutex
+```
+
+H开始等待这个 mutex，系统临时把 L 提升：
+
+```
+L:
+
+40
+ ↓
+80 temporarily
+```
+
+于是 M priority 60 无法再抢占 L。L 可以赶快：
+
+```
+finish critical section
+      ↓
+unlock
+      ↓
+H 获取 mutex
+```
+
+然后 L 再恢复原来的：
+
+```
+priority 40
+```
+
+POSIX 定义的 `PTHREAD_PRIO_INHERIT` 正是通过让 mutex owner 临时继承等待者的更高优先级，来限制这类 priority inversion。PREEMPT_RT 内核中的 `rtmutex` 也大量利用 priority inheritance。
+
+#### 注意中断饿死
+
+和MCU中的中断可以永远打断FreeRTOS的调度不同，PREEMPT_RT 很重要的一项改造是：$\boxed{\text{大多数 IRQ handler 被线程化}}$​，即：
+
+```
+NIC hardware interrupt
+       ↓
+minimal hard IRQ
+       ↓
+wake IRQ thread
+       ↓
+IRQ thread 由 scheduler 调度
+```
+
+内核当前文档说明，**PREEMPT_RT 中默认 threaded IRQ handler 使用**：
+
+```
+SCHED_FIFO
+priority = 50
+```
+
+（具体系统仍应实际检查配置。）
+
+于是你的系统可能实际存在：
+
+```
+EtherCAT RT thread      FIFO 80
+
+EtherCAT NIC IRQ        FIFO 50
+```
+
+这时候就出现**用户 RT priority 太高可能反过来饿死设备 IRQ**。假设：
+
+```
+EtherCAT RT  = FIFO 80
+NIC IRQ      = FIFO 50
+```
+
+如果 EtherCAT RT thread：
+
+```c
+while (...) {
+    busy_wait();
+}
+```
+
+因为：80>50那么 IRQ thread甚至可能无法运行。于是出现：
+
+```
+RT thread 等 NIC 数据
+       ↑
+       │
+NIC IRQ thread 想处理数据
+       │
+       └── 被 RT 80 抢占
+```
+
+变成：$\boxed{\text{自己把自己依赖的 producer 饿死}}$所以 realtime priority 设计绝不能只看：
+
+> “谁最重要？”
+
+而应该看：$\boxed{\text{dependency graph}}$即：
+
+> 谁依赖谁先完成工作？
+
+以EtherCAT电机控制为例，现在大致是：
+
+```
+EtherCAT / motor RT    1 kHz
+Policy                 50 Hz
+IMU
+diagnostics
+logger
+```
+
+类似这样的优先级关系通常比较合理：
+
+```
+时间敏感程度
+
+EtherCAT RT
+    │
+    │ high
+    ▼
+Policy
+    │
+    ▼
+IMU / auxiliary RT
+    │
+    ▼
+monitor
+    │
+    ▼
+logger
+```
+
+例如作为初始实验配置：
+
+```
+EtherCAT RT       FIFO 80
+Policy            FIFO 70
+IMU               FIFO 60 或普通
+Monitor           SCHED_OTHER
+Logger            SCHED_OTHER
+```
 
 
 

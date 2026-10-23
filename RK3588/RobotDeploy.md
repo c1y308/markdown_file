@@ -2699,8 +2699,6 @@ private:
 };
 ```
 
-
-
 ## CRC校验
 
 ### 为什么选择异或
@@ -2948,354 +2946,1082 @@ uint8_t IMUParser::CRC8_Table(const std::vector<uint8_t>& data) {
 }
 ```
 
-## 面试相关
+# RT-Linux
 
-维度一：避开“隐形地雷”——精准的 TTY 状态配置（Raw Mode 的本质）
-因为你懂了 TTY 中间有一层叫 **“线路规程 (Line Discipline)”** 的东西，你知道它是处理字符的，IMU 发送的是**二进制传感器数据**，里面很可能包含 0x03（在 ASCII 中是 Ctrl+C）、0x0A（换行符）。
+## `mlockall()`（锁页）
 
-如果不把 TTY 设置为**绝对的原始模式 (Raw Mode)**，内核的线路规程就会自作主张：把 0x03 拦截下来当成中断信号（导致你的程序莫名其妙被杀掉），或者把 0x0A 替换成 0x0D 0x0A，导致你的 IMU 数据包校验和 (CRC) 永远对不上！
+### 内存交换
 
-**面试话术：**
+核心作用：**把进程的内存页锁在物理内存RAM中，避免被换出到swap**。它最主要的目的**不是“让内存访问更快”**，而是：**降低不可预测的 page falut / paging 延迟**。普通 Linux 程序看到的是**虚拟内存（virtual memory）**。例如：
 
-> “在处理 IMU 串口通信时，我深入研究了 Linux TTY 子系统架构。为了防止内核的 N_TTY 线路规程对二进制传感数据的转义（如回显、特殊控制字符捕获），我通过 cfmakeraw() 和修改 c_lflag 等标志位，彻底旁路了线路规程的加工机制，确保应用层拿到的是纯净、无损的字节流。很多新手遇到 IMU 数据丢包或 CRC 校验失败，其实根源都在于没有理解 TTY 的工作模式。”
+```c
+double joint_pos[32];
+```
 
-------
+从进程角度看，它有一个虚拟地址：
 
+```
+0x7f123456...
+```
 
+但这个虚拟地址对应的物理内存页，并不一定始终存在于 RAM。大概可以理解成：
 
-维度二：系统级性能调优——理解阻塞与缓冲区
+```
+程序虚拟地址
+     │
+     ▼
+Virtual Page
+     │
+     ├── RAM 中       ← 快
+     │
+     └── swap / 尚未装入
+```
 
-**普通学生：** 写一个 while(1) { read(fd, buf, 100); }，读不到数据就一直卡着。
-**你的深度：**
-你了解 TTY 的底层是有一层缓冲区（Flip Buffer）的。IMU 的频率很高（比如 400Hz），如何高效读取而不占用过多 CPU，同时不增加延迟？
-你需要深度理解 termios 里的 VMIN 和 VTIME 机制。
+如果 CPU 访问一个当前不在 RAM 中的页面，就可能产生：$$\boxed{\text{page fault}}$$，然后内核需要处理：
 
-- **VMIN=0, VTIME=0：** 非阻塞轮询（极其消耗 CPU，企业开发绝对禁止）。
-- **VMIN>0, VTIME>0：** 企业级常用的组包读取。比如 IMU 一帧数据是 32 字节。你可以设置 VMIN=32。内核 TTY 驱动收到数据后，不到 32 字节**不会唤醒**你的应用层进程，这极大减少了从内核态到用户态的上下文切换次数（Context Switch），降低了系统负载。
+```
+CPU access
+   ↓
+page fault
+   ↓
+进入 kernel
+   ↓
+找到 / 分配 physical page
+   ↓
+必要时从磁盘 swap 读取
+   ↓
+更新 page table
+   ↓
+恢复程序运行
+```
 
-**面试话术：**
+这个过程对普通程序没什么。但对于：
 
-> “IMU 的数据具有高频且定长的特性。我没有使用简单的非阻塞轮询，而是结合 TTY 驱动底层的唤醒机制，通过精确调优 VMIN 和 VTIME 参数，让内核 TTY 子系统帮我做第一层的‘数据聚合’。只有当完整的一帧数据到达缓冲区时，才触发系统调用唤醒读线程。这使得我的串口接收模块在保证实时性的同时，将 CPU 占用率降到了最低。”
+```
+EtherCAT RT thread
+1000 Hz
+period = 1 ms
+```
 
-------
+如果某个周期理论预算是：$T=1 ms,T=1\text{ ms}$,却突然因为 page fault 卡：$50μs, 200μs, 1ms$，实时周期就可能 miss deadline。
 
+### 线程栈
 
+***进程负责提供资源和地址空间，线程负责执行代码，而栈负责保存线程执行过程中的函数调用状态。**但这句话只是第一层理解。我们需要进一步回答几个问题：
 
-维度三：高并发与异步架构——结合 I/O 多路复用
+1. 为什么一个进程可以有多个线程，但每个线程都需要自己的栈？
+2. 为什么线程之间可以访问彼此的栈，却还要为每个线程分配独立的栈？
+3. 线程的栈和进程的堆（Heap）有什么本质区别？
+4. CPU 是如何利用栈执行函数调用、处理中断和完成线程切换的？
+5. 用户态栈（User Stack）与内核态栈（Kernel Stack）是什么关系？
 
-**普通学生：** 串口收数据就专门开一个死循环线程。如果以后加了 GPS 串口、雷达网口，就再开一堆线程。
-**你的深度：**
-既然串口 /dev/ttyS0 也是一个文件描述符 (FD)，它完全可以和网络 Socket、Eventfd 统一管理。
+下面按照 进程 → 地址空间 → 堆与栈 → 线程 → 函数调用 → 上下文切换 的逻辑来讲。
 
-- 使用 epoll 或 select 来监听 TTY 文件的可读事件。
-- 结合 **Ring Buffer (环形缓冲区)**：在单线程中用 epoll 监听到 TTY 有数据，立刻 read 出来塞进 Ring Buffer，然后继续去监听其他设备。另一个专门的数据处理线程从 Ring Buffer 取出数据进行解包和卡尔曼滤波计算。这种**“I/O 与 计算解耦”**是典型的企业级架构。
+#### 进程
 
-**面试话术：**
+进程可以理解为**一个正在运行的程序所对应的资源管理与执行环境**。例如，在 Linux 中执行：
 
-> “我将 TTY 串口读取模块设计为异步事件驱动架构。因为串口在 Linux 中也是标准的字符设备 FD，我利用 epoll 将 IMU 串口、控制端 TCP Socket 统一放入事件循环中管理。同时引入了无锁环形缓冲区(Lock-free Ring Buffer)，解决了底层 TTY 高频接收与上层姿态解算算法处理速度不匹配的生产-消费问题。”
+```shell
+./robot_controller
+```
 
+操作系统会为这个程序建立进程执行环境，其中包含：
 
+- 虚拟地址空间（Virtual Address Space）;
+- 地址空间相关的页表；
+- 堆内存与内存映射区域；
+- 程序代码与数据；
+- 打开的文件描述符（File Descriptors）；
+- 一个或多个线程；
 
-维度四：排障与调试能力（Debug 能力是高级工程师的试金石）
+进程并不等于一段正在执行的代码。更严格地说，**进程是资源容器；线程才是 CPU 调度和执行的基本单位**。
 
-**普通学生：** 串口读不到数据，只会重启程序、拔插排线。
-**你的深度：**
-你知道数据流向是：硬件 -> 中断 -> TTY Buffer -> VFS -> 应用程序。排错也要一层一层剥开。
+#### 栈：保存线程的函数调用状态
 
-1. **硬件层：** 用示波器看引脚波形。
-2. **驱动层：** 运行 dmesg | grep tty。如果看到 ttyS0: input overrun，你就知道是 CPU 负载太高，内核 TTY Flip Buffer 溢出了，数据在内核态就丢了，应用层怎么改代码都没用。
-3. **VFS 层：** 发现无法打开 /dev/ttyUSB0。你会用 lsof /dev/ttyUSB0 或 fuser 去查是不是 ModemManager 或者其他无头进程占用了 TTY 设备。
-4. **不写代码看数据：** 你知道如何使用 Linux 原生工具链排障。通过命令 stty -F /dev/ttyUSB0 raw speed 115200 配置终端，然后直接用 cat /dev/ttyUSB0 | hexdump -C 就能在终端里验证底层硬件有没有发数据过来。
+一个进程内部可以存在多个执行流。比如当前机器人程序设计成：
 
-**面试话术：**
+<img src="./assets/线程分布.png" alt="线程分布" style="zoom:80%;" />
 
-> “在开发过程中，我不仅关注应用层代码，更注重构建完整的 Linux 系统级排障链路。遇到数据异常时，我会通过 dmesg 排查底层的 overrun 溢出，使用 lsof 排查 TTY 占用，利用 stty 和 hexdump 甩开自己写的代码，直接验证底层链路。这种定位问题的思维，帮助我在项目中快速隔离了硬件层、内核驱动层和应用层的 Bug。”
+这些线程处于同一个进程中，因此能够共享一些资源，但是它们各自具有独立的执行状态。
 
-**总结：**
-不要在简历上写“熟练使用 termios 库读取串口”。
-改成：**“基于 Linux TTY 子系统特性，设计并实现高吞吐、低延迟的 IMU 数据采集管道，通过旁路线路规程与精准调优 I/O 参数，解决了高频二进制数据的丢包与粘包问题，并结合 epoll 构建了高并发传感器数据融合框架。”**
+<img src="./assets/线程总览.png" alt="线程总览" style="zoom: 80%;" />
 
-# 推理
+这里引出一个关键区别：**线程之间共享进程的虚拟地址空间，但是不共享同一套函数调用栈**。为什么？假设一个进程创建两个线程：
+
+``` c
+void worker()
+{
+    int counter = 0;
+
+    counter++;
+
+    do_something();
+}
+```
+
+线程 A、B 同时执行 `worker()`。虽然它们执行的是同一份代码，但是运行过程完全独立。
+
+![为什么线程要独立的栈](./assets/为什么线程要独立的栈.png)
+
+此时：
+
+- 线程 A 正在 `do_something()` 中，已经调用了另一个函数；
+- 线程 B 还在 `worker()` 内执行；
+- 两个线程的程序计数器 `PC` 不同；
+- 两个线程的栈指针 `SP` 不同；
+- 两个 `counter` 是两个不同的局部变量实例。
+
+如果它们使用同一个栈，就会产生严重问题。线程 A 刚保存返回地址和局部变量，线程 B 可能就修改了相同的位置。线程 A 后续恢复执行时，函数调用现场已经被破坏，程序便无法正确运行。因此，每个普通线程都需要一块独立的栈空间。
+
+#### 栈：线程切换时保存上下文
+
+假设同一进程有两个线程：
+
+- Thread A：正在控制电机；
+- Thread B：正在执行神经网络推理。
+
+CPU 只有一个可用核心，两条线程必须交替执行。开始时：
+
+```c
+CPU 正在执行 Thread A
+
+PC = A 当前执行地址
+SP = A 的栈地址
+```
+
+突然发生定时器中断，操作系统决定调度线程 B。CPU 应该如何从线程 A 切换到线程 B？
+
+**CPU 寄存器必须保存。**CPU 的寄存器是当前执行硬件线程的资源，不会天然为每个软件线程复制一套。例如：
+
+```
+Thread A:
+PC = 0x1000
+SP = 0x8000
+ra = 0x1200
+
+Thread B:
+PC = 0x2000
+SP = 0x9000
+ra = 0x2300
+```
+
+CPU 准备执行 B 之前，必须保证 A 的必要寄存器状态得到保存。这样以后重新调度 A 时，才能继续从之前的位置执行。操作系统把这件事称为：上下文切换（Context Switch）。对用户线程而言，需要区分：
+
+- 用户态执行现场：进入内核时保存的用户寄存器、用户 PC、用户 SP 等；
+- 内核态调度现场：内核暂停当前任务、切换其他任务时需要保存的寄存器及内核栈位置。
+
+在之前研究的 RISC-V 教学内核里，`__alltraps` 和 `__switch` 就分别与这两个层次相关。
+
+<img src="./assets/上下文切换.png" alt="上下文切换" style="zoom: 80%;" />
+
+假设发生切换时，线程 A 的调用栈是：
+
+```c
+Thread A 的用户栈
+┌─────────────────────┐
+│ send_command()      │
+├─────────────────────┤
+│ motor_control()     │
+├─────────────────────┤
+│ main()              │
+└─────────────────────┘
+```
+
+线程 B 的调用栈是：
+
+```c
+Thread B 的用户栈
+┌─────────────────────┐
+│ forward()           │
+├─────────────────────┤
+│ infer()             │
+├─────────────────────┤
+│ policy_thread()     │
+└─────────────────────┘
+```
+
+**线程 A 被切换出去，不意味着其调用栈被删除，栈仍然存在于内存中，只是 CPU 暂时不再使用它。**等到 A 再次获得 CPU，只需恢复相应执行状态，包括 `sp`，就可以继续使用 A 原来的调用栈。因此，线程能够被暂停、恢复，一个重要前提就是每个线程拥有可独立保留的调用栈及对应上下文。
+
+程切换并不需要复制整块栈内存，通常只需要保存和恢复必要的寄存器、栈指针及相关调度状态，**原有栈内容就留在原处**。
+
+#### 堆
+
+栈（Stack）：主要用于**管理函数调用过程中的临时执行状态**；堆（Heap）：主要用于**动态内存分配**。在 64 位 Linux 用户态进程中，可以用下面的简化模型理解：
+
+<img src="./assets/典型虚拟地址空间.png" alt="典型虚拟地址空间" style="zoom:80%;" />
+
+第一，**堆与栈都处于进程的虚拟地址空间中**。并不是操作系统专门准备了两块物理内存，一块只能当堆，另一块只能当栈。堆和栈的区别主要在于使用方式、内存管理方式以及用途。
+
+第二，多个线程共享同一个虚拟地址空间。假设进程中有三个线程，那么三者**能够访问相同的全局变量和动态分配的堆对象**。
+
+第三，**每个线程有自己的栈区域**。它们的栈虽然是不同的内存区域，但依然处于同一个进程的虚拟地址空间中。
+
+在 C++ 中看得更清楚：
+
+```c
+void function()
+{
+    int a = 10;
+
+    int* p = new int(20);
+
+    delete p;
+}
+```
+
+这里有三个不同的东西：
+
+- `a`：通常作为**局部变量放在当前函数的栈帧**中。
+- `p`：指针变量本身通常放在栈帧中。
+- `new int(20)`：这个 `int` 对象通过**动态分配获得存储空间，通常来自堆**。
+
+### 如何使用？
+
+#### 函数定义
+
+```c
+#include <sys/mman.h>
+
+int mlockall(int flags);
+```
+
+Linux 手册定义的是：它可以把调用进程地址空间中全部或部分页面锁入 RAM，阻止这些页面被换出到 swap；**以完整的 `memory page` 为单位**。
+
+```c
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+可以理解为：
+
+```
+           process virtual memory
+                    │
+       ┌────────────┴─────────────┐
+       ▼                          ▼
+currently mapped            future mappings
+     pages                       pages
+       │                          │
+ MCL_CURRENT                 MCL_FUTURE
+       │                          │
+       └────────────┬─────────────┘
+                    ▼
+              locked in RAM
+```
+
+#### `MCL_CURRENT`
+
+```c
+mlockall(MCL_CURRENT);
+```
+
+意思是：$\boxed{\text{锁住当前已经映射进进程地址空间的所有页面}}$，包括很多东西，Linux 手册明确说明，**`mlockall()` 可以覆盖代码段、数据段、栈、共享库、共享内存以及 mmap 文件等当前映射**。
+
+关键词是：
+
+> **CURRENT**
+
+假设：
+
+```c
+mlockall(MCL_CURRENT);
+
+std::vector<double> x;
+x.resize(10000000);
+```
+
+后面这次 `resize()` 新分配出来的内存：$\boxed{不一定被锁定}$，因为它是之后产生的 mapping。
+
+#### `MCL_FUTURE`
+
+所以实时程序经常还加：$\boxed{MCL\_FUTURE}$，即：
+
+```c
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+含义是：$\boxed{\text{当前 + 将来映射的内存都进行锁定}}$，例如以后出现：
+
+```c
+malloc();
+new;
+mmap();
+stack growth;
+```
+
+对应的新页面也进入 memory locking 范围。Linux 文档特别列出了 heap / stack growth、`mmap()`、`malloc()` 等后续映射场景。
+
+所以实时程序里最常见的是：
+
+```
+if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+    perror("mlockall");
+}
+```
+
+而不是单独：
+
+```
+MCL_CURRENT
+```
+
+#### `MCL_ONFAULT`
+
+Linux 4.4 起还有$\boxed{MCL\_ONFAULT}$，例如：
+
+```c
+mlockall(
+    MCL_CURRENT |
+    MCL_FUTURE  |
+    MCL_ONFAULT
+);
+```
+
+它和普通模式稍微不同。普通是现在就把需要的页面弄 resident 并 lock，而`MCL_ONFAULT`的思想是：
+
+```
+先标记 mapping
+        ↓
+页面第一次真正 fault in
+        ↓
+再 lock
+```
+
+因此**对于地址空间很大，但只会用其中一小部分的程序**，`ONFAULT` 可以避免一上来锁大量实际上不会访问的页面。Linux 文档也说明 `MCL_ONFAULT` 是为了高效处理大型映射、但实际只使用少量页面的场景。
+
+#### `munlockall()`（解除锁页）
+
+对应的解除操作：
+
+```
+munlockall();
+```
+
+意思是：$\boxed{\text{解除当前进程所有 locked pages}}$，之后这些页面重新允许被内核换出。不过进程退出时锁也会自动解除，所以很多长期运行的 RT daemon 不一定显式调用。
+
+### 为什么会失败？
+
+典型代码应该永远检查返回值：
+
+```c
+if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+    perror("mlockall");
+    return -1;
+}
+```
+
+成功：`0`；失败：`-1`。同时设置：`errno`。
+
+Linux 上最常见的原因之一就是：$\boxed{\texttt{RLIMIT\_MEMLOCK}}$，**它限制普通进程最多能锁多少 RAM**。当前 Linux 对非特权进程会根据 `RLIMIT_MEMLOCK` 限制可锁内存，而具有 `CAP_IPC_LOCK` capability 的特权进程不受这一限制。
+
+#### `ulimit`命令
+
+可以看：
+
+```
+ulimit -l
+```
+
+也可以看：
+
+```
+ulimit -a
+```
+
+#### `CAP_IPC_LOCK`
+
+Linux 还存在 capability：
+
+```
+CAP_IPC_LOCK
+```
+
+它允许进程进行 memory locking。
+
+所以一些实时程序会通过：
+
+- systemd service；
+- limits.conf；
+- capabilities；
+
+给进程合适的权限，而不是简单粗暴：
+
+```
+sudo ./robot
+```
+
+例如 systemd 服务里经常能看到类似配置：
+
+```
+LimitMEMLOCK=infinity
+```
+
+其目标就是允许实时进程锁住需要的 RAM。
+
+#### 查看进程锁了多少？
+
+Linux 可以通过：
+
+```shell
+cat /proc/<pid>/status
+```
+
+查看`VmLck:`这一项。
+
+例如：
+
+```
+grep VmLck /proc/12345/status
+```
+
+可能得到：
+
+```
+VmLck:    82432 kB
+```
+
+它表示该进程目前锁住了多少内存。Linux man page 也明确指出 `/proc/PID/status` 中的 `VmLck` 字段可以观察 `mlock()`、`mlockall()` 等锁定的内存量。
+
+你也可以：
+
+```
+grep VmLck /proc/$(pidof your_program)/status
+```
+
+### 深入理解
+
+#### 是提高实时确定性
+
+你可以把：
+
+```
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+直接记成：
+
+> **把这个实时进程现在和以后使用的内存尽可能钉在 RAM 里，避免实时循环因为 paging 突然卡住。**
+
+即：
+
+$\boxed{ \texttt{mlockall} \rightarrow \text{memory residency} \rightarrow \text{减少 paging/page-fault latency} \rightarrow \text{提高实时确定性} }$
+
+而不是：
+
+$\boxed{ \texttt{mlockall} \rightarrow \text{程序整体运行更快} }$
+
+后者是常见误解。
+
+#### 注意`fork()`
+
+Linux 文档特别警告实时进程：
+
+> 在 `mlockall()` 之后应避免 `fork()`。
+
+原因是 `fork()` 会为地址空间准备：$\text{Copy-on-Write}$，之后一旦写：
+
+```
+write
+ ↓
+COW page fault
+ ↓
+allocate/copy page
+```
+
+可能出现明显 latency。
+
+Linux man page 甚至明确指出，在 `mlockall()` / `mlock()` 后，对实时进程来说不应调用 `fork()`，即使是进程中的低优先级线程调用也应避免。
+
+所以：
+
+```
+初始化
+ ↓
+fork / daemonize（如果需要）
+ ↓
+初始化资源
+ ↓
+mlockall
+ ↓
+进入 realtime
+```
+
+通常比：
+
+```
+mlockall
+ ↓
+RT running
+ ↓
+fork()
+```
+
+合理得多。
+
+## 绑核
+
+$\boxed{CPU \  affinity = 限制某个线程在哪些CPU \ core上运行}$，比如一台 8 核机器逻辑 CPU 编号为：
+
+```
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+```
+
+默认情况下，一个普通 Linux 线程可能这一毫秒在 CPU2：下一次被调度时又跑到 CPU5：RT thread ──> CPU5。如果设置：`affinity = {CPU6}`，那么：
+
+```
+RT thread
+    │
+    └────────> CPU6 only
+```
+
+Linux scheduler 以后只能在 CPU6 上调度它。
+
+> 绑核和设置线程调度策略和优先级的区别
+
+`SCHED_FIFO + priority` 决定：$\boxed{\text{同一个 CPU 上，谁优先运行}}$；绑核决定：$\boxed{\text{这个线程允许去哪些 CPU 上运行}}$。例如：
+
+```
+Thread A: RT EtherCAT, FIFO 80
+Thread B: policy, FIFO 70
+Thread C: logging
+Thread D: ROS
+Thread E: kernel worker
+```
+
+如果不绑核，可能出现：
+
+```
+           t0        t1        t2        t3
+
+RT       CPU3      CPU5      CPU2      CPU5
+Policy   CPU1      CPU3      CPU4      CPU2
+Logger   CPU5      CPU1      CPU6      CPU4
+```
+
+RT thread 在 CPU 之间迁移。这种行为叫：$\boxed{\text{CPU migration}}$，对于普通软件问题不大，但对实时系统不够理想，这是 affinity 最关键的意义之一。假设 RT thread 原来跑在 CPU3：
+
+```text
+CPU3:
+L1 cache
+L2 cache
+TLB
+branch predictor state
+```
+
+RT thread 最近使用的数据，例如：
+
+```
+motor_state
+pdo_buffer
+controller_state
+setpoint
+```
+
+可能已经大量进入 CPU3 的 cache。下一周期 Linux 把线程迁移到 CPU6：
+
+```
+CPU3                    CPU6
+
+L1: motor_state         L1: ???
+L2: controller          L2: ???
+     ↓
+ RT thread migrates ────────>
+```
+
+CPU6 的本地 cache 中很可能没有这些数据。于是要重新：
+
+```
+L1 miss
+   ↓
+L2 miss
+   ↓
+LLC
+   ↓
+memory
+```
+
+这会增加执行时间的不确定性。实时系统最怕的其实不一定是：平均执行时间稍微长，而是：$\boxed{\text{最坏执行时间 / jitter 不稳定}}$。所以希望：
+
+```
+cycle 1      RT → CPU6
+cycle 2      RT → CPU6
+cycle 3      RT → CPU6
+...
+cycle 10000  RT → CPU6
+```
+
+而不是到处漂。
+
+### 如何使用
+
+#### 本质是 CPU mask
+
+Linux 内核里，CPU affinity 通常不是 cpu = 6 这种单个数字概念。而是$\boxed{CPU \ mask}$，比如：
+
+```c++
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+ 0    0    0    0    0    0    1    0
+```
+
+意思是：
+
+```c++
+allowed CPUs = {6}
+```
+
+也可以写：
+
+```c++
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+ 0    0    0    0    1    0    1    0
+```
+
+代表：
+
+```c++
+allowed CPUs = {4, 6}
+```
+
+因此 affinity 并不一定是“绑死一个核”。它真正的含义是：
+
+> scheduler 只能从这个 allowed CPU set 中选。
+
+具体代码（**相关操作宏的参数都是先CPU序号，再集合**）：
 
 ``` c++
-用户线程调用：robot.policy_step(vx, vy, yaw_rate)
-        │
-        ▼
-┌────────────────────────────────────────────────────────────┐
-│ RobotInterface::policy_step()                               │
-│ 1) lock(policy_mutex_)                                       │
-│ 2) 检查 policy_runner_ 是否已加载                             │
-│ 3) build_policy_observation(...)                             │
-│ 4) policy_runner_->infer(observation, raw_action)             │
-│ 5) raw_action -> clip/scale/加站立姿态/关节限位                │
-│ 6) apply_action(target_q_rad)                                │
-└────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌────────────────────── 构造 47 维观测 ───────────────────────┐
-│ build_policy_observation(vx, vy, yaw_rate)                   │
-│                                                              │
-│ 输入来源：                                                     │
-│ - 用户命令：vx, vy, yaw_rate                                  │
-│ - 电机快照：get_joint_q(), get_joint_vel()                    │
-│ - IMU缓存：body_ang_vel_, euler_                              │
-│ - 策略状态：last_action_raw_                                  │
-│ - 时间相位：elapsed / policy_cycle_time_s                     │
-│                                                              │
-│ observation布局：                                             │
-│ [0:2]   phase sin/cos                                        │
-│ [2:5]   scaled command                                       │
-│ [5:17]  scaled joint position                                │
-│ [17:29] scaled joint velocity                                │
-│ [29:41] last raw action                                      │
-│ [41:44] scaled body angular velocity                         │
-│ [44:47] scaled euler angle                                   │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌────────────────────── 模型同步推理 ──────────────────────────┐
-│ TorchPolicyRunner::infer()                                   │
-│ 1) observation[47] -> torch tensor [1, 47], float32, CPU      │
-│ 2) module->forward({input})                                  │
-│ 3) 检查输出必须是 tensor                                      │
-│ 4) 检查输出必须是 float32 且 numel == 12                      │
-│ 5) 拷贝到 raw_action[12]                                     │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌────────────────────── 动作后处理 ────────────────────────────┐
-│ raw_action[12]                                                │
-│   │                                                          │
-│   ├─ 按 action_clip 截断                                      │
-│   ├─ clipped_action * action_scale                            │
-│   ├─ + stand_pose_rad[motor_index]                            │
-│   ├─ 按 joint_min_rad / joint_max_rad 限位                    │
-│   └─ 得到 target_q_rad[12]                                    │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌────────────────────── 下发动作 API ──────────────────────────┐
-│ RobotInterface::apply_action(target_q_rad)                    │
-│ 1) 检查 motors_initialized_                                   │
-│ 2) 检查 motion_enabled_，否则拒绝                              │
-│ 3) 检查 target_q_rad.size() == num_motors                     │
-│ 4) rad -> deg                                                 │
-│ 5) controller_->send_command(SET_SETPOINTS, values=target_deg)│
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌────────────────────── 线程安全命令队列 ──────────────────────┐
-│ ThreadSafeQueue<ControlCommand> cmd_queue_                    │
-│                                                              │
-│ 用户线程：push(SET_SETPOINTS) 后立即返回                      │
-│ 实时线程：下一次 1ms 周期 pop() 并处理                         │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────── 后台 1kHz 电机实时线程 ──────────────────┐
-│ MYACTUA::rt_thread_func()                                    │
-│ - receivePhysical()      收 EtherCAT 输入                     │
-│ - process_commands()     取 SET_SETPOINTS，更新 desired       │
-│ - update({})             状态机生成 TxPDO                     │
-│ - sendPhysical()         写 domain 并发 EtherCAT 输出          │
-│ - update_status_snapshot() 更新状态快照                       │
-│ - clock_nanosleep(...)   等待下一个 1ms 周期                  │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────── EtherCAT / 电机 ─────────────────────┐
-│ TxPDO: control_word, target_pos, target_vel, target_torque... │
-│ RxPDO: status_word, pos, vel, torque, error, op_mode...       │
-│                                                              │
-│ 电机每 1ms 收到最新 TxPDO。                                   │
-│ 如果 policy_step 低于 1kHz，电机线程会持续发送最近一次目标值。 │
-└──────────────────────────────────────────────────────────────┘
+#include<pthread.h>			// 哪个线程		// 多少个 cpu			// cpu 集合
+int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
 
+#include<sched.h>
+
+cpu_set_t expected;
+CPU_ZERO(&expected);
+
+for (const int cpu : options.cpu_ids) {  // options.cpu_ids 是一个 vector 容器
+    CPU_SET(cpu, &expected);
+}
+
+result = pthread_setaffinity_np(self, sizeof(expected), &expected);
+
+if (result != 0) {
+    return thread_setup_error("pthread_getaffinity_np", result);
+}
 ```
 
+验证是否绑核成功：
 
+``` c
+    // 验证 CPU 绑核是否成功
+    cpu_set_t actual;
+    CPU_ZERO(&actual);
+    result = pthread_getaffinity_np(self, sizeof(actual), &actual);
+    if (result != 0) {
+        return thread_setup_error("pthread_getaffinity_np", result);
+    }
+    if (!CPU_EQUAL(&expected, &actual)) {
+        return thread_setup_error("thread affinity verification", 0);
+    }
+```
 
-如果你要把这套框架重写成适配你自己的人形机器人，最稳妥的顺序不是从策略推理开始，而是从“硬件抽象和坐标定义”开始。因为推理层只是吃 observation、吐 action，真正最难、最容易埋坑的是底层机器人接口。
+#### `lscpu`（查看核分布）
 
-**推荐构建顺序**
+RK3588（瑞芯微 Rockchip RK3588）采用 8 核 ARM CPU，4 个 Cortex-A76 大核 + 4 个 Cortex-A55 小核，属于异构多核（Heterogeneous Multi-Core）架构。
 
-先定义机器人抽象，不写推理
-
-先把你机器人的“最小控制闭环”想清楚：
-
-- 一共多少关节
-- 每个关节的控制模式是什么
-- 电机 ID、总线、IMU、编码器分别怎么连
-- 你的统一关节顺序是什么
-
-先固定两套顺序：
-
-- 硬件顺序
-- 算法顺序
-
-这一步最重要。后面所有 obs/action、零位、限位、符号、模型输入输出都依赖它。
-
-## 配置文件
-
-### `robot.yaml`
-
-先重写 robot.yaml 对应的配置模型
-
-你可以参考现在的三层拆法：
-
-- imu
-- motors
-- robot
-
-但建议一开始就按你的机器人重新设计字段，不要机械照搬。至少要能描述：
-
-- 传感器连接方式
-- 所有关节/电机拓扑
-- 零位偏置
-- 正负方向
-- 关节限位
-- PD 参数
-- 是否有闭链/并联机构
-
-目标是：配置文件能完整描述你的机器人硬件和控制参数，而不是代码里写死。
-
-## 接口
-
-实现 RobotInterface这是第一优先级，先不用碰 ONNX。
-
-你需要先做到这些基础能力：
-
-- init_motors()
-- deinit_motors()
-- get_joint_q()
-- get_joint_vel()
-- get_joint_tau()
-- get_quat()
-- get_ang_vel()
-- apply_action()
-- reset_joints()
-
-先让它能跑一个最简单的测试程序：
-
-- 初始化硬件
-- 读取关节和 IMU
-- 发一个固定站立姿态
-- 机器人能稳定站住或进入安全姿态
-
-只要这一步不稳，后面接策略一定会出问题。
-
----
-
-把“关节定义”彻底校准，这是上线前必须单独完成的一步：
-
-- 每个关节零位是否正确
-- 正方向是否正确
-- 限位是否合理
-- 左右腿/左右臂是否镜像一致
-- IMU 朝向和机体坐标系是否一致
-
-做一个单独校准脚本或小节点，逐关节验证：
-
-- 给正的小角度命令
-- 看反馈方向是否符合预期
-- 检查 motor_sign、zero_offset、joint_limits
-
-这一层没校准好，模型再好也没法用。
-
----
-
-如果有闭链/并联机构，单独实现映射层：如果你的机器人像这里一样有踝关节闭链，那就要尽早把这层单独抽出来，像现在的`Decouple`一样。顺序建议是：
-
-- 先只做“读状态映射”
-- 再做“写命令映射”
-- 最后再把 q/vel/tau 三者统一起来
-
-如果你的机器人没有闭链，这层可以直接省掉，先用串联关节版本跑通。
-
----
-
-做一个“无模型”的控制节点
-
-在接强化学习策略前，先写一个简化版节点，只做：
-
-- 读 IMU
-- 读关节
-- 发布 joint_states / imu
-- 接收一个固定姿态或外部 joint target
-- 调用 RobotInterface::apply_action()
-
-目标是验证：
-
-- 线程模型
-- ROS 通信
-- 实时性
-- 电机控制链路
-- 安全停机逻辑
-
-这一步其实就是把现在的 InferenceNode 删掉推理部分，只保留机器人控制骨架。
-
-## 推理
-
-定义 observation 和 action 语义，现在才开始碰策略接口。
-
-要明确：
-
-- 模型输出的是“目标关节角”还是“增量”还是“力矩”
-- observation 里有哪些量
-- 各量的顺序、缩放、裁剪方式
-- 是否需要 last_action
-- 是否需要 frame_stack
-- 是否需要外部命令速度
-- 是否需要感知输入
-
-建议先把 observation/action 的定义写成文档或注释表，再写代码。
-因为这一步其实是在定义“训练侧”和“部署侧”的契约。
-
-重写 InferenceNode 的 obs 拼装逻辑
-
-在硬件和关节定义稳定后，再实现：
-
-- load_config()
-- setup_model()
-- inference()
-- control()
-- apply_action()
-
-建议按最小版本开始：
-
-- 单模型
-- 单帧 obs
-- 无 interrupt
-- 无 attn_enc
-- 无 beyondmimic
-
-先让最普通的 locomotion policy 跑通，再逐渐加高级分支。
-
-先跑“离线对齐”，再上真机
-
-在真机跑之前，先验证：
-
-- 部署端 obs 顺序是否和训练端一致
-- 单位是否一致：rad / deg，机体系 / 世界系
-- action 反归一化是否一致
-- 默认姿态偏置是否一致
-- 输出关节顺序是否一致
-
-这一层如果能拿训练日志或仿真数据做 replay 对齐，会省很多时间。
-
-# 手柄
+| CPU 编号 | 核心类型   | 最高标称频率 | 性能定位 | 调频策略组 |
+| -------- | ---------- | ------------ | -------- | ---------- |
+| CPU0     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU1     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU2     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU3     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU4     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
+| CPU5     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
+| CPU6     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
+| CPU7     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
 
 ``` shell
-cat /proc/bus/input/devices
-
-ls -l /dev/input/event*
-
-ls -l /dev/event*
-
-sudo evtest
+cat@lubancat:~/robot_deploy$ lscpu -e
+CPU SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ       MHZ
+  0      0    0 0:0:0:0          yes 1800.0000 408.0000 1008.0000
+  1      0    1 1:1:1:0          yes 1800.0000 408.0000 1008.0000
+  2      0    2 2:2:2:0          yes 1800.0000 408.0000 1008.0000
+  3      0    3 3:3:3:0          yes 1800.0000 408.0000 1800.0000
+  4      0    0 4:4:4:0          yes 2304.0000 408.0000 1416.0000
+  5      0    1 5:5:5:0          yes 2304.0000 408.0000 1416.0000
+  6      0    2 6:6:6:0          yes 2304.0000 408.0000  600.0000
+  7      0    3 7:7:7:0          yes 2304.0000 408.0000  600.0000
 ```
 
-# 实时处理
+#### `pthread_setaffinity_np()`
 
-## 
+对于 C++ pthread 实时线程，最常见的是：
 
+``` c++
+pthread_setaffinity_np()
+```
+
+例如：
+
+``` c++
+cpu_set_t cpuset;
+CPU_ZERO(&cpuset);		// 先清空 mask
+CPU_SET(6, &cpuset);	// 允许 CPU6
+
+int ret = pthread_setaffinity_np(	// 把当前 thread 限制到 CPU6
+    pthread_self(),
+    sizeof(cpu_set_t),
+    &cpuset
+);
+```
+
+但只意味着：
+
+> **这个 RT thread 只能跑在 CPU6。**
+
+它**不意味着**：
+
+> CPU6 只能运行这个 RT thread。
+
+也就是说，可能仍然有：
+
+```
+CPU6
+│
+├── your RT thread
+├── kworker
+├── softirq
+├── timer
+├── other process
+├── kernel thread
+└── random userspace task
+```
+
+所以：$\boxed{ \text{CPU affinity} \neq \text{CPU isolation} }$，这是非常重要的概念。
+
+### 深入理解
+
+#### 绑核是"线程级"理解
+
+假设：
+
+```
+robot_controller process
+│
+├── EtherCAT RT thread
+├── Policy thread
+├── Monitor thread
+├── IMU thread
+└── Logger thread
+```
+
+它们虽然属于同一个 process，但 Linux scheduler 真正调度的是：$\boxed{\text{task / thread}}$，所以完全可以：
+
+```
+EtherCAT RT      → CPU6
+Policy           → CPU4
+IMU              → CPU3
+Monitor          → CPU2
+Logger           → CPU1
+```
+
+而不是：
+
+```
+整个 robot_controller process → CPU6
+```
+
+这也是为什么实时程序通常在线程创建后，对每个关键线程单独配置 affinity。
+
+#### 真正的 RT CPU 通常是“绑核 + 隔离”
+
+真正追求低 jitter 时，一般不是只做：
+
+```
+RT thread → CPU6
+```
+
+还希望：
+
+```
+                CPU6
+
+RT thread ─────────────→ CPU6
+
+normal process ──X─────→ CPU6
+kworker        ──X─────→ CPU6
+IRQ            ──X─────→ CPU6   （视配置而定）
+```
+
+这才接近：$\boxed{\text{dedicated realtime CPU}}$，Linux 中常见手段包括：
+
+```
+isolcpus
+nohz_full
+rcu_nocbs
+cpuset
+IRQ affinity
+```
+
+这些和 thread affinity 是配套关系。可以先把它理解成三个层级：
+
+$\boxed{Thread \ affinity→CPU \ isolation→IRQ \ | \ kernel \ housekeeping \  isolation}$
+
+## 调度策略与优先级
+
+告诉 Linux scheduler，当多个 runnable thread 同时竞争 CPU 时，哪一个线程应该优先运行。它最主要的目的不是“让线程计算得更快”，而是：**让时间敏感的实时线程在需要运行时，能够尽快抢到 CPU，从而降低 scheduling latency 和 jitter。**
+
+### 调度策略
+
+Linux 常见 scheduling policy 包括：
+
+```text
+SCHED_OTHER    0   普通 Linux 调度
+
+SCHED_BATCH    3   batch workload
+
+SCHED_IDLE     5   极低优先级普通任务
+
+SCHED_FIFO     1   实时 FIFO
+SCHED_RR       2   实时 Round-Robin
+
+SCHED_DEADLINE  6  deadline-based RT scheduling
+```
+
+### 如何使用
+
+#### 查询系统支持的优先级
+
+``` c
+int min_priority = sched_get_priority_min(SCHED_FIFO);
+
+int max_priority = sched_get_priority_max(SCHED_FIFO);
+```
+
+#### `pthread_setschedparam()`（设置策略和优先级）
+
+你的 C++ pthread 程序里最常见的是：
+
+```c++
+#include <pthread.h>
+
+int pthread_setschedparam(
+    pthread_t thread,					// 线程
+    int policy,							// 调度策略
+    const struct sched_param *param		// 优先级
+);
+```
+
+`pthread_setschedparam()` 同时设置：$\boxed{ \text{scheduling policy} + \text{scheduling priority} }$。
+
+描述优先级的数据结构为：
+
+``` c
+struct sched_param {
+    int sched_priority;
+};
+```
+
+#### `pthread_setschedprio()`（只设置优先级）
+
+如果线程已经是$\boxed{SCHED\_FIFO}$，只是想修改优先级，可以：
+
+```c++
+pthread_setschedprio(thread, 80);
+```
+
+#### `chrt`（查看线程优先级）
+
+例如查看进程：
+
+```shell
+chrt -p <pid>
+```
+
+可能得到：
+
+```shell
+pid 1234's current scheduling policy: SCHED_FIFO
+pid 1234's current scheduling priority: 80
+```
+
+`chrt` 可以查看或设置 `SCHED_OTHER`、`SCHED_FIFO`、`SCHED_RR` 等调度策略。也可以直接启动：
+
+```
+sudo chrt -f 80 ./robot_controller
+```
+
+意思：
+
+```
+-f
+ ↓
+SCHED_FIFO
+
+80
+ ↓
+priority 80
+```
+
+### 注意事项
+
+#### 解决锁带来的优先级翻转
+
+解决经典 priority inversion 的一个办法是：$\boxed{\text{Priority Inheritance}}$，mutex 可以配置：
+
+```c++
+PTHREAD_PRIO_INHERIT
+```
+
+例如：
+
+```c++
+pthread_mutexattr_t attr;
+
+pthread_mutexattr_init(&attr);
+
+pthread_mutexattr_setprotocol(
+    &attr,
+    PTHREAD_PRIO_INHERIT
+);
+
+pthread_mutex_init(&mutex, &attr);
+```
+
+现在：
+
+```
+L priority 40
+持有 mutex
+```
+
+H开始等待这个 mutex，系统临时把 L 提升：
+
+```
+L:
+
+40
+ ↓
+80 temporarily
+```
+
+于是 M priority 60 无法再抢占 L。L 可以赶快：
+
+```
+finish critical section
+      ↓
+unlock
+      ↓
+H 获取 mutex
+```
+
+然后 L 再恢复原来的：
+
+```
+priority 40
+```
+
+POSIX 定义的 `PTHREAD_PRIO_INHERIT` 正是通过让 mutex owner 临时继承等待者的更高优先级，来限制这类 priority inversion。PREEMPT_RT 内核中的 `rtmutex` 也大量利用 priority inheritance。
+
+#### 注意中断饿死
+
+和MCU中的中断可以永远打断FreeRTOS的调度不同，PREEMPT_RT 很重要的一项改造是：$\boxed{\text{大多数 IRQ handler 被线程化}}$，即：
+
+```
+NIC hardware interrupt
+       ↓
+minimal hard IRQ
+       ↓
+wake IRQ thread
+       ↓
+IRQ thread 由 scheduler 调度
+```
+
+内核当前文档说明，**PREEMPT_RT 中默认 threaded IRQ handler 使用**：
+
+```
+SCHED_FIFO
+priority = 50
+```
+
+（具体系统仍应实际检查配置。）
+
+于是你的系统可能实际存在：
+
+```
+EtherCAT RT thread      FIFO 80
+
+EtherCAT NIC IRQ        FIFO 50
+```
+
+这时候就出现**用户 RT priority 太高可能反过来饿死设备 IRQ**。假设：
+
+```
+EtherCAT RT  = FIFO 80
+NIC IRQ      = FIFO 50
+```
+
+如果 EtherCAT RT thread：
+
+```c
+while (...) {
+    busy_wait();
+}
+```
+
+因为：80>50那么 IRQ thread甚至可能无法运行。于是出现：
+
+```
+RT thread 等 NIC 数据
+       ↑
+       │
+NIC IRQ thread 想处理数据
+       │
+       └── 被 RT 80 抢占
+```
+
+变成：$\boxed{\text{自己把自己依赖的 producer 饿死}}$所以 realtime priority 设计绝不能只看：
+
+> “谁最重要？”
+
+而应该看：$\boxed{\text{dependency graph}}$即：
+
+> 谁依赖谁先完成工作？
+
+以EtherCAT电机控制为例，现在大致是：
+
+```
+EtherCAT / motor RT    1 kHz
+Policy                 50 Hz
+IMU
+diagnostics
+logger
+```
+
+类似这样的优先级关系通常比较合理：
+
+```
+时间敏感程度
+
+EtherCAT RT
+    │
+    │ high
+    ▼
+Policy
+    │
+    ▼
+IMU / auxiliary RT
+    │
+    ▼
+monitor
+    │
+    ▼
+logger
+```
+
+例如作为初始实验配置：
+
+```
+EtherCAT RT       FIFO 80
+Policy            FIFO 70
+IMU               FIFO 60 或普通
+Monitor           SCHED_OTHER
+Logger            SCHED_OTHER
+```

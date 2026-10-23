@@ -9397,7 +9397,7 @@ void proc_pagetable(struct TaskControlBlock *p)
 #define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)
 ```
 
-# 实现 内核任务调度 / Trap / 系统调用
+# 实现线程/进程调度
 
 **特权级越高级别数越大**（与FreeRTOS系统的相反）。移植的 OpenSBI 运行在M模式下，U模式下的程序可以通过`ecall`指令调用S模式下（操作系统）提供的服务称之为**ABI**，运行在S模式下的操作系统程序也可以通过`ecall`指令调用 OpenSBI 提供的服务称之为**SBI**。
 
@@ -9622,75 +9622,285 @@ intr_get()
 #endif
 ```
 
-## `syscall` 系统调用
+## 进程
 
-将系统调用号传入到`a7`寄存器，然后将传入的三个参数分别传入到`a0,a1,a2`寄存器，然后调用`ecall`指令进入内核的异常处理程序，调用完成后内核会将返回值放在`a0`寄存器中。
+### `ProcessControlBlock`
+
+```c
+typedef struct ProcessControlBlock
+{
+    int pid;
+    struct ProcessControlBlock* parent;
+    PageTable pagetable;		// 根页表的物理地址
+    u64 base_size;              // ELF 映射区结束地址（页对齐）
+    u64 ustack_base;            // 进程虚拟地址空间中，给线程栈预留的空间的起始地址
+    u64 entry;
+    int exit_code;
+    int live_threads;
+    bool used;
+    bool zombie;
+    bool tid_used[MAX_THREADS];
+} ProcessControlBlock;
+```
+
+## 线程
+
+### `TaskControlBlock`
 
 ``` c
-#include "stddef.h"
-#include "stdint.h"
-#include "stdio.h"
-size_t syscall(size_t id, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3){
-    long ret;
-    asm volatile(
-    	"mv a7, %1\n\t"  
-        "mv a0, %2\n\t"  // 将arg1 移动到寄存器 a0
-        "mv a1, %3\n\t"  // 将arg2 移动到寄存器 a1
-        "mv a2, %4\n\t"  // 将arg3 移动到寄存器 a2
-        "ecall\n\t"
-        "mv %0, a0"  // 将 ecall 执行后寄存器 a0 的值移动到输出操作数 (ret)
-        
-        : "=r" (ret)
-        : "r" (id), "r" (arg1), "r" (arg2), "r" (arg3)
-        : "a7", "a0", "a1", "a2", "memory"  // 破坏列表
-    );
-    return ret;
+typedef struct TaskControlBlock
+{
+    TaskState task_state;
+    
+    int tid;						// 线程号
+    ProcessControlBlock* process;	// 所属进程
+    
+    TaskContext task_context;
+    
+    u64 trap_cx_paddr;				// 方便在内核态（内核根页表）的 trap_handler 中可以获取用户态现场
+    u64 trap_cx_va;
+    
+    u64 kstack;                 	// 内核栈顶（计算得到）
+    u64 kstack_paddr;
+    u64 ustack;                 	// 用户栈顶（计算得到）
+    
+    int exit_code;
+} TaskControlBlock;
+```
+
+### 创建线程
+
+``` c
+static TaskControlBlock *make_thread(ProcessControlBlock *p, u64 entry, u64 arg, u64 return_stub)
+```
+
+#### 分配 `TID` 和 `TCB`
+
+``` c
+// 分配这个进程下还可用的 TID
+int tid = alloc_tid(p);
+if (tid < 0) return 0;
+
+// 在全局线程 TaskControlBlock 数组中找到一个对应的槽位
+TaskControlBlock *t = 0;
+for (int i = 0; i < MAX_THREADS; i++){
+    if (tasks[i].task_state == UnInit)
+    { 
+        t = &tasks[i];
+        break;
+    }
+}
+if (!t) { p->tid_used[tid] = false; return 0; }	// 全局没有可用的线程位了，撤销这个进程分配的 TID
+
+memset(t, 0, sizeof(*t));
+
+// 标记所属进程和对应的 TID
+t->tid = tid;
+t->process = p;
+```
+
+辅助函数为：
+
+``` c
+static int alloc_tid(ProcessControlBlock *p)
+{
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (!p->tid_used[i])
+        { 
+            p->tid_used[i] = true; 
+         	return i;
+        }
+    return -1;
+}
+```
+
+#### 依据`TID`分配线程的`TRAPFRAME`
+
+```c
+#define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)	// 进程的 TRAPFRAME
+#define THREAD_TRAPFRAME(tid) (TRAMPOLINE - ((u64)(tid) + 1) * PAGE_SIZE)	// 线程的 TRAPFRAME
+
+// 在 TCB 中记录这个线程的 TRAPFRAME 的虚拟地址（所有线程共享一个虚拟地址空间）
+t->trap_cx_va = THREAD_TRAPFRAME(tid);
+
+// 分配物理地址
+PhysPageNum page = kalloc();
+if (!page.value) goto fail;
+t->trap_cx_paddr = phys_addr_from_phys_page_num(page).value;
+
+// 完成地址映射
+if (PageTable_try_map(&p->pagetable, t->trap_cx_va, t->trap_cx_paddr, PTE_R | PTE_W) < 0) {
+    kfree(floor_phys(phys_addr_from_size_t(user_stack_pa)));
+    goto fail;
+}
+```
+
+#### 依据`TID`分配线程的用户（内核）栈
+
+首先检查用户栈区域与 TrapFrame 区域之间是否存在足够的地址空间：
+
+``` c
+if (p->ustack_base > THREAD_TRAPFRAME(MAX_THREADS - 1) - (2 * MAX_THREADS + 2) * PAGE_SIZE) {
+    memset(t, 0, sizeof(*t));
+    p->tid_used[tid] = false;
+    return 0;
+}
+```
+
+然后**从`PCB`中找到这个进程分配的这个进程的虚拟地址空间中留给线程用做栈的虚拟地址起始**，然后**依据`TID`找到这个线程的用户栈的起始虚拟地址和栈顶**，每个线程分配一个页面作为用户栈，中间留一个页面的间隔：
+
+``` c
+u64 stack_bottom = p->ustack_base + ((u64)tid * 2 + 1) * PAGE_SIZE;
+t->ustack = stack_bottom + PAGE_SIZE;
+```
+
+假设 `PAGE_SIZE = 4096`，并且 `p->ustack_base = B`。那么：
+
+| TID  | `stack_bottom` | 初始用户 SP |
+| ---- | -------------- | ----------- |
+| 0    | \(B+4096\)     | \(B+8192\)  |
+| 1    | \(B+12288\)    | \(B+16384\) |
+| 2    | \(B+20480\)    | \(B+24576\) |
+
+<img src="./assets/线程用户栈映射.png" alt="线程用户栈映射" style="zoom:80%;" />
+
+接下来进行条件检查：
+
+| 条件                                     | 意图                                |
+| ---------------------------------------- | ----------------------------------- |
+| `t->ustack <= stack_bottom`              | 加法溢出或无效栈范围                |
+| `t->ustack >= t->trap_cx_va - PAGE_SIZE` | 用户栈侵入 TrapFrame 附近的保留区域 |
+| `find_pte(...stack_bottom)`              | 用户栈页面是否已经被映射            |
+| `find_pte(...trap_cx_va)`                | TrapFrame 虚拟地址是否已经被映射    |
+
+最后两个判断依赖 `find_pte()` 的实际语义：这里假定它在目标页面已有有效映射时返回非空结果。另外，`find_pte()` 如果只检查页表项是否存在，而不检查 `PTE_V`，那么还需要确认它是否会将无效页表项误认为已映射。如果任一检查失败，就跳转到统一的失败清理路径。
+
+``` c
+if (t->ustack <= stack_bottom || t->ustack >= t->trap_cx_va - PAGE_SIZE ||
+    find_pte(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom))) ||
+    find_pte(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va))))
+    goto fail;
+```
+
+最后**分配物理页，并完成映射**：
+
+``` c
+// 分配用户栈的起始地址
+page = kalloc();
+if (!page.value) goto fail;
+u64 user_stack_pa = phys_addr_from_phys_page_num(page).value;
+
+// 映射用户栈
+if (PageTable_try_map(&p->pagetable, stack_bottom, user_stack_pa, PTE_R | PTE_W | PTE_U) < 0) {
+    kfree(floor_phys(phys_addr_from_size_t(user_stack_pa)));
+    goto fail;
+}
+```
+
+---
+
+同样依据`TID`分配线程的内核栈，注意是**映射的内核根页表**：
+
+``` c
+//计算应用内核栈的地址，每个应用的内核栈下都有一个无效的守卫页
+#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PAGE_SIZE)
+
+u64 kstack_bottom = KSTACK((int)(t - tasks));
+t->kstack = kstack_bottom + PAGE_SIZE;
+
+page = kalloc();
+if (!page.value) { kfree(floor_phys(phys_addr_from_size_t(user_stack_pa))); goto fail; }
+t->kstack_paddr = phys_addr_from_phys_page_num(page).value;
+
+if (PageTable_try_map(&kernel_pagetable, kstack_bottom, t->kstack_paddr, PTE_R | PTE_W) < 0)
+    goto fail;
+
+sfence_vma();
+```
+
+#### 初始化`TrapContext` / `TaskContext`
+
+在`__alltrap`中在`TRAPFRAME`中保存了`TrapContext`后，接下来就需要把根页表切换为内核态的根页表，因此需要在`TrapContext`中记录：
+
+``` c
+reg_t kernel_satp;     	//内核地址空间的satp值
+```
+
+切换完`satp`之后需要将`SP`指向内核地址空间中的内核栈，因此需要在`TrapContext`中添加一个元素来保存应用程序的内核栈`SP`。因此在`TrapContext`中需要有：
+
+``` c
+reg_t kernel_sp;       	//内核栈的虚拟地址
+```
+
+`__alltrap`最后需要跳转到`trap_handler`执行`trap_handler`：
+
+``` assembly
+sfence.vma
+jr t1		# t1 中存储的内核虚拟地址空间中 trap_handler的地址
+```
+
+因此也需要保存：
+
+``` c
+reg_t trap_handler;    	//内核虚拟地址空间 trap handler 的地址
+```
+
+---
+
+> 为什么把每个应用程序的 TrapContext 保存在应用的虚拟地址空间？
+
+每个任务都有自己的根页表，内核程序也有自己的根页表。每次用户态任务刚进入`__alltrap`时，`satp`仍然是用户态任务的根页表。
+
+假设把`sscratch`寄存器选为内核/用户栈`SP`的切换，把`TrapContext`保存在内核栈中：在`__alltrap`时通过`sscratch`寄存器把`SP`指向内核栈，由于`satp`还是用户的根页表因此还是无法找到`TrapContext`，也就无法切换`satp`；**因此本系统设计将任务的`TrapContext`保存到用户虚拟地址空间的`TrapContext`页**。
+
+因此`sscratch`寄存器作用（`__alltrap`时使用）：存储`TRAPFRAME`，也就是用户虚拟地址空间中存储`TrapContext`页的地址。`__alltrap`时读取`sscratch`中的`TRAPFRAME`的地址，将其赋给`SP`寄存器（`sscratch`寄存器保存用户栈的`SP`的值），通过`SP`寄存器作为基地址来保存`TrapContext`，`__restore`时将`trap_return()`通过`a0`寄存器传递的`TrapContext`页地址写入`sscratch`寄存器。
+
+---
+
+`TrapContext`中决定线程开始运行时的寄存器状态：
+
+- `sepc`：用户程序入口地址。
+- `sp`：用户栈指针。
+- `sstatus`：执行 `sret` 时应恢复的状态。
+
+<img src="./assets/trapcontext布局.png" alt="trapcontext布局" style="zoom: 80%;" />
+
+``` c
+// 获取这个线程的 TrapContext
+TrapContext *cx = (TrapContext *)t->trap_cx_paddr;
+memset(cx, 0, sizeof(*cx));
+cx->sstatus = (r_sstatus() & ~SSTATUS_SPP) | SSTATUS_SPIE;
+cx->sepc = entry;				// 这个线程的执行函数
+cx->sp = t->ustack;				// 将 SP 指针指向用户栈
+cx->ra = return_stub;			// 返回函数指向传入的函数
+cx->a0 = arg;					// 将传入的参数给 a0 寄存器
+
+cx->kernel_satp = kernel_satp;			// 内核根页表地址是全局变量
+cx->kernel_sp = t->kstack;				// 线程的内核栈在内核虚拟地址空间中的虚拟地址
+cx->trap_handler = (u64)trap_handler;	// trap_handler 在内核虚拟地址空间中的虚拟地址
+
+t->task_context = tcx_init(t->kstack);	
+t->task_state = Ready;
+p->live_threads++;
+return t;
+```
+
+初始化存储在内核栈中的`TaskContext`：它决定调度器第一次切换到这个任务时，从哪个内核执行位置开始：注意 首个任务的`task_ctx.ra = (reg_t)trap_return`，因此从临时任务切换到首个任务执行`ret`后，是**接着从`trap_return`执行**。
+
+``` c
+static TaskContext tcx_init(u64 kstack_top)
+{
+    TaskContext cx;
+    memset(&cx, 0, sizeof(cx));
+    cx.ra = (reg_t)trap_return;
+    cx.sp = kstack_top;
+    return cx;
 }
 ```
 
 ## 实现 内核任务调度 和 Trap
 
 <img src="./assets/OS的完整启动流程.png" alt="OS的完整启动流程" style="zoom:80%;" />
-
-### 定义`TaskControlBlock`
-
-任务的 TCB 中直接保存了一个物理地址和物理页：
-
-- `trap_cx_paddr`为保存任务 TrapContext 的物理地址，在`proc_pagetable(TaskControlBlock* TCB)`时把应用地址空间中的`TRAPFRAME`页映射到这个物理地址，在 TCB 中保存这个物理地址是方便在内核态（内核根页表）的`trap_handler`中可以依据用户态的现场进行处理。
-- -`pagetable`是任务的根页表所在的物理页，在`task_create_pt`时分配并完成初始化。
-
-``` c
-typedef enum TaskState
-{
-	UnInit, // 未初始化
-    Ready, // 准备运行
-    Running, // 正在运行
-    Zombie, // 已退出(僵尸态, 等待父进程 wait 回收)
-}TaskState;
-
-typedef struct TaskControlBlock
-{
-    TaskState task_state;       		// 任务状态
-    int pid;                    		// 进程 ID
-    struct TaskControlBlock* parent;  	// 父进程
-    u64 exit_code;              		// 进程退出码
-    
-    TaskContext task_context;   		// 任务上下文
-    
-    u64 trap_cx_paddr;          		// 保存 TrapContext 的物理地址(trap_handler中依据用户现场进行处理)
-    									// 并且 __resotre时从 TrapContext 恢复用户态上下文时用的还是内核态页表
-    
-    PageTable pagetable;        		// 应用根页表所在物理页(trap_return时获取新任务的根页表地址)
-    
-    
-    u64  base_size;             		// 应用数据大小
-    
-    u64  kstack;                		// 应用内核栈的虚拟地址
-    u64  ustack;                		// 应用用户栈的虚拟地址
-    u64  entry;                 		// 应用程序入口地址
-    
-}TaskControlBlock;
-```
 
 ### 触发`Trap`的完整链路
 
@@ -9745,134 +9955,24 @@ void trap_from_kernel()
 }
 
 
-void run_first_task()
-{
-    tasks[0].task_state = Running;
-    struct TaskContext *next_task_cx_ptr = &(tasks[0].task_context);	// task[0]
-    struct TaskContext _unused ;	// 临时任务的 taskcontext
-    __switch(&_unused,next_task_cx_ptr);
-    panic("unreachable in run_first_task!");
-}
-```
-
-**首先通过`app_init()`函数对每个 task 的` TrapContext `和 `TaskContext` 进行初始化。**
-
-### `TrapContext`及初始化
-
-<img src="./assets/trapcontext布局.png" alt="trapcontext布局" style="zoom: 80%;" />
-
-
-在`__alltrap`中在`TRAPFRAME`中保存了`TrapContext`后，接下来就需要把根页表切换为内核态的根页表，因此需要在`TrapContext`中记录：
-
-``` c
-reg_t kernel_satp;     	//内核地址空间的satp值
-```
-
-切换完`satp`之后需要将`SP`指向内核地址空间中的内核栈，因此需要在`TrapContext`中添加一个元素来保存应用程序的内核栈`SP`。因此在`TrapContext`中需要有：
-
-``` c
-reg_t kernel_sp;       	//内核栈的虚拟地址
-```
-
-`__alltrap`最后需要跳转到`trap_handler`执行`trap_handler`：
-
-``` assembly
-sfence.vma
-jr t1		# t1 中存储的内核虚拟地址空间中 trap_handler的地址
-```
-
-因此也需要保存：
-
-``` c
-reg_t trap_handler;    	//内核虚拟地址空间 trap handler 的地址
-```
-
----
-
-> 为什么把每个应用程序的 TrapContext 保存在应用的虚拟地址空间？
-
-每个任务都有自己的根页表，内核程序也有自己的根页表。每次用户态任务刚进入`__alltrap`时，`satp`仍然是用户态任务的根页表。
-
-假设把`sscratch`寄存器选为内核/用户栈`SP`的切换，把`TrapContext`保存在内核栈中：在`__alltrap`时通过`sscratch`寄存器把`SP`指向内核栈，由于`satp`还是用户的根页表因此还是无法找到`TrapContext`，也就无法切换`satp`；**因此本系统设计将任务的`TrapContext`保存到用户虚拟地址空间的`TrapContext`页**。
-
-因此`sscratch`寄存器作用（`__alltrap`时使用）：存储`TRAPFRAME`，也就是用户虚拟地址空间中存储`TrapContext`页的地址。`__alltrap`时读取`sscratch`中的`TRAPFRAME`的地址，将其赋给`SP`寄存器（`sscratch`寄存器保存用户栈的`SP`的值），通过`SP`寄存器作为基地址来保存`TrapContext`，`__restore`时将`trap_return()`通过`a0`寄存器传递的`TrapContext`页地址写入`sscratch`寄存器。
-
----
-
-`TrapContext`中决定用户程序开始运行时的寄存器状态：
-
-- `sepc`：用户程序入口地址。
-- `sp`：用户栈指针。
-- `sstatus`：执行 `sret` 时应恢复的状态。
-
-
-``` c
-extern u64 kernel_satp;
+static ProcessControlBlock processes[MAX_TASKS];
+static TaskControlBlock tasks[MAX_THREADS];
 void app_init(size_t app_id)
 {
-    TrapContext* cx_ptr = (TrapContext*)tasks[app_id].trap_cx_paddr;
-    
-    // 设置 sstatus 寄存器第8位即SPP位为0 表示为U模式
-    reg_t sstatus = r_sstatus();
-    sstatus &= ~SSTATUS_SPP;
-    sstatus |= SSTATUS_SPIE;
-    cx_ptr->sstatus = sstatus; 
-    
-    // 设置程序入口地址
-    cx_ptr->sepc = tasks[app_id].entry;
-    
-    // 设置用户栈虚拟地址
-    cx_ptr->sp = tasks[app_id].ustack;
-    
-    // 设置内核根页表的物理地址
-    cx_ptr->kernel_satp = kernel_satp;
-    // 设置内核栈虚拟地址
-    cx_ptr->kernel_sp = tasks[app_id].kstack;
-    // 设置内核trap_handler的地址
-    cx_ptr->trap_handler = (u64)trap_handler;
+    ProcessControlBlock *p = &processes[app_id];
+    if (!p->used || !make_thread(p, p->entry, 0, 0)) panic("app_init: no thread");
+}
 
-    /* 构造每个任务任务控制块中的任务上下文，
-    设置 ra 寄存器为 trap_return 的入口地址,
-        sp 必须为内核栈顶(kstack) */
-    tasks[app_id].task_context = tcx_init((reg_t)tasks[app_id].kstack);
-    // 初始化 TaskStatus 字段为 Ready
-    tasks[app_id].task_state = Ready;
-    /* 分配 pid */
-    tasks[app_id].pid = allocpid();
+void run_first_task(void)
+{
+    schedule();
+    panic("run_first_task returned");
 }
 ```
 
-### `TaskContext`及初始化
+### 通过`__switch.S`切换线程的内核任务
 
-第二套是初始化 `TaskContext`，它决定调度器第一次切换到这个任务时，从哪个内核执行位置开始：注意 首个任务的`task_ctx.ra = (reg_t)trap_return`，因此从临时任务切换到首个任务执行`ret`后，是**接着从`trap_return`执行**。
-
-``` c
-// 初始化 TaskContext
-struct TaskContext tcx_init(reg_t kstack_ptr) {
-    struct TaskContext task_ctx;
-
-    task_ctx.ra = (reg_t)trap_return;	// 切到 trap_return
-    task_ctx.sp = kstack_ptr;			// 指向传入的 kstack
-    task_ctx.s0 = 0;
-    task_ctx.s1 = 0;
-    task_ctx.s2 = 0;
-    task_ctx.s3 = 0;
-    task_ctx.s4 = 0;
-    task_ctx.s5 = 0;
-    task_ctx.s6 = 0;
-    task_ctx.s7 = 0;
-    task_ctx.s8 = 0;
-    task_ctx.s9 = 0;
-    task_ctx.s10 = 0;
-    task_ctx.s11 = 0;
-
-    return task_ctx;
-}
-```
-
-### 通过`__switch.S`切换内核任务上下文
-
-假设 CPU 正在运行任务 A，此时操作系统决定切换到任务 B。任务 A 和任务 B 都需要保存自己的执行状态，否则任务 A 下次恢复执行时，CPU 就不知道应该从哪里继续、使用哪个栈，以及此前保存的寄存器值是什么。因此每个任务都有一个 `TaskContext` 结构体：
+假设 CPU 正在运行线程 A，此时操作系统决定切换到线程 B。线程 A 和线程 B 都需要保存自己的执行状态，否则线程 A 下次恢复执行时，CPU 就不知道应该从哪里继续、使用哪个栈，以及此前保存的寄存器值是什么。因此每个线程的内核态任务都有一个 `TaskContext` 结构体：
 
 ``` c
 /* S模式的任务上下文 */
@@ -9898,7 +9998,7 @@ typedef struct TaskContext
 
 `__switch.S`接收两个参数,通过`a0`和`a1`寄存器进行传递：`a0`：`current_task_cx_ptr`（当前任务的 TaskContext 地址）；`a1`：` next_task_cx_ptr`（下一个任务的 TaskContext 地址）；`TaskContext task_context`属于`TaskControlBlock`的结构体成员，而所有任务控制块都存放在全局数组 `tasks[MAX_TASKS]` 中；这个数组位于内核的 `.bss` 区。
 
-**首先保存当前任务的内核上下文（`s0-s11、ra、sp(内核栈)`）：**
+**首先保存当前线程的内核任务上下文（`s0-s11、ra、sp(内核栈)`）：**
 
 ``` assembly
 # save ra & s0~s11 of current execution
@@ -9920,7 +10020,7 @@ sd s10, 96(a0)
 sd s11, 104(a0)
 ```
 
-**然后是恢复下一个任务的上下文：**
+**然后是恢复下一个线程的内核任务上下文：**
 
 ``` assembly
 ld ra, 0(a1)
@@ -9959,7 +10059,7 @@ RISC-V 的 ABI（Application Binary Interface，应用程序二进制接口）�
 
 其中 `ra` 虽然不属于普通意义上的 Callee-saved 寄存器，但它决定了当前任务未来恢复时的执行位置，因此必须保存。
 
-### `trap_return()`：传递新任务的用户态页表 / `TRAPFRAME`虚拟地址
+### `trap_return()`：传递新线程的用户态页表 / `TRAPFRAME`虚拟地址
 
 这里最终是切换到`trap_return()`函数，这里还没有进入用户态。CPU 仍然在 S 模式，使用内核页表和内核栈，由于切换到了新的任务，因此**需要获取保存在 TCB 中的新任务的用户态的根页表的物理地址**：
 
@@ -10369,7 +10469,7 @@ void trap_return()
 }
 ```
 
-## 实现各种系统调用
+# 实现系统调用
 
 以应用程序调用`sys_write()`函数为例：传入`fd`, `buf`, `len`等相关信息与系统调用号`__NR_write`，`sys_write()`本质上是`syscall()`系统调用的封装，将系统调用号传入`a7`寄存器，参数传入`a0,a1,a2`寄存器：
 
@@ -10388,7 +10488,9 @@ size_t sys_wirte(size_t fd, const char* buf, size_t len)
 
 - 最后调用`trap_handler(TrapContext* cx)`；如果`scause`为 8 则调用`__SYSCALL()`依据内核栈中保存的用户态寄存器结构体值对不同系统调用号调用相关处理函数，如`__sys_write(arg1, arg2, arg3)`进行处理。
 
-### 实现系统调用号处理函数
+## 系统调用号分发
+
+将系统调用号传入到`a7`寄存器，然后将传入的三个参数分别传入到`a0,a1,a2`寄存器，然后调用`ecall`指令进入内核的异常处理程序，调用完成后内核会将返回值放在`a0`寄存器中。
 
 ``` c
 uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
@@ -10403,6 +10505,44 @@ uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
 		      : "r" (a1), "r" (a2), "r" (a7)
 		      : "memory");
     return a0;
+}
+
+
+void trap_handler()
+{
+    set_kernel_trap_entry();
+    TrapContext* cx = (TrapContext*)get_current_trap_cx();
+    reg_t scause = r_scause();
+    reg_t cause_code = scause & 0xfff;
+
+    if (scause & 0x8000000000000000ULL) {
+        switch (cause_code) {
+        case 5:
+            set_next_trigger();
+            schedule();
+            break;
+        default:
+            printk("undefined interrupt scause:%lx\n", scause);
+            panic("unexpected user interrupt");
+        }
+    } else {
+        switch (cause_code) {
+        case 8: {
+            /* exec 会覆写 sepc，必须先跳过 4 字节的 ecall 指令。 */
+            cx->sepc += 4;
+            uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
+            /* 调度可能切换当前进程，返回值写入当前 trap 上下文。 */
+            cx = (TrapContext*)get_current_trap_cx();
+            cx->a0 = result;
+            break;
+        }
+        default:
+            printk("undefined exception scause:%lx sepc:%lx stval:%lx\n",
+                   scause, cx->sepc, r_stval());
+            panic("unexpected user exception");
+        }
+    }
+    trap_return();
 }
 
 
@@ -10437,7 +10577,7 @@ uint64_t __SYSCALL(size_t syscall_id, reg_t arg1, reg_t arg2, reg_t arg3) {
 }
 ```
 
-### `sys_write()`系统调用
+## `sys_write()`系统调用
 
 本质是应用层调用 `syscall()`，将 `fd`、`buf`、`len` 分别放入 `a0`、`a1`、`a2`，将系统调用号 `64` 放入 `a7`，然后执行 `ecall`。
 
@@ -10499,7 +10639,7 @@ void translated_byte_buffer(const char* data , size_t len)
 }
 ```
 
-### `sys_read()`系统调用
+## `sys_read()`系统调用
 
 使用OpenSBI提供的 API 封装为可调用的函数：
 
@@ -10548,7 +10688,7 @@ void __sys_read(size_t fd, const char* data, size_t len)
 }
 ```
 
-### 用户态 printf 实现
+## 用户态 printf 实现
 
 因为之前的`printf()`函数是调用 OpenSBI 的指令来输出的，因此现在将之前的`printf()`修改名称为`printk()`作为内核输出函数。
 
@@ -10600,7 +10740,7 @@ static int _vprintf(const char* s, va_list vl)
 }
 ```
 
-### 重写 strlen/memcpy
+## 重写 strlen/memcpy
 
 创建`string.c`：
 
