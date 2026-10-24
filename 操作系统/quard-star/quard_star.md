@@ -8406,7 +8406,7 @@ SRCS_C = \
 
 # 物理内存管理
 
-## xv6 的物理内存管理
+## XV6 的物理内存管理
 
 ### 管理(`kmem`)
 
@@ -8489,7 +8489,7 @@ void *kalloc(void){
 }
 ```
 
-## rcore 的物理内存管理
+## RCore 的物理内存管理
 
 **rcore**采用的是**栈式**物理页帧管理策略，**以页为单位**。核心的数据结构如下：
 
@@ -9019,7 +9019,7 @@ PageTableEntry* get_pte_array(PhysPageNum ppn)
 ```
 在 C/C++ 中，**`PageTableEntry*` 指针被称为“数组”**，是因为它 **指向了一块连续内存中的多个 `PageTableEntry` 元素**，可以通过指针算术（如 `ptr[index]` 或 `ptr + offset`）像数组一样访问。这是 C/C++ 指针和数组紧密关联的核心特性之一。
 
-### 地址转换绑定
+### 通过虚拟地址得到页号索引
 
 一个物理页（4 KB）可以存放 512 个页表项（64bit），所以虚拟地址的每 9 位（512）作为一次寻址映射。
 
@@ -9041,7 +9041,7 @@ void indexes(VirtPageNum vpn, size_t *result)
     }
 }
 ```
-然后我们依据拿到的虚拟地址的三级页号索引来查找页表项。
+然后依据拿到的虚拟地址的三级页号索引来查找页表项。
 
 在这之前需要定义一个**管理页表的结构体**：**每个应用的地址空间都对应不同的多级页表**，这也就意味着不同程序的根页表是不一样的。因此`PageTable`要保存根页表的物理页号`root_ppn`作为页表唯一的区分标志。
 
@@ -9050,6 +9050,8 @@ typedef struct {
     PhysPageNum root_ppn; // 根页表的物理页号
 }PageTable;
 ```
+### 地址映射
+
 然后再来看查找/填充页表项的操作：传入一个`PageTable`进`satp`寄存器，在根页表中根据虚拟地址的首 9 个索引来找到对应的页表项，如果此页表项为空，则分配一页内存，然后新建一个页表项进行填充。直到三级页表索引完毕，会返回虚拟地址最终对应的三级页表的页表项，此时三级页表的页表项是空的，在进行`map`时只需要对此页表项赋值就行。**核心思想：确保虚拟地址（`vpn`）最终映射到一个有效的物理页**，并且在映射过程中按需分配物理内存（如果尚未分配）。
 
 ``` c
@@ -9068,11 +9070,11 @@ PageTableEntry* find_pte_create(PageTable* pt,VirtPageNum vpn)
         if (i == 2) {
             return pte;  // 此PTE记录了最终物理地址的ppn，如果要进行绑定可以人为写入ppn
         }
-        /*********************** 没有pte，分配一页内存，然后创建 *************************/
+        /*********** 这 9 位索引在当前页表中没有对应的 PTE（也就是没有下级页表），分配一页内存，在这个页上创建下级页表 *********/
         if (!PageTableEntry_is_valid(pte)) {
             // 分配一页物理内存
             PhysPageNum frame =  StackFrameAllocator_alloc(&FrameAllocatorImpl);
-            // 在这个分配的页上创建二级页表
+            // 这个 PTE 指向这个页（在这个分配的页上创建二级页表）
             *pte =  PageTableEntry_new(frame,PTE_V);
         }
         // 取出下级页表的物理页号
@@ -9139,12 +9141,1422 @@ void PageTable_unmap(PageTable* pt, VirtPageNum vpn)
     assert(!PageTableEntry_is_valid(pte));
     *pte = PageTableEntry_empty();
 }
+
+
+/* 可失败的单页映射；失败时回滚本次创建的页表层级。 */
+int PageTable_try_map(PageTable* pt, u64 va, u64 pa, uint8_t flags)
+{
+    if (!pt->root_ppn.value || !pa || va >= MAXVA || (va & (PAGE_SIZE - 1)) ||
+        (pa & (PAGE_SIZE - 1)))
+        return -1;
+    size_t idx[3];
+    indexes(floor_virts(virt_addr_from_size_t(va)), idx);
+    
+    PhysPageNum ppn = pt->root_ppn;
+    PageTableEntry *created[2] = {0, 0};
+    PhysPageNum pages[2];
+    for (int level = 0; level < 2; level++) {
+        PageTableEntry *pte = &get_pte_array(ppn)[idx[level]];
+        if (!PageTableEntry_is_valid(pte)) {
+            PhysPageNum child = kalloc();
+            if (!child.value) {
+                for (int j = level - 1; j >= 0; j--) {
+                    if (created[j]) {
+                        *created[j] = PageTableEntry_empty();
+                        kfree(pages[j]);
+                    }
+                }
+                return -1;
+            }
+            *pte = PageTableEntry_new(child, PTE_V);
+            created[level] = pte;
+            pages[level] = child;
+        }
+        ppn = PageTableEntry_ppn(pte);
+    }
+    PageTableEntry *leaf = &get_pte_array(ppn)[idx[2]];
+    if (PageTableEntry_is_valid(leaf)) {
+        for (int j = 1; j >= 0; j--) {
+            if (created[j]) {
+                *created[j] = PageTableEntry_empty();
+                kfree(pages[j]);
+            }
+        }
+        return -1;
+    }
+    *leaf = PageTableEntry_new(floor_phys(phys_addr_from_size_t(pa)), PTE_V | flags);
+    return 0;
+}
+
 ```
+
+## 跳板页
+
+用户虚拟地址空间中的`trampoline`与内核虚拟地址空间中的`trampoline`映射到物理地址空间中相同的页。
+
+> `__alltraps`在换完`satp`中的页表地址之后，**还有处于用户态虚拟地址空间中的指令需要执行**（执行完`csrw satp t0`之后会自动加载下一条指令的地址执行`jr t1`），**为了保证地址空间切换时指令执行的连续性**，**用户态虚拟地址空间和内核的内核态虚拟地址空间的指令所在页的映射方式应该都将其映射在同一个物理页上**，称之为**跳板页**（`trampoline`）。（CPU 的下一个需要执行的指令的地址也需要进行MMU转换）
+>
+> 位于跳板页的内容为：
+>
+> ``` assembly
+> .section .text.trampoline
+> .globl __alltraps
+> .align 3
+> __alltraps:
+> ...
+> .globl __restore
+> .align 3
+> __restore:
+> ...
+> ```
+
+## 应用地址空间映射管理
+
+### 应用程序的装载
+
+#### 编译应用程序
+
+之前 U 模式下的应用程序是写在`app.c`中和内核程序通过同一个`makefile`文件编译打包并由里面指定的`os.ld`一起链接生成`os.elf`文件。但是内核和应用程序都需要开启虚拟地址，而两者的映射状态都是不同的，类比于`Linux/Windows`这些都是操作系统将程序加载到内存中来运行的，因此需要将内核和应用程序隔离开来。在`os`目录下新建`user`文件夹，组成如下：
+
+![分离](quard-star/分离.png)
+
+`time.c`和`write.c`是两个应用程序，`makefile`用于编译，`user.ld`是链接脚本，**开启虚拟地址后，用户程序就可以使用同一个链接脚本了，因为即使被链接到同一个虚拟地址，也会映射到不同的物理地址**。
+
+##### 应用程序
+
+`time.c`：
+
+``` c
+#include <timeros/types.h>
+#include <timeros/syscall.h>
+#include <timeros/string.h>
+int main()
+{
+    while (1)
+    {
+        printf("time!!!!!!\n");
+    }
+}
+
+```
+
+`write.c`:
+
+``` c
+#include <timeros/os.h>
+#include <timeros/syscall.h>
+#include <timeros/stdio.h>
+uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
+
+    register uintptr_t a0 asm ("a0") = (uintptr_t)(arg1);
+    register uintptr_t a1 asm ("a1") = (uintptr_t)(arg2);
+    register uintptr_t a2 asm ("a2") = (uintptr_t)(arg3);
+    register uintptr_t a7 asm ("a7") = (uintptr_t)(id);
+
+    asm volatile ("ecall"
+		      : "+r" (a0)
+		      : "r" (a1), "r" (a2), "r" (a7)
+		      : "memory");
+    return a0;
+}
+
+uint64_t sys_write(size_t fd, const char* buf, size_t len)
+{
+    return syscall(__NR_write,fd,buf, len);
+}
+
+uint64_t sys_yield()
+{
+    return syscall(__NR_sched_yield,0,0,0);
+}
+
+uint64_t sys_gettime()
+{
+    return syscall(__NR_gettimeofday,0,0,0);
+}
+
+int main(int argc, char const *argv[])
+{
+
+    const char *message = "task1 is running!\n";
+    int len = strlen(message);
+    while (1)
+    {
+       printf(message);
+    }
+    return 0;
+}
+
+```
+
+##### 编译应用的 Makefile
+
+``` makefile
+CROSS_COMPILE = riscv64-unknown-elf-
+CFLAGS = -nostdlib -fno-builtin -mcmodel=medany
+
+CC = ${CROSS_COMPILE}gcc
+OBJCOPY = ${CROSS_COMPILE}objcopy
+OBJDUMP = ${CROSS_COMPILE}objdump
+INCLUDE:=-I../include
+
+LIB = ../lib
+
+write: write.c $(LIB)/*.c
+	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/write $^
+
+time: time.c 
+	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/time $^
+```
+
+##### 链接脚本
+
+`user.ld`：将程序入口符号指明为`main`，链接地址为`0x10000`：
+
+``` assembly
+OUTPUT_ARCH(riscv)
+ENTRY(main)
+BASE_ADDRESS = 0x10000;
+
+SECTIONS
+{
+    . = BASE_ADDRESS;
+    .text : {
+        *(.text.entry)
+        *(.text .text.*)
+    }
+    . = ALIGN(4K);
+    .rodata : {
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+    }
+    . = ALIGN(4K);
+    .data : {
+        *(.data .data.*)
+        *(.sdata .sdata.*)
+    }
+    .bss : {
+        *(.bss .bss.*)
+        *(.sbss .sbss.*)
+    }
+    /DISCARD/ : {
+        *(.eh_frame)
+        *(.debug*)
+    }
+}
+```
+
+#### 装载应用程序
+
+##### `build.c`：遍历应用程序的`.bin`文件
+
+> 现在有一个问题：内核如何获得用户程序的二进制内容？如果你还没有实现文件系统，就不能依靠内核在运行时从磁盘读取这些程序。
+
+一个常见办法是：在编译内核时，就把用户程序的二进制内容嵌入内核 ELF 文件。使用C语言来实现就是`os/build.c`：代码逻辑就是**遍历`user/bin`目录下的文件个数，然后记录用户程序数量，生成`link_app.S`**。
+
+![build文件的功能](./assets/build文件的功能.png)
+
+`build.c`并不是内核程序的一部分，不是和内核程序一起编译的，是单独运行`make build_app`的，添加在项目的 Makefile中：
+
+``` makefile
+build_app: build.c
+	$(MAKE) -C ./user
+	gcc $< -o build.out
+	./build.out
+```
+
+所以可以`#include <stdio.h>`调用`glibc`等标准库 。
+
+---
+
+具体代码如下：**首先创建汇编文件：**
+
+``` c
+FILE *f = fopen("src/link_app.S", "w");
+```
+
+`FILE` 是 C 标准库中表示文件流的类型。`fopen` 返回一个指向 `FILE` 对象的指针。其中：`"w"`表示以写入模式打开文件。如果文件不存在，创建文件；如果文件已经存在，原有内容会被清空。
+
+接下来：
+
+```c
+if (f == NULL) {
+    perror("Failed to open file");
+    exit(EXIT_FAILURE);
+}
+```
+
+`NULL` 表示打开失败。`perror` 根据当前的 `errno` 输出对应的系统错误信息；`exit(EXIT_FAILURE)` 终止当前程序。
+
+这里可以联系此前学习过的系统调用：
+
+`fopen` 是用户态 C 库提供的接口，通常会在底层借助 `open` 或 `openat` 等系统调用获得文件描述符，并维护一个带缓冲的 `FILE` 流。
+
+**打开目录，通过 `readdir` 遍历文件**（处理文件名、放进字符串数组）
+
+```c
+DIR *dir = opendir("./user/bin");
+```
+
+与 `fopen` 不同：
+
+- `fopen`：打开文件流。
+- `opendir`：打开目录流。
+
+**`DIR *` 是目录流的指针**。接着：
+
+```c
+struct dirent *dir_entry;
+
+while ((dir_entry = readdir(dir)) != NULL) {
+    ...
+}
+
+closedir(dir);
+```
+
+这段写法值得仔细理解。它相当于：
+
+```c
+while (1) {
+    dir_entry = readdir(dir);
+
+    if (dir_entry == NULL) {
+        break;
+    }
+
+    // 处理当前目录项
+}
+```
+
+其中 `readdir()` 每次从目录流中读取下一个目录项。**目录项由 `struct dirent` 表示**，其中一个重要成员是：
+
+```c
+dir_entry->d_name
+```
+
+即当前目录项的名字。例如返回：
+
+```
+.
+..
+hello
+shell
+test
+```
+
+这里的 `.` 是当前目录，`..` 是父目录，都不是真正需要打包的用户程序。因此需要**排除它们**：
+
+```c
+char* name_with_ext = dir_entry->d_name;
+
+if (name_with_ext[0] == '.' &&
+    (name_with_ext[1] == '\0' ||
+    (name_with_ext[1] == '.' && name_with_ext[2] == '\0'))) {
+    continue;
+}
+```
+
+**然后去掉文件扩展名：**
+
+```c
+int len = strlen(name_with_ext);  // 计算字符串长度，但不包含结尾的 `\0`。
+
+for (int i = 0; i < len; i++) {
+    if (name_with_ext[i] == '.') {	// 直接把 '.bin' 替换为 '\0'
+        name_with_ext[i] = '\0';
+        break;
+    }
+}
+```
+
+它在内存中可以表示为：
+
+```
+h e l l o . b i n \0
+```
+
+执行后：
+
+```
+h e l l o \0 b i n \0
+```
+
+注意，后面的 `.bin` 并没有被删除，只是因为字符串提前遇到 `\0`，因此后续字符串函数只能看到：
+
+```
+hello
+```
+
+这里体现了 C 语言字符串的基本原理：**C 字符串本质上是一段以 `\0` 结尾的连续字符序列**。
+
+**为什么必须使用 `strdup`？**
+
+```c
+// char* apps[100]; // Assuming a maximum of 100 apps
+// int app_count = 0;
+
+apps[app_count] = strdup(name_with_ext);
+app_count++;
+```
+
+`strdup` 的主要功能是：
+
+1. 根据字符串长度**分配一块新的堆内存**。
+2. 把字符串内容复制进去。
+3. 返回新字符串的地址。
+
+例如：`char *p = strdup("hello");`大致相当于：
+
+```c
+char *p = malloc(strlen("hello") + 1);
+
+strcpy(p, "hello");
+```
+
+但这里的核心问题是：为什么不直接写 `apps[app_count] = name_with_ext;`？因为：
+
+```c
+char *name_with_ext = dir_entry->d_name;
+```
+
+`name_with_ext` 指向的是 `readdir` 返回的目录项数据。后续再调用 `readdir()`，先前返回的数据可能被覆盖。假如直接保存这个指针：
+
+```c
+apps[0] = name_with_ext;
+```
+
+那么下次读取目录项后，`apps[0]` 原本指向的内容就可能发生变化。而 `strdup()` 会为每个文件名单独分配内存，从而使所有文件名能够同时保存下来。这也是你后面需要调用`free(apps[i]);`的原因，因为 `strdup()` 分配的内存需要由程序释放。
+
+**遍历完目录项后，为什么要调用`qsort`对数组中的元素排序**
+
+因为 `readdir` 并不保证目录项返回顺序。
+
+如果不排序，不同构建过程中：
+
+```c
+app_0 = hello
+```
+
+可能变成：
+
+```c
+app_0 = test
+```
+
+这样内核通过编号定位应用时，其对应关系就不稳定。因此，排序使应用编号具有确定性，前提是输入文件集合和命名规则保持不变。
+
+```c
+// char *apps[100]; 实际向比较函数传入：compare_strings(&apps[0], &apps[1]);
+qsort(apps, app_count, sizeof(char*), compare_strings);
+```
+
+这是整个程序很值得掌握的一行。`qsort` 的函数原型是：
+
+```c
+void qsort(
+    void *base,
+    size_t nmemb,
+    size_t size,
+    int (*compar)(const void *, const void *)
+);
+```
+
+对照传入的参数：
+
+| 实际参数          | 含义                 |
+| ----------------- | -------------------- |
+| `apps`            | 要排序的数组首地址   |
+| `app_count`       | 数组中有效元素的数量 |
+| `sizeof(char*)`   | 每个元素占多少字节   |
+| `compare_strings` | 指向比较函数的指针   |
+
+例如在64位平台上：
+
+```c
+sizeof(char*) == 8
+```
+
+于是 `qsort` 知道数组每个元素占8字节。不过，**`qsort` 并不知道这些8字节代表一个整数、指针还是其他数据类型，因此它需要你提供比较函数告知如何比较这 8 个字节的每个元素**。这就是函数指针的价值：把需要执行的操作作为参数传递给另一个函数。
+
+``` c
+// char *a = "hello"; 传入 &a
+int compare_strings(const void *a, const void *b) { 		// a 和 b 是指向字符串指针的指针
+    return strcmp( *(const char**)a, *(const char**)b );
+}
+```
+
+逐层拆解：`a`类型为 `const void *`，它是**通用指针**，无法直接解引用为具体字符串。因此首先：
+
+```c
+(const char* *)a
+```
+
+将通用指针转换为**指向字符串指针的指针**。然后：
+
+```c
+*(const char **)a
+```
+
+**取出指针指向的字符串指针**，其类型是 `const char *`。所以：
+
+```c
+strcmp(*(const char**)a, *(const char**)b);
+```
+
+实际上等价于比较：
+
+```c
+strcmp("hello", "shell");
+```
+
+`strcmp` 的返回值规则为：
+
+- 负数：前一个字符串字典序更小。
+- 0：两个字符串相同。
+- 正数：前一个字符串字典序更大。
+
+因此，这个函数可以交给 `qsort` 来完成字符串排序。
+
+##### **生成汇编代码**
+
+首先**生成用户程序数量与地址表：**
+
+```c
+fprintf(
+    f,
+    "\n.align 3\n.section .data\n.global _num_app\n_num_app:\n.quad %d",
+    app_count
+);
+```
+
+`fprintf` 将格式化文本写入文件。例如，`app_count == 3`，那么生成的内容是：
+
+```c
+.align 3
+.section .data
+.global _num_app
+_num_app:
+.quad 3
+```
+
+`.section .data`表示后续内容放在 `.data` 输入节中。按照通常的 ELF 使用方式，`.data` 是用于保存已初始化数据的节。
+
+`.align 3`在 RISC-V GNU 汇编语法中，这里通常表示按照 \(2^3=8\) 字节对齐。因此后面的数据起始位置满足：$ \text{Address}\bmod 8=0 $
+
+对齐有助于正确、高效地访问64位数据。
+
+`.global _num_app`把 `_num_app` 声明为全局符号，使其他目标文件能够引用它。`_num_app:`定义一个汇编标签（Label），标记当前位置。你可以将它理解为：`_num_app` = 当前汇编位置的地址；更准确地说，它定义了一个符号，其值由汇编器和链接器确定。
+
+`.quad 3`将数值3作为一个8字节整数存放在当前位置。例如 RISC-V 小端序机器中，这8字节可以表示为：
+
+```
+03 00 00 00 00 00 00 00
+```
+
+所以：
+
+```
+_num_app:
+.quad 3
+```
+
+表示 `_num_app` 指向一块存有数字 3 的内存。它与 C 语言中的：`uint64_t num_app = 3`在数据表达上有相似性，但二者并不是完全相同的源语言声明。
+
+**生成用户程序的地址表：**
+
+```c
+for (int i = 0; i < app_count; i++) {
+    fprintf(f, "\n.quad app_%d_start", i);
+}
+```
+
+如果有三个程序，生成：
+
+```
+.quad app_0_start
+.quad app_1_start
+.quad app_2_start
+```
+
+接下来：
+
+```c
+fprintf(f, "\n.quad app_%d_end", app_count - 1);
+```
+
+又生成：
+
+```c
+.quad app_2_end
+```
+
+注意：`.quad app_0_start` 与 `.quad 3` 有一个重要区别。前者表示把符号 `app_0_start` 对应的地址值存放在8字节数据中。后者表示直接存放数值3。因此，内核获得了一个地址表。假设三个用户程序对应的起始地址分别是：
+
+```
+app_0_start = 0x80210000
+app_1_start = 0x80212000
+app_2_start = 0x80215000
+app_2_end   = 0x80217000
+```
+
+那么生成的数据结构在逻辑上就是：
+
+| 相对偏移 | 存放的内容                 |
+| -------- | -------------------------- |
+| +0       | 3 （程序数量）             |
+| +8       | 0x80210000 （app_0_start） |
+| +16      | 0x80212000 （app_1_start） |
+| +24      | 0x80215000 （app_2_start） |
+| +32      | 0x80217000 （app_2_end）   |
+
+所有数值均为示意。真实地址由目标文件布局和链接脚本决定。
+
+如果采用由连续起始地址和最终结束地址构成的边界表，那么理论上第 \(i\) 个程序的范围可以表示为：$ [\text{app\_start}[i],\ \text{app\_start}[i+1]) $
+
+长度为：$ L_i=\text{app\_start}[i+1]-\text{app\_start}[i] $
+
+但这里存在一个值得你注意的细节：程序之间可能包含对齐填充（Padding），因为后面为每个用户程序都使用了 `.align 3`。因此，`app_(i+1)_start` 未必严格等于 `app_i_end`。
+
+**`.incbin`：最关键的汇编伪指令：将二进制文件插入**：
+
+```c
+fprintf(
+    f,
+    "\n.section .data\n.global app_%d_start\n.global app_%d_end\n.align 3\napp_%d_start:\n.incbin \"%s%s\"\napp_%d_end:",
+    i, i, i, TARGET_PATH, apps[i], i
+);
+```
+
+这段代码虽然很长，但理解起来并不复杂。假设：
+
+```
+i = 0;
+apps[i] = "hello";
+```
+
+最终写入：
+
+```c
+.section .data
+
+.global app_0_start
+.global app_0_end
+
+.align 3
+
+app_0_start:
+.incbin "../user/bin/hello"
+app_0_end:
+```
+
+其中最重要的是：
+
+```c
+.incbin "../user/bin/hello"
+```
+
+`.incbin` 是 GNU 汇编器提供的伪指令。它的作用是：汇编阶段，读取指定文件的原始二进制内容，将其中的字节直接嵌入当前输出节。
+
+例如 `hello` 文件包含：
+
+```
+7F 45 4C 46 ...
+```
+
+这其实就是 ELF 文件的开头：
+
+```
+7F 45 4C 46 = ELF Magic
+```
+
+在执行 `.incbin` 后，这些字节会被写入对应的目标文件节中。这里要特别注意：`.incbin` 并不是在内核启动后才读取 `hello` 文件。它是在宿主机汇编阶段执行的。因此，你可以将这个过程理解为：
+
+```c
+用户程序 hello（ELF文件）
+    ↓
+.incbin 读取 ELF 原始字节
+    ↓
+内核目标文件中的 .data
+    ↓
+内核最终 ELF 中的一段数据
+```
+
+还有一个容易混淆的地方：用户程序 ELF 被 `.incbin` 放入内核之后，并不意味着其中的代码已经完成了用户态加载，也不意味着 CPU 可以直接以用户态开始执行它。
+
+##### 生成的`link_app.S`
+
+通过`build.c`遍历`user/bin`文件夹生成的汇编代码：
+
+``` assembly
+.align 3
+.section .data
+.global _num_app  	# 声明一个全局可见符号
+_num_app:			# 将 _num_app 符号绑定到当前位置
+.quad 2				# 在当前位置放置一个 8 字节整数，数值为2。
+.quad app_0_start
+.quad app_1_start
+.quad app_1_end
+.section .data
+.global app_0_start
+.global app_0_end
+.align 3
+app_0_start:
+.incbin "../user/bin/time"
+app_0_end:
+.section .data
+.global app_1_start
+.global app_1_end
+.align 3
+app_1_start:
+.incbin "../user/bin/write"
+app_1_end:
+```
+
+#### 加载应用程序（`load_app()`）
+
+``` c
+void load_app(size_t app_id)
+{
+    //加载ELF文件
+    AppMetadata metadata = get_app_data(app_id + 1);
+
+    //ELF 文件头
+    elf64_ehdr_t *ehdr = (elf64_ehdr_t*)metadata.start;
+
+    //校验 ELF 魔数与架构
+    elf_check(ehdr);
+
+    // 创建进程及其用户页表，映射跳板页
+    ProcessControlBlock* proc = allocproc();
+    if (!proc) panic("load_app: no process slot or memory");
+
+    //加载程序段
+    if (load_segment(ehdr, proc) < 0) panic("load_app: invalid ELF or out of memory");
+
+    //记录APP程序的入口地址，为 main 函数地址
+    proc->entry = (u64)ehdr->e_entry;
+
+}
+```
+
+##### `AppMetadata`：存储程序文件
+
+``` c
+#ifndef TOS_LOADER_H__
+#define TOS_LOADER_H__
+
+#include <timeros/types.h>
+#include <timeros/assert.h>
+#include <timeros/stdio.h>
+
+
+// 假设这个结构用于存储应用程序元数据
+typedef struct {
+    uint64_t start;
+    uint64_t size;
+    int id;      // app id; get_app_data_by_name 未找到时置 -1, 供 exec 判定
+} AppMetadata;
+
+// 获取加载的app数量
+size_t get_num_app();
+AppMetadata  get_app_data(size_t app_id);
+#endif
+```
+
+`_num_app`符号在汇编中进行了声明，在 C 语言中可以将其看作一个 8 字节数组来进行解析，`_num_app[0]`的值就是`app`的数量。
+
+`app`数据的起始地址也可以通过把`_num_app`看作 8 字节的数组来解析获得（从 1 开始）。
+
+根据传入的`app_id`进行索引（在`load_app(size_t app_id)`调用时是`get_app_data(app_id + 1)`），由于`app`的数据是挨着放置的，所以`app`数据的大小可用下一个`app`的起始地址减去当前`app`的起始地址。
+
+``` c
+#include <timeros/loader.h>
+
+extern u64 _num_app[];  // 在汇编代码声明了大小
+
+// 获取加载的app数量
+size_t get_num_app()
+{
+    return _num_app[0];
+}
+```
+
+##### `get_app_data()`：找到 `.elf` 文件
+
+``` c
+//加载ELF文件
+AppMetadata metadata = get_app_data(app_id + 1);	// 注意这里的 +1
+
+
+AppMetadata  get_app_data(size_t app_id)
+{
+    AppMetadata metadata;
+
+    size_t num_app = get_num_app();
+
+    metadata.start = _num_app[app_id];  // 获取app起始地址
+    metadata.size  = _num_app[app_id + 1] - _num_app[app_id];    // 获取app结束地址
+
+    printk("app start:%x , app end: %x\n",metadata.start,metadata.size);
+    
+    assert(app_id <= num_app);
+
+    return metadata;
+}
+```
+
+ELF文件中最重要的便是**文件头（ELF_Header）**与**程序头表（Program Header）**。
+
+##### 解析文件头 (`elf64_ehdr`)
+
+> 只要分析 ELF 文件头，就可以得到段表和段表字符串表，从而解析整个 ELF 文件。
+
+首先定义结构体存储文件头的信息：
+
+- **魔数 + 目标机器位数 + 大小端**；
+- **文件类型（可重定位、可执行、共享库）**；
+- **适配的处理器架构**；
+- **程序的入口地址**；
+- **程序头表 或 段头表 在文件中的位置**（偏移），以及对应的大小与描述符的个数。
+
+``` c
+typedef struct {
+    u8 e_ident[EI_NIDENT];  // 魔数 16个字节:"del" "E" "L" "F" /文件位数 /大小端 /版本（侧重文件本身格式）
+    u16 e_type;             // 文件类型：1.可重定位 2.可执行 3.共享库
+    
+    u16 e_machine;          // 处理器架构
+    u32 e_version;
+    
+    u64 e_entry;           // 程序入口的虚拟地址
+    
+    u64 e_phoff;           // 程序头表  在文件中的偏移
+    u64 e_shoff;           // 段头表	 在文件中的偏移
+    
+    u16 e_phentsize;       // 程序头描述符的大小（可以遍历每个段描述符）
+    u16 e_phnum;           // 程序头描述符的个数
+    
+    u16 e_shentsize;       // 段描述符的大小
+    u16 e_shnum;           // 段描述符的个数
+    
+    u32 e_flags;
+    u16 e_ehsize;          // 文件头大小
+    
+    u16 e_shstrndx;        // 段表字符串表在段表中的下标(通过这个可以在段表中找到段表字符串表)
+} elf64_ehdr_t;
+```
+
+**文件头位于 ELF 文件的地址开始处，并且结构体成员分布固定，逐字节即可进行读取：**
+
+``` c
+//ELF 文件头
+elf64_ehdr_t *ehdr = (elf64_ehdr_t*)metadata.start;
+```
+
+并完成魔数和处理器架构的检验：
+
+``` c
+//所有的ASCII码都可以用“\”加数字（一般是8进制数字）来表示。
+#define ELFMAG 0x464C457FU  // 0x464C457FU  "\177ELF"
+#define EM_RISCV 0xF3  		//risc-v 对应的 e_machine 的value值
+/* 校验 ELF 魔数与架构 */
+void elf_check(elf64_ehdr_t *ehdr)
+{
+    //判断 elf 文件的魔数
+    assert(*(u32 *)ehdr == ELFMAG);
+    //判断传入文件是否为 riscv64
+    if (ehdr->e_machine != EM_RISCV || ehdr->e_ident[EI_CLASS] != ELFCLASS64)
+    {
+        panic("only riscv64 elf file is supported");
+    }
+}
+```
+
+##### `allocproc()`：分配进程根页表、映射跳板页
+
+``` c
+ProcessControlBlock *allocproc(void)
+{
+    for (int i = 0; i < MAX_TASKS; i++) {
+        ProcessControlBlock *p = &processes[i];
+        if (p->used)
+            continue;
+        
+        memset(p, 0, sizeof(*p));
+        // 分配进程的根页表
+        if (new_pagetable(&p->pagetable) < 0) return 0;
+        // 分配进程的 PID
+        p->pid = nextpid++;
+        p->used = true;
+        return p;
+    }
+    return 0;
+}
+
+static int new_pagetable(PageTable *pt)
+{
+    pt->root_ppn = kalloc();
+    if (!pt->root_ppn.value) return -1;
+    if (PageTable_try_map(pt, TRAMPOLINE, (u64)trampoline, PTE_R | PTE_X) < 0) {
+        kfree(pt->root_ppn);
+        pt->root_ppn.value = 0;
+        return -1;
+    }
+    return 0;
+}
+```
+
+##### `load_segment()`：加载程序段
+
+首先必须区分 ELF 的两种结构：
+
+- `Section Header`：主要用于链接、符号和节信息。如果是**可重定位 ELF 文件**则是**段头表（`Section Header`）**：
+
+  ``` c
+  typedef struct {
+      Elf64_Word    sh_name;        // 段名称在字符串表中的索引
+      
+      // 编译器通过段类型和段标志来决定如何处理一个段
+      Elf64_Word    sh_type;        // 段类型：无效段；程序段(代码段、数据段)；符号表；字符串表；段表字符串表；重定位表
+      Elf64_Xword   sh_flags;       // 段标志（可读、可写、可执行、需要在进程空间中分配内存）
+      
+      Elf64_Addr    sh_addr;        // 段需要加载在内存中的虚拟地址
+      Elf64_Off     sh_offset;      // 段在ELF文件中的偏移
+      Elf64_Xword   sh_size;        // 段大小
+      
+      Elf64_Word    sh_link;        // 链接到其他节区的索引
+      Elf64_Word    sh_info;        // 附加信息
+      Elf64_Xword   sh_addralign;   // 对齐要求
+      Elf64_Xword   sh_entsize;     // 表项大小（如有）
+  } Elf64_Shdr;
+  ```
+
+- `Program Header`：告诉加载器哪些内容应当放入进程内存，以及对应地址和权限。加载**可执行 ELF 文件主要依据程序头表(`Program Header`)**，而不是逐个加载 Section。
+
+  ``` c
+  typedef struct {
+      // 通过段类型和段标志来决定如何处理一个段
+      u32 p_type;		// 段类型：无效段；PT_LOAD：需要加载的程序段(代码段、数据段)；符号表；字符串表；段表字符串表；重定位表
+      u32 p_flags;	// 段标志（可读、可写、可执行、需要在进程空间中分配内存）
+      
+      u64 p_vaddr;	// 段被加载后在内存中的虚拟地址
+      u64 p_paddr;
+      u64 p_memsz;	// 在进程中占据多少字节
+      
+      u64 p_filesz;	// 段在文件中有多少有效字节
+      u64 p_offset;	// 段在ELF文件中的偏移
+      
+      u64 p_align;
+  } elf64_phdr_t;
+  ```
+
+ELF 中的 `Program Header` 描述程序如何装载，而 `PT_LOAD` 表示需要映射到内存中的段。例如，一个 ELF 可能有以下程序段：
+
+| 程序段       | 典型内容        | 是否通常需要装载         |
+| ------------ | --------------- | ------------------------ |
+| `PT_LOAD`    | 代码、数据、BSS | 是                       |
+| `PT_DYNAMIC` | 动态链接信息    | 视加载器实现而定         |
+| `PT_NOTE`    | 注释、辅助信息  | 通常不作为普通内存段装载 |
+| `PT_INTERP`  | 动态链接器路径  | 需要相应动态链接支持     |
+
+ 理解 `p_offset`、`p_vaddr`、`p_filesz` 和 `p_memsz`这四个字段是理解 ELF Loader 的关键。假设某个 `PT_LOAD`：
+
+| 字段       | 示例      | 含义                      |
+| ---------- | --------- | ------------------------- |
+| `e_phoff`  | `0x1000`  | 程序段在 ELF 文件中的偏移 |
+| `p_vaddr`  | `0x10000` | 程序段的目标虚拟地址      |
+| `p_filesz` | 5000      | 文件中有多少有效字节      |
+| `p_memsz`  | 9000      | 在进程内存中占多少字节    |
+
+注意：`p_memsz` 可以大于 `p_filesz`，超出的内存字节应当初始化为零，这是 ELF 规范明确规定的。
+
+![elf段的文件大小和进程大小](./assets/elf段的文件大小和进程大小.png)
+
+---
+
+函数首先**遍历`Program Header`**，首先获取每个可加载的程序段描述符，**给每个可加载的程序段分配物理页并完成映射。**
+
+<img src="./assets/解析程序段表.png" alt="解析程序段表" style="zoom:80%;" />
+
+定义：
+
+``` c
+#define PGROUNDUP(sz)  (((sz)+PAGE_SIZE-1) & ~(PAGE_SIZE-1))
+#define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE-1))
+```
+
+假设：
+
+```c
+segment_start = 0x1800
+segment_end   = 0x4000
+PAGE_SIZE     = 0x1000
+```
+
+那么：
+
+```c
+first_page = PGROUNDDOWN(0x1800);
+```
+
+结果为：`first_page = 0x1000`。因为程序段虽然从 `0x1800` 开始，但包含的第一个物理页对应的虚拟地址页边界是 `0x1000`。接着：
+
+```c
+end_page = PGROUNDUP(0x4000);
+```
+
+结果仍然是：`end_page = 0x4000`.
+
+
+``` c
+/* 解析 program header, 把各 PT_LOAD 段装载到 proc 页表, 并计算 ustack/base_size */
+int load_segment(elf64_ehdr_t *ehdr, ProcessControlBlock* proc)
+{
+    elf64_phdr_t *phdr;
+    u64 max_end_va = 0;
+
+    // 遍历每个程序段描述符
+    for (size_t i = 0; i < ehdr->e_phnum; i++) {
+        // 得到当前程序段描述符在 ELF 文件中的地址
+        phdr = (elf64_phdr_t*)((u8*)ehdr + ehdr->e_phoff + (u64)ehdr->e_phentsize * i);
+        if (phdr->p_type != PT_LOAD)
+            continue;
+        u64 end = phdr->p_vaddr + phdr->p_memsz;
+        if (end < phdr->p_vaddr || phdr->p_filesz > phdr->p_memsz)
+            return -1;
+        if (end > max_end_va) max_end_va = end;
+    }
+
+    u64 stack_limit = THREAD_TRAPFRAME(MAX_THREADS - 1) - (2 * MAX_THREADS + 2) * PAGE_SIZE;
+    if (max_end_va > stack_limit - PAGE_SIZE)
+        return -1;
+	
+    // 计算得到 ELF 文件加载段的最高虚拟地址 和 用户栈的 base 地址
+    proc->base_size   = PGROUNDUP(max_end_va);
+    proc->ustack_base = proc->base_size;
+
+    // 遍历每个程序段描述符
+    for (size_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        // 得到当前程序段描述符在 ELF 文件中的地址
+        phdr = (elf64_phdr_t*)((u8*)ehdr + ehdr->e_phoff + (u64)ehdr->e_phentsize * i);
+        if (phdr->p_type == PT_LOAD)
+        {
+            // 在内核虚拟地址空间中加载的起始地址和结束地址
+            u64 segment_start = phdr->p_vaddr;
+            u64 segment_end   = segment_start + phdr->p_memsz;
+            u64 file_end      = segment_start + phdr->p_filesz;
+            if (phdr->p_memsz == 0)
+                continue;
+            
+            // 把 ELF 中的段权限 改为 页表权限
+            u8 map_perm = PTE_U | flags_to_mmap_prot(phdr->p_flags);
+            // 按页加载内存
+            u64 first_page = PGROUNDDOWN(segment_start);
+            u64 end_page   = PGROUNDUP(segment_end);
+            // 从宽范围页开始遍历映射（包括 .bss 页）
+            for (u64 page_va = first_page; page_va < end_page; page_va += PAGE_SIZE)
+            {
+                PageTableEntry* pte = find_pte(&proc->pagetable,
+                                               floor_virts(virt_addr_from_size_t(page_va)));
+                u64 paddr;
+                 // 虚拟页还未映射物理页
+                if (pte == NULL)
+                {
+                    PhysPageNum ppn = kalloc(); // kalloc 已将新页清零
+                    if (!ppn.value) return -1;
+                    paddr = phys_addr_from_phys_page_num(ppn).value;
+                    if (PageTable_try_map(&proc->pagetable, page_va, paddr, map_perm) < 0) {
+                        kfree(ppn);
+                        return -1;
+                    }
+                }
+                // 虚拟页已经完成了映射
+                else
+                {
+                    assert(pte->bits & PTE_U);
+                    // #define PTE2PA(pte) (((pte) >> 10) << 12)
+                    paddr = PTE2PA(pte->bits);
+                    pte->bits |= map_perm;
+                }
+                // 当前映射页的结束地址
+                u64 page_end = page_va + PAGE_SIZE;
+                // 只 copy 页中有数据的地址（取当前页的起始地址与程序段起始地址中的较大值）
+                u64 copy_start = page_va > segment_start ? page_va : segment_start;
+                // 只 copy 页中有数据的地址（取当前页的结束地址与文件数据结束地址中的较小值）
+                u64 copy_end = page_end < file_end ? page_end : file_end;
+                
+                if (copy_start < copy_end)
+                    // (copy_start - page_va) ：数据在当前页面中的偏移
+                    memcpy((void*)(paddr + copy_start - page_va),
+                           (u8*)ehdr + phdr->p_offset + (copy_start - segment_start),
+                           copy_end - copy_start);
+
+                // 清除 .bss 区
+                u64 zero_start = page_va > file_end ? page_va : file_end;
+                u64 zero_end = page_end < segment_end ? page_end : segment_end;
+                if (zero_start < zero_end)
+                    memset((void*)(paddr + zero_start - page_va), 0, zero_end - zero_start);
+            }
+        }
+    }
+
+    return 0;
+}
+```
+
+
+
+### 进程
+
+#### 进程管理
+
+```c
+typedef struct ProcessControlBlock
+{
+    int pid;
+    struct ProcessControlBlock* parent;
+    PageTable pagetable;		// 根页表的物理地址
+    u64 base_size;              // ELF 映射区结束地址（页对齐）
+    u64 ustack_base;            // 进程虚拟地址空间中，给线程栈预留的空间的起始地址
+    u64 entry;
+    int exit_code;
+    int live_threads;
+    bool used;
+    bool zombie;
+    bool tid_used[MAX_THREADS];
+} ProcessControlBlock;
+```
+
+由于 CPU 中的**最小调度单位是线程**，因此通常都是**依据当前运行的线程来反向获取进程**：
+
+``` c
+ProcessControlBlock *current_proc(void)
+{
+    TaskControlBlock *t = current_thread();
+    return t ? t->process : 0;
+}
+```
+
+由于**页表等资源数据进程**，存储在`PCB`中，因此通过`current_thread()`获取当前运行的线程的`TID`，然后获取这个`TID`所属的`PID`，然后获取这个线程的根页表：
+
+``` c
+u64 current_thread_user_token(void) {
+    return MAKE_SATP(current_proc()->pagetable.root_ppn.value);
+}
+```
+
+#### **进程的用户态虚拟地址空间分布**
+
+`ustack_base` 在加载 ELF 时确定：`load_segment () `找出所有 `PT_LOAD `段的最高结束地址 `max_end_va`，将它向上按页对齐，然后赋给 `proc->ustack_base`。
+
+![用户态地址空间分布](./assets/用户态地址空间分布.png)
+
+### 线程
+
+#### 线程管理
+
+``` c
+typedef struct TaskControlBlock
+{
+    TaskState task_state;
+    
+    int tid;						// 线程号
+    ProcessControlBlock* process;	// 所属进程
+    
+    TaskContext task_context;
+    
+    u64 trap_cx_paddr;				// 方便在内核态（内核根页表）的 trap_handler 中可以获取用户态现场
+    u64 trap_cx_va;
+    
+    u64 kstack;                 	// 内核栈顶（计算得到）
+    u64 kstack_paddr;
+    u64 ustack;                 	// 用户栈顶（计算得到）
+    
+    int exit_code;
+} TaskControlBlock;
+```
+
+使用一个位于`.bss`区的`TaskControlBlock`数组来存储所有线程的信息：
+
+``` c
+#define MAX_THREADS 32
+static TaskControlBlock tasks[MAX_THREADS];
+```
+
+使用一个全局静态变量来记录当前是在运行哪个线程：
+
+``` c
+static int current_slot = -1;
+```
+
+因此可以获取当前 CPU 正在运行的线程的 `TID`：
+
+``` c
+TaskControlBlock *current_thread(void)
+{
+    return current_slot >= 0 ? &tasks[current_slot] : 0;
+}
+```
+
+#### 创建线程
+
+``` c
+void app_init(size_t app_id)
+{
+    ProcessControlBlock *p = &processes[app_id];
+    if (!p->used || !make_thread(p, p->entry, 0, 0)) panic("app_init: no thread");
+}
+
+
+static TaskControlBlock *make_thread(ProcessControlBlock *p, u64 entry, u64 arg, u64 return_stub)
+```
+
+##### 分配 `TID` 和 `TCB`
+
+``` c
+// 分配这个进程下还可用的 TID
+int tid = alloc_tid(p);
+if (tid < 0) return 0;
+
+// 在全局线程 TaskControlBlock 数组中找到一个对应的槽位
+TaskControlBlock *t = 0;
+for (int i = 0; i < MAX_THREADS; i++){
+    if (tasks[i].task_state == UnInit)
+    { 
+        t = &tasks[i];
+        break;
+    }
+}
+if (!t) { p->tid_used[tid] = false; return 0; }	// 全局没有可用的线程位了，撤销这个进程分配的 TID
+
+memset(t, 0, sizeof(*t));
+
+// 标记所属进程和对应的 TID
+t->tid = tid;
+t->process = p;
+```
+
+辅助函数为：
+
+``` c
+static int alloc_tid(ProcessControlBlock *p)
+{
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (!p->tid_used[i])
+        { 
+            p->tid_used[i] = true; 
+         	return i;
+        }
+    return -1;
+}
+```
+
+##### 依据`TID`分配线程的`TRAPFRAME`
+
+![分配线程的trapframe](./assets/分配线程的trapframe.png)
+
+```c
+// Sv39的最大地址空间 512G
+#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+//跳板页开始位置
+#define TRAMPOLINE (MAXVA - PAGE_SIZE)
+// 线程的TRAPFRAME
+#define THREAD_TRAPFRAME(tid) (TRAMPOLINE - ((u64)(tid) + 1) * PAGE_SIZE)
+
+// 在 TCB 中记录这个线程的 TRAPFRAME 的虚拟地址（所有线程共享一个虚拟地址空间）
+t->trap_cx_va = THREAD_TRAPFRAME(tid);
+
+// 分配物理地址
+PhysPageNum page = kalloc();
+if (!page.value) goto fail;
+t->trap_cx_paddr = phys_addr_from_phys_page_num(page).value;
+
+// 完成地址映射
+if (PageTable_try_map(&p->pagetable, t->trap_cx_va, t->trap_cx_paddr, PTE_R | PTE_W) < 0) {
+    kfree(floor_phys(phys_addr_from_size_t(user_stack_pa)));
+    goto fail;
+}
+```
+
+##### 依据`TID`分配映射线程的用户栈
+
+![映射线程栈](./assets/映射线程栈.png)
+
+首先检查用户栈区域与 TrapFrame 区域之间是否存在足够的地址空间：
+
+``` c
+if (p->ustack_base > THREAD_TRAPFRAME(MAX_THREADS - 1) - (2 * MAX_THREADS + 2) * PAGE_SIZE) {
+    memset(t, 0, sizeof(*t));
+    p->tid_used[tid] = false;
+    return 0;
+}
+```
+
+然后**从`PCB`中找到这个进程分配的这个进程的虚拟地址空间中留给线程用做栈的虚拟地址起始**，然后**依据`TID`找到这个线程的用户栈的起始虚拟地址和栈顶**，每个线程分配一个页面作为用户栈，中间留一个页面的间隔：
+
+``` c
+u64 stack_bottom = p->ustack_base + ((u64)tid * 2 + 1) * PAGE_SIZE;
+t->ustack = stack_bottom + PAGE_SIZE;
+```
+
+假设 `PAGE_SIZE = 4096`，并且 `p->ustack_base = B`。那么：
+
+| TID  | `stack_bottom` | 初始用户 SP |
+| ---- | -------------- | ----------- |
+| 0    | \(B+4096\)     | \(B+8192\)  |
+| 1    | \(B+12288\)    | \(B+16384\) |
+| 2    | \(B+20480\)    | \(B+24576\) |
+
+<img src="./assets/线程用户栈映射.png" alt="线程用户栈映射" style="zoom:80%;" />
+
+接下来进行条件检查：
+
+| 条件                                     | 意图                                |
+| ---------------------------------------- | ----------------------------------- |
+| `t->ustack <= stack_bottom`              | 加法溢出或无效栈范围                |
+| `t->ustack >= t->trap_cx_va - PAGE_SIZE` | 用户栈侵入 TrapFrame 附近的保留区域 |
+| `find_pte(...stack_bottom)`              | 用户栈页面是否已经被映射            |
+| `find_pte(...trap_cx_va)`                | TrapFrame 虚拟地址是否已经被映射    |
+
+最后两个判断依赖 `find_pte()` 的实际语义：这里假定它在目标页面已有有效映射时返回非空结果。另外，`find_pte()` 如果只检查页表项是否存在，而不检查 `PTE_V`，那么还需要确认它是否会将无效页表项误认为已映射。如果任一检查失败，就跳转到统一的失败清理路径。
+
+``` c
+if (t->ustack <= stack_bottom || t->ustack >= t->trap_cx_va - PAGE_SIZE ||
+    find_pte(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom))) ||
+    find_pte(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va))))
+    goto fail;
+```
+
+最后**分配物理页，并完成映射**：
+
+``` c
+// 分配用户栈的起始地址
+page = kalloc();
+if (!page.value) goto fail;
+u64 user_stack_pa = phys_addr_from_phys_page_num(page).value;
+
+// 映射用户栈
+if (PageTable_try_map(&p->pagetable, stack_bottom, user_stack_pa, PTE_R | PTE_W | PTE_U) < 0) {
+    kfree(floor_phys(phys_addr_from_size_t(user_stack_pa)));
+    goto fail;
+}
+```
+
+
+##### 初始化`TrapContext` 
+
+在`__alltrap`中在`TRAPFRAME`中保存了`TrapContext`后，接下来就需要把根页表切换为内核态的根页表，因此需要在`TrapContext`中记录：
+
+``` c
+reg_t kernel_satp;     	//内核地址空间的satp值
+```
+
+切换完`satp`之后需要将`SP`指向内核地址空间中的内核栈，因此需要在`TrapContext`中添加一个元素来保存应用程序的内核栈`SP`。因此在`TrapContext`中需要有：
+
+``` c
+reg_t kernel_sp;       	//内核栈的虚拟地址
+```
+
+`__alltrap`最后需要跳转到`trap_handler`执行`trap_handler`：
+
+``` assembly
+sfence.vma
+jr t1		# t1 中存储的内核虚拟地址空间中 trap_handler的地址
+```
+
+因此也需要保存：
+
+``` c
+reg_t trap_handler;    	//内核虚拟地址空间 trap handler 的地址
+```
+
+---
+
+> 为什么把每个应用程序的 TrapContext 保存在应用的虚拟地址空间？
+
+每个任务都有自己的根页表，内核程序也有自己的根页表。每次用户态任务刚进入`__alltrap`时，`satp`仍然是用户态任务的根页表。
+
+假设把`sscratch`寄存器选为内核/用户栈`SP`的切换，把`TrapContext`保存在内核栈中：在`__alltrap`时通过`sscratch`寄存器把`SP`指向内核栈，由于`satp`还是用户的根页表因此还是无法找到`TrapContext`，也就无法切换`satp`；**因此本系统设计将任务的`TrapContext`保存到用户虚拟地址空间的`TrapContext`页**。
+
+因此`sscratch`寄存器作用（`__alltrap`时使用）：存储`TRAPFRAME`，也就是用户虚拟地址空间中存储`TrapContext`页的地址。`__alltrap`时读取`sscratch`中的`TRAPFRAME`的地址，将其赋给`SP`寄存器（`sscratch`寄存器保存用户栈的`SP`的值），通过`SP`寄存器作为基地址来保存`TrapContext`，`__restore`时将`trap_return()`通过`a0`寄存器传递的`TrapContext`页地址写入`sscratch`寄存器。
+
+---
+
+`TrapContext`中决定线程开始运行时的寄存器状态：
+
+- `sepc`：用户程序入口地址。
+- `sp`：用户栈指针。
+- `sstatus`：执行 `sret` 时应恢复的状态。
+
+<img src="./assets/trapcontext布局.png" alt="trapcontext布局" style="zoom: 80%;" />
+
+``` c
+// 获取这个线程的 TrapContext
+TrapContext *cx = (TrapContext *)t->trap_cx_paddr;
+memset(cx, 0, sizeof(*cx));
+cx->sstatus = (r_sstatus() & ~SSTATUS_SPP) | SSTATUS_SPIE;
+cx->sepc = entry;						// 这个线程的执行函数
+cx->sp = t->ustack;						// 将 SP 指针指向用户栈
+cx->ra = return_stub;					// 返回函数指向传入的函数
+cx->a0 = arg;							// 将传入的参数给 a0 寄存器
+
+cx->kernel_satp = kernel_satp;			// 内核根页表地址是全局变量
+cx->kernel_sp   = t->kstack;			// 线程的内核栈在内核虚拟地址空间中的虚拟地址
+cx->trap_handler = (u64)trap_handler;	// trap_handler 在内核虚拟地址空间中的虚拟地址
+
+t->task_context = tcx_init(t->kstack);	
+t->task_state = Ready;
+p->live_threads++;
+return t;
+```
+
+##### 初始化`TaskContext`
+
+假设 CPU 正在运行线程 A，此时操作系统决定切换到线程 B。线程 A 和线程 B 的内核任务都需要保存自己的执行状态，否则线程 A 的内核任务下次恢复执行时，CPU 就不知道应该从哪里继续、使用哪个栈，以及此前保存的寄存器值是什么。因此每个线程的内核态任务都有一个 `TaskContext` 结构体：
+
+``` c
+/* S模式的任务上下文 */
+typedef struct TaskContext
+{
+	reg_t ra;	// 返回地址
+	reg_t sp;	// 栈指针
+    
+	reg_t s0;	//	s0 - s11 是 callee-saved registers，需要被调用者保存（调用完毕后进行恢复）
+	reg_t s1;
+	reg_t s2;
+	reg_t s3;
+	reg_t s4;
+	reg_t s5;
+	reg_t s6;
+	reg_t s7;
+	reg_t s8;
+	reg_t s9;
+	reg_t s10;
+	reg_t s11;
+}TaskContext;
+```
+
+初始化存储在内核栈中的`TaskContext`：它决定调度器第一次切换到这个任务时，从哪个内核执行位置开始：注意 首个任务的`task_ctx.ra = (reg_t)trap_return`，因此从临时任务切换到首个任务执行`ret`后，是**接着从`trap_return`执行**。
+
+``` c
+static TaskContext tcx_init(u64 kstack_top)
+{
+    TaskContext cx;
+    memset(&cx, 0, sizeof(cx));
+    cx.ra = (reg_t)trap_return;
+    cx.sp = kstack_top;
+    return cx;
+}
+```
+
 ## 内核地址空间映射管理
 
-<img src="./assets/内核虚拟地址空间分布.png" alt="内核虚拟地址空间分布" style="zoom:67%;" />
-
 ### 内核虚拟地址空间结构
+
+![内核虚拟地址空间](./assets/内核虚拟地址空间.png)
+
+
 
 现在的内核的地址结构如上图所示。内核的起始地址是`KERNBASE = 0x8020 0000`，内核的代码被编译器编译后由代码段和数据段组成，可以在`os.map`中看见各段的地址空间。代码段的结束地址设定为`etext`，数据段结束的地址设定为`kernelend`。然后指定从内核结束后向上约 127MB 的空间为空闲内存，可以给应用使用。上述空间指定是在`os.ld`文件中规划的（定义了两个符号：`PROVIDE(etext = .)和PROVIDE(_data_end = .)`，可以用C语言拿到值）：
 
@@ -9240,161 +10652,61 @@ extern char trampoline[];
 PageTable kvmmake(void)
 {
     PageTable pt;
-    PhysPageNum root_ppn =  kalloc();	// 分配一页物理页得到根页表的物理页号
+    PhysPageNum root_ppn =  kalloc();
     pt.root_ppn = root_ppn;
 
-    // map kernel text executable and read-only.（这部分的恒等映射也包含 trampoline 页）
+    // map kernel text executable and read-only.
     PageTable_map(&pt,virt_addr_from_size_t(KERNBASE),phys_addr_from_size_t(KERNBASE), \
                     (u64)etext-KERNBASE , PTE_R | PTE_X ) ;
     // map kernel data and the physical RAM we'll make use of. 
     PageTable_map(&pt,virt_addr_from_size_t((u64)etext),phys_addr_from_size_t((u64)etext ), \
                     PHYSTOP - (u64)etext , PTE_R | PTE_W ) ;
-    // 同时也把内核虚拟地址空间中的最高页的跳板页映射到 trampoline 物理页
+    // map the trampoline for trap entry/exit to the highest virtual address in the kernel.
     PageTable_map(&pt, virt_addr_from_size_t(TRAMPOLINE), phys_addr_from_size_t((u64)trampoline), \
                     PAGE_SIZE, PTE_R | PTE_X );
 
-    //allocate and map a kernel stack for each process.
-    proc_mapstacks(&pt);
-    
     return pt;
 }
 
 ```
 
-**然后遍历所有的应用程序，为每个应用程序映射一个内核栈：**内核栈的映射是两页两页跳着映射，只映射一页，另外一页用来做栈保护，如果应用程序的用户栈超过了一页就会触发缺页异常。
+### 依据`TID`分配映射线程的内核栈
 
-<img src="./assets/内核栈映射-1792461817772-1.png" alt="内核栈映射" style="zoom:50%;" />
+<img src="./assets/线程内核栈映射.png" alt="线程内核栈映射" style="zoom:67%;" />
+
+在`make_thread()`中同样依据`TID`分配线程的内核栈，注意是**在内核的虚拟地址空间中的`TRAMPOLINE`页下分配，使用内核根页表**：
 
 ``` c
-/* 为每个应用程序映射内核栈 */
-void proc_mapstacks(PageTable* kpgtbl)
-{
-  struct TaskControlBlock *p;
-  // 遍历所有应用程序
-  for(p = tasks; p < &tasks[MAX_TASKS]; p++) {
-    char *pa = (char*)phys_addr_from_phys_page_num(kalloc()).value;	// 分配一页物理地址
-    if(pa == 0)
-      panic("kalloc");
-      
-    u64 va = KSTACK((int) (p - tasks));
-    /* 槽位另一页保持未映射, 相邻未映射页即守卫页, 栈溢出会触发异常而非静默踩踏 */
-    PageTable_map(kpgtbl, virt_addr_from_size_t(va), phys_addr_from_size_t((u64)pa), \
-                  PAGE_SIZE, PTE_R | PTE_W);
-    // 给应用内核栈赋值: 栈顶在映射页高地址端, 向下生长
-    p->kstack = va + PAGE_SIZE;
-  }
-}
-
+//跳板页开始位置
+#define TRAMPOLINE (MAXVA - PAGE_SIZE)
 //计算应用内核栈的地址，每个应用的内核栈下都有一个无效的守卫页
-#define KSTACK(p) (TRAMPOLINE - ( (p)+1)* 2*PAGE_SIZE)
+#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PAGE_SIZE)
+
+u64 kstack_bottom = KSTACK((int)(t - tasks));
+t->kstack = kstack_bottom + PAGE_SIZE;
+
+page = kalloc();
+if (!page.value) { kfree(floor_phys(phys_addr_from_size_t(user_stack_pa))); goto fail; }
+t->kstack_paddr = phys_addr_from_phys_page_num(page).value;
+
+if (PageTable_try_map(&kernel_pagetable, kstack_bottom, t->kstack_paddr, PTE_R | PTE_W) < 0)
+    goto fail;
+
+sfence_vma();
 ```
 
 开启SV39的分页模式，只需要去写`satp`寄存器的值就好了，设置为`sv39`分页模式，然后将`root_ppn`写入。（这里有快表的使用）
 
 ``` c
-#define SATP_SV39 (8L << 60)
-#define MAKE_SATP(pagetable) (SATP_SV39 | (((u64)pagetable)))
-
 void kvminithart()
 {
   // wait for any previous writes to the page table memory to finish.
-  printk("satp:%lx\n",MAKE_SATP(kernel_pagetable.root_ppn.value));
   sfence_vma();
-  
-  w_satp(MAKE_SATP(kernel_pagetable.root_ppn.value));
-  
+  w_satp(kernel_satp);
   // flush stale entries from the TLB.
   sfence_vma();
   reg_t satp = r_satp();
-
-  printk("satp:%lx\n",satp);  
 }
-```
-
-## 应用地址空间映射管理
-
-用户态虚拟地址空间分布如图：
-
-![用户态地址空间](./assets/用户态地址空间.png)
-
-### 跳板页
-
-用户虚拟地址空间中的`trampoline`与内核虚拟地址空间中的`trampoline`映射到物理地址空间中相同的页。
-
-> `__alltraps`在换完`satp`中的页表地址之后，**还有处于用户态虚拟地址空间中的指令需要执行**（执行完`csrw satp t0`之后会自动加载下一条指令的地址执行`jr t1`），**为了保证地址空间切换时指令执行的连续性**，**用户态虚拟地址空间和内核的内核态虚拟地址空间的指令所在页的映射方式应该都将其映射在同一个物理页上**，称之为**跳板页**（`trampoline`）。（CPU 的下一个需要执行的指令的地址也需要进行MMU转换）
->
-> 位于跳板页的内容为：
->
-> ``` assembly
-> .section .text.trampoline
-> .globl __alltraps
-> .align 3
-> __alltraps:
-> ...
-> .globl __restore
-> .align 3
-> __restore:
-> ...
-> ```
->
-
-### 创建根页表、映射 跳板页 和 TRAPFRAME 页
-
-在 `void load_app(size_t app_id)`中读取完程序文件的`ELF`文件并校验完魔数后调用：
-
-``` c
-// 在 void load_app(size_t app_id) 中调用
-TaskControlBlock* task_create_pt(size_t app_id)
-{
-  if(_top < MAX_TASKS)
-  {
-
-    // 分配 TRAPFRAME 页
-    proc_trap(&tasks[app_id]);
-    // 创建根页表，映射跳板页和 TRAPFRAME 页
-    proc_pagetable(&tasks[app_id]); 
-    _top++;
-  }
-  
-  return &tasks[app_id];
-}
-
-
-/* 为应用程序分配一页物理内存保存 TrapContext，同时初始化 trapcontext 和 taskcontext */
-void proc_trap(struct TaskControlBlock *p)
-{
-  // 为程序分配一页保存 TrapContext 的物理页，并保存物理地址
-  p->trap_cx_paddr = phys_addr_from_phys_page_num(kalloc()).value;
-  // 初始化任务上下文全部为0
-  memset(&p->task_context, 0 ,sizeof(p->task_context));
-}
-
-
-extern char trampoline[];
-/* 为用户程序创建根页表，并映射 跳板页 和 TrapContext页*/
-void proc_pagetable(struct TaskControlBlock *p)
-{
-  // 创建一个空的用户的页表，分配一页内存
-  PageTable pagetable;
-  pagetable.root_ppn = kalloc();
-  
-  //映射跳板页
-  PageTable_map(&pagetable,virt_addr_from_size_t(TRAMPOLINE),phys_addr_from_size_t((u64)trampoline),\
-                PAGE_SIZE , PTE_R | PTE_X);
-    
-  //映射用户程序的 TrapContext 页
-  PageTable_map(&pagetable,virt_addr_from_size_t(TRAPFRAME),phys_addr_from_size_t(p->trap_cx_paddr), \
-                PAGE_SIZE, PTE_R | PTE_W );
-    
-  p->pagetable = pagetable;
-}
-
-// Sv39的最大地址空间 512G
-#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
-//跳板页开始位置
-#define TRAMPOLINE (MAXVA - PAGE_SIZE)
-//Trap页开始位置
-#define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)
 ```
 
 # 实现线程/进程调度
@@ -9622,285 +10934,7 @@ intr_get()
 #endif
 ```
 
-## 进程
-
-### `ProcessControlBlock`
-
-```c
-typedef struct ProcessControlBlock
-{
-    int pid;
-    struct ProcessControlBlock* parent;
-    PageTable pagetable;		// 根页表的物理地址
-    u64 base_size;              // ELF 映射区结束地址（页对齐）
-    u64 ustack_base;            // 进程虚拟地址空间中，给线程栈预留的空间的起始地址
-    u64 entry;
-    int exit_code;
-    int live_threads;
-    bool used;
-    bool zombie;
-    bool tid_used[MAX_THREADS];
-} ProcessControlBlock;
-```
-
-## 线程
-
-### `TaskControlBlock`
-
-``` c
-typedef struct TaskControlBlock
-{
-    TaskState task_state;
-    
-    int tid;						// 线程号
-    ProcessControlBlock* process;	// 所属进程
-    
-    TaskContext task_context;
-    
-    u64 trap_cx_paddr;				// 方便在内核态（内核根页表）的 trap_handler 中可以获取用户态现场
-    u64 trap_cx_va;
-    
-    u64 kstack;                 	// 内核栈顶（计算得到）
-    u64 kstack_paddr;
-    u64 ustack;                 	// 用户栈顶（计算得到）
-    
-    int exit_code;
-} TaskControlBlock;
-```
-
-### 创建线程
-
-``` c
-static TaskControlBlock *make_thread(ProcessControlBlock *p, u64 entry, u64 arg, u64 return_stub)
-```
-
-#### 分配 `TID` 和 `TCB`
-
-``` c
-// 分配这个进程下还可用的 TID
-int tid = alloc_tid(p);
-if (tid < 0) return 0;
-
-// 在全局线程 TaskControlBlock 数组中找到一个对应的槽位
-TaskControlBlock *t = 0;
-for (int i = 0; i < MAX_THREADS; i++){
-    if (tasks[i].task_state == UnInit)
-    { 
-        t = &tasks[i];
-        break;
-    }
-}
-if (!t) { p->tid_used[tid] = false; return 0; }	// 全局没有可用的线程位了，撤销这个进程分配的 TID
-
-memset(t, 0, sizeof(*t));
-
-// 标记所属进程和对应的 TID
-t->tid = tid;
-t->process = p;
-```
-
-辅助函数为：
-
-``` c
-static int alloc_tid(ProcessControlBlock *p)
-{
-    for (int i = 0; i < MAX_THREADS; i++)
-        if (!p->tid_used[i])
-        { 
-            p->tid_used[i] = true; 
-         	return i;
-        }
-    return -1;
-}
-```
-
-#### 依据`TID`分配线程的`TRAPFRAME`
-
-```c
-#define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)	// 进程的 TRAPFRAME
-#define THREAD_TRAPFRAME(tid) (TRAMPOLINE - ((u64)(tid) + 1) * PAGE_SIZE)	// 线程的 TRAPFRAME
-
-// 在 TCB 中记录这个线程的 TRAPFRAME 的虚拟地址（所有线程共享一个虚拟地址空间）
-t->trap_cx_va = THREAD_TRAPFRAME(tid);
-
-// 分配物理地址
-PhysPageNum page = kalloc();
-if (!page.value) goto fail;
-t->trap_cx_paddr = phys_addr_from_phys_page_num(page).value;
-
-// 完成地址映射
-if (PageTable_try_map(&p->pagetable, t->trap_cx_va, t->trap_cx_paddr, PTE_R | PTE_W) < 0) {
-    kfree(floor_phys(phys_addr_from_size_t(user_stack_pa)));
-    goto fail;
-}
-```
-
-#### 依据`TID`分配线程的用户（内核）栈
-
-首先检查用户栈区域与 TrapFrame 区域之间是否存在足够的地址空间：
-
-``` c
-if (p->ustack_base > THREAD_TRAPFRAME(MAX_THREADS - 1) - (2 * MAX_THREADS + 2) * PAGE_SIZE) {
-    memset(t, 0, sizeof(*t));
-    p->tid_used[tid] = false;
-    return 0;
-}
-```
-
-然后**从`PCB`中找到这个进程分配的这个进程的虚拟地址空间中留给线程用做栈的虚拟地址起始**，然后**依据`TID`找到这个线程的用户栈的起始虚拟地址和栈顶**，每个线程分配一个页面作为用户栈，中间留一个页面的间隔：
-
-``` c
-u64 stack_bottom = p->ustack_base + ((u64)tid * 2 + 1) * PAGE_SIZE;
-t->ustack = stack_bottom + PAGE_SIZE;
-```
-
-假设 `PAGE_SIZE = 4096`，并且 `p->ustack_base = B`。那么：
-
-| TID  | `stack_bottom` | 初始用户 SP |
-| ---- | -------------- | ----------- |
-| 0    | \(B+4096\)     | \(B+8192\)  |
-| 1    | \(B+12288\)    | \(B+16384\) |
-| 2    | \(B+20480\)    | \(B+24576\) |
-
-<img src="./assets/线程用户栈映射.png" alt="线程用户栈映射" style="zoom:80%;" />
-
-接下来进行条件检查：
-
-| 条件                                     | 意图                                |
-| ---------------------------------------- | ----------------------------------- |
-| `t->ustack <= stack_bottom`              | 加法溢出或无效栈范围                |
-| `t->ustack >= t->trap_cx_va - PAGE_SIZE` | 用户栈侵入 TrapFrame 附近的保留区域 |
-| `find_pte(...stack_bottom)`              | 用户栈页面是否已经被映射            |
-| `find_pte(...trap_cx_va)`                | TrapFrame 虚拟地址是否已经被映射    |
-
-最后两个判断依赖 `find_pte()` 的实际语义：这里假定它在目标页面已有有效映射时返回非空结果。另外，`find_pte()` 如果只检查页表项是否存在，而不检查 `PTE_V`，那么还需要确认它是否会将无效页表项误认为已映射。如果任一检查失败，就跳转到统一的失败清理路径。
-
-``` c
-if (t->ustack <= stack_bottom || t->ustack >= t->trap_cx_va - PAGE_SIZE ||
-    find_pte(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom))) ||
-    find_pte(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va))))
-    goto fail;
-```
-
-最后**分配物理页，并完成映射**：
-
-``` c
-// 分配用户栈的起始地址
-page = kalloc();
-if (!page.value) goto fail;
-u64 user_stack_pa = phys_addr_from_phys_page_num(page).value;
-
-// 映射用户栈
-if (PageTable_try_map(&p->pagetable, stack_bottom, user_stack_pa, PTE_R | PTE_W | PTE_U) < 0) {
-    kfree(floor_phys(phys_addr_from_size_t(user_stack_pa)));
-    goto fail;
-}
-```
-
----
-
-同样依据`TID`分配线程的内核栈，注意是**映射的内核根页表**：
-
-``` c
-//计算应用内核栈的地址，每个应用的内核栈下都有一个无效的守卫页
-#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PAGE_SIZE)
-
-u64 kstack_bottom = KSTACK((int)(t - tasks));
-t->kstack = kstack_bottom + PAGE_SIZE;
-
-page = kalloc();
-if (!page.value) { kfree(floor_phys(phys_addr_from_size_t(user_stack_pa))); goto fail; }
-t->kstack_paddr = phys_addr_from_phys_page_num(page).value;
-
-if (PageTable_try_map(&kernel_pagetable, kstack_bottom, t->kstack_paddr, PTE_R | PTE_W) < 0)
-    goto fail;
-
-sfence_vma();
-```
-
-#### 初始化`TrapContext` / `TaskContext`
-
-在`__alltrap`中在`TRAPFRAME`中保存了`TrapContext`后，接下来就需要把根页表切换为内核态的根页表，因此需要在`TrapContext`中记录：
-
-``` c
-reg_t kernel_satp;     	//内核地址空间的satp值
-```
-
-切换完`satp`之后需要将`SP`指向内核地址空间中的内核栈，因此需要在`TrapContext`中添加一个元素来保存应用程序的内核栈`SP`。因此在`TrapContext`中需要有：
-
-``` c
-reg_t kernel_sp;       	//内核栈的虚拟地址
-```
-
-`__alltrap`最后需要跳转到`trap_handler`执行`trap_handler`：
-
-``` assembly
-sfence.vma
-jr t1		# t1 中存储的内核虚拟地址空间中 trap_handler的地址
-```
-
-因此也需要保存：
-
-``` c
-reg_t trap_handler;    	//内核虚拟地址空间 trap handler 的地址
-```
-
----
-
-> 为什么把每个应用程序的 TrapContext 保存在应用的虚拟地址空间？
-
-每个任务都有自己的根页表，内核程序也有自己的根页表。每次用户态任务刚进入`__alltrap`时，`satp`仍然是用户态任务的根页表。
-
-假设把`sscratch`寄存器选为内核/用户栈`SP`的切换，把`TrapContext`保存在内核栈中：在`__alltrap`时通过`sscratch`寄存器把`SP`指向内核栈，由于`satp`还是用户的根页表因此还是无法找到`TrapContext`，也就无法切换`satp`；**因此本系统设计将任务的`TrapContext`保存到用户虚拟地址空间的`TrapContext`页**。
-
-因此`sscratch`寄存器作用（`__alltrap`时使用）：存储`TRAPFRAME`，也就是用户虚拟地址空间中存储`TrapContext`页的地址。`__alltrap`时读取`sscratch`中的`TRAPFRAME`的地址，将其赋给`SP`寄存器（`sscratch`寄存器保存用户栈的`SP`的值），通过`SP`寄存器作为基地址来保存`TrapContext`，`__restore`时将`trap_return()`通过`a0`寄存器传递的`TrapContext`页地址写入`sscratch`寄存器。
-
----
-
-`TrapContext`中决定线程开始运行时的寄存器状态：
-
-- `sepc`：用户程序入口地址。
-- `sp`：用户栈指针。
-- `sstatus`：执行 `sret` 时应恢复的状态。
-
-<img src="./assets/trapcontext布局.png" alt="trapcontext布局" style="zoom: 80%;" />
-
-``` c
-// 获取这个线程的 TrapContext
-TrapContext *cx = (TrapContext *)t->trap_cx_paddr;
-memset(cx, 0, sizeof(*cx));
-cx->sstatus = (r_sstatus() & ~SSTATUS_SPP) | SSTATUS_SPIE;
-cx->sepc = entry;				// 这个线程的执行函数
-cx->sp = t->ustack;				// 将 SP 指针指向用户栈
-cx->ra = return_stub;			// 返回函数指向传入的函数
-cx->a0 = arg;					// 将传入的参数给 a0 寄存器
-
-cx->kernel_satp = kernel_satp;			// 内核根页表地址是全局变量
-cx->kernel_sp = t->kstack;				// 线程的内核栈在内核虚拟地址空间中的虚拟地址
-cx->trap_handler = (u64)trap_handler;	// trap_handler 在内核虚拟地址空间中的虚拟地址
-
-t->task_context = tcx_init(t->kstack);	
-t->task_state = Ready;
-p->live_threads++;
-return t;
-```
-
-初始化存储在内核栈中的`TaskContext`：它决定调度器第一次切换到这个任务时，从哪个内核执行位置开始：注意 首个任务的`task_ctx.ra = (reg_t)trap_return`，因此从临时任务切换到首个任务执行`ret`后，是**接着从`trap_return`执行**。
-
-``` c
-static TaskContext tcx_init(u64 kstack_top)
-{
-    TaskContext cx;
-    memset(&cx, 0, sizeof(cx));
-    cx.ra = (reg_t)trap_return;
-    cx.sp = kstack_top;
-    return cx;
-}
-```
-
 ## 实现 内核任务调度 和 Trap
-
-<img src="./assets/OS的完整启动流程.png" alt="OS的完整启动流程" style="zoom:80%;" />
 
 ### 触发`Trap`的完整链路
 
@@ -9970,33 +11004,75 @@ void run_first_task(void)
 }
 ```
 
-### 通过`__switch.S`切换线程的内核任务
+### 协作式任务调度（`sys_yield()`系统调用）
 
-假设 CPU 正在运行线程 A，此时操作系统决定切换到线程 B。线程 A 和线程 B 都需要保存自己的执行状态，否则线程 A 下次恢复执行时，CPU 就不知道应该从哪里继续、使用哪个栈，以及此前保存的寄存器值是什么。因此每个线程的内核态任务都有一个 `TaskContext` 结构体：
+让用户态程序调用`sys_yield()`系统调用主动放弃CPU的控制权，操作系统在 S 态进行任务切换，任务在操作系统切换完毕后，通过`__restore(pt_regs *next)`回到用户态执行切换后的任务。
+
+只有第一次执行应用程序A的时候的`ra`是`__restore`，当A任务执行完毕`__switch`后，它的`ra`就变成了`__switch`的下一条地址，就是`schedule()`函数执行完毕了。第二次B任务调用`__switch`切换回A的时候，此时就会返回到`__switch`的下一条地址执行，我们是在`__sys_yield()`中调用`schedule()`的，所以会依次完成函数调用返回，从`schedule()`返回`__sys_yield()`，再返回到`__SYSCALL`，最后返回到`trap_handler()`，而在本文开头提到过`trap_handler`执行完毕后会去执行`__restore`，所以这样A才能返回到用户空间程序继续执行。
 
 ``` c
-/* S模式的任务上下文 */
-typedef struct TaskContext
+size_t sys_yield(){
+    syscall(_NR_sched_yield, 0, 0, 0);
+}
+
+/*sys_yield-->ecall-->__alltrap-->trap_handler-->__SYSCALL--> __sys_yield-->schedule()-->__switch*/
+/*由于ra是被调用者保存的寄存器，因此内核栈中会层层保存这些函数的返回地址，最终返回到call trap_handler时ra的地址，也就是__restore*/
+void __sys_yield()
 {
-	reg_t ra;	// 返回地址
-	reg_t sp;	// 栈指针
+    schedule();
+}
+
+
+void schedule(void)
+{
+    TaskControlBlock *old = current_thread();
+    // 如果当前线程是运行状态，则将其状态设置为就绪状态
+    if (old && old->task_state == Running)
+        old->task_state = Ready;
+	
+    // 此次调度是否是第一个运行的任务
+    int start = current_slot < 0 ? 0 : (current_slot + 1) % MAX_THREADS;
     
-	reg_t s0;	//	s0 - s11 是 callee-saved registers，需要被调用者保存（调用完毕后进行恢复）
-	reg_t s1;
-	reg_t s2;
-	reg_t s3;
-	reg_t s4;
-	reg_t s5;
-	reg_t s6;
-	reg_t s7;
-	reg_t s8;
-	reg_t s9;
-	reg_t s10;
-	reg_t s11;
-}TaskContext;
+    for (int step = 0; step < MAX_THREADS; step++) {
+        int next = (start + step) % MAX_THREADS;
+        if (tasks[next].task_state != Ready)
+            continue;
+        
+        if (next == current_slot)
+        { 	tasks[next].task_state = Running;
+         	return;
+        }
+        
+        TaskContext *oldcx = old ? &old->task_context : &boot_context;
+        tasks[next].task_state = Running;
+        current_slot = next;
+        
+        __switch(oldcx, &tasks[next].task_context);
+        return;
+    }
+    panic("schedule: no runnable thread");
+}
 ```
 
-`__switch.S`接收两个参数,通过`a0`和`a1`寄存器进行传递：`a0`：`current_task_cx_ptr`（当前任务的 TaskContext 地址）；`a1`：` next_task_cx_ptr`（下一个任务的 TaskContext 地址）；`TaskContext task_context`属于`TaskControlBlock`的结构体成员，而所有任务控制块都存放在全局数组 `tasks[MAX_TASKS]` 中；这个数组位于内核的 `.bss` 区。
+### 通过`__switch.S`切换线程的内核任务
+
+`__switch.S`接收两个参数,通过`a0`和`a1`寄存器进行传递：`a0`：`current_task_cx_ptr`（当前内核任务的 TaskContext 在内核虚拟地址空间中的虚拟地址）；`a1`：` next_task_cx_ptr`（下一个任务的 TaskContext在内核虚拟地址空间中的虚拟地址）。
+
+`TaskContext task_context`变量属于`TaskControlBlock`的结构体成员，所有`TCB`都存放在全局数组 `tasks[MAX_TASKS]` 中；这个数组位于内核的 `.bss` 区。
+
+所有线程的`TaskContext`都被初始化为：
+
+```c
+// kstack_top 在创建线程函数中计算得到
+static TaskContext tcx_init(u64 kstack_top)
+{
+    TaskContext cx;
+    memset(&cx, 0, sizeof(cx));
+    cx.ra = (reg_t)trap_return;
+    cx.sp = kstack_top;
+    return cx;
+}
+```
 
 **首先保存当前线程的内核任务上下文（`s0-s11、ra、sp(内核栈)`）：**
 
@@ -10061,31 +11137,39 @@ RISC-V 的 ABI（Application Binary Interface，应用程序二进制接口）�
 
 ### `trap_return()`：传递新线程的用户态页表 / `TRAPFRAME`虚拟地址
 
-这里最终是切换到`trap_return()`函数，这里还没有进入用户态。CPU 仍然在 S 模式，使用内核页表和内核栈，由于切换到了新的任务，因此**需要获取保存在 TCB 中的新任务的用户态的根页表的物理地址**：
+这里最终是切换到`trap_return()`函数，这里还没有进入用户态。CPU 仍然在 S 模式，使用内核页表和内核栈，由于切换到了新的任务，因此**需要从新的 TCB 中获取新任务的用户态的根页表的物理地址和`TRAPFRAME`在新线程的虚拟地址空间中的虚拟地址**：
 
 ``` c
-/* 返回当前执行的应用程序的satp token，_current 在 schedule() 时被更改了*/
-u64 current_user_token()
+//跳板页开始位置
+#define TRAMPOLINE (MAXVA - PAGE_SIZE)
+// Sv39的最大地址空间 512G
+#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+#define PAGE_SIZE 0x1000      // 4kb  一页的大小
+void set_user_trap_entry()
 {
-   return MAKE_SATP(tasks[_current].pagetable.root_ppn.value);
+	w_stvec((reg_t)TRAMPOLINE);  
 }
 
+/* 返回当前执行的应用程序的satp token，_current 在 schedule() 时被更改了*/
+u64 current_thread_user_token(void) {
+    return MAKE_SATP(current_proc()->pagetable.root_ppn.value);
+}
 
 void trap_return()  
 {  
     /* 把 stvec 设置为内核和应用地址空间共享的跳板页面的起始地址 */  
     set_user_trap_entry();
-    /* TrapContext 在新任务的应用地址空间中的虚拟地址 */  
-    u64 trap_cx_ptr = TRAPFRAME;  
-    /* 要继续执行的应用程序的根页表地址 */  
-    u64  user_satp = current_user_token();  
+    /* Trap 上下文在应用地址空间中的虚拟地址 */  
+    u64 trap_cx_ptr = current_thread()->trap_cx_va;
+    /* 要继续执行的应用地址空间的 token */  
+    u64  user_satp = current_thread_user_token();
 	/* 计算_restore函数的虚拟地址 */
     u64  restore_va = (u64)__restore - (u64)__alltraps + TRAMPOLINE;  
 	asm volatile (    
 			"fence.i\n\t"    
-			"mv a0, %0\n\t"  // 将 TRAPFRAME 传递给 a0 寄存器  
-			"mv a1, %1\n\t"  // 将 user_satp 传递给 a1 寄存器  
-			"jr %2\n\t"      // 跳转到 restore_va 的位置执行代码  
+			"mv a0, %0\n\t"  // 将trap_cx_ptr传递给a0寄存器  
+			"mv a1, %1\n\t"  // 将user_satp传递给a1寄存器  
+			"jr %2\n\t"      // 跳转到restore_va的位置执行代码  
 			:    
 			: "r" (trap_cx_ptr),    
 			"r" (user_satp),
@@ -10094,16 +11178,6 @@ void trap_return()
 		);
   
 }
-
-void set_user_trap_entry()
-{
-	w_stvec((reg_t)TRAMPOLINE);  
-}
-//跳板页开始位置
-#define TRAMPOLINE (MAXVA - PAGE_SIZE)
-// Sv39的最大地址空间 512G
-#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
-#define PAGE_SIZE 0x1000      // 4kb  一页的大小
 ```
 
 这段代码准备了三个关键量：
@@ -10265,8 +11339,6 @@ Mode = U
 
 ### 通过`__alltraps` 陷入
 
-![完整的trap和任务切换流程](./assets/完整的trap和任务切换流程.png)
-
 用户程序运行后，可能发生定时器中断、系统调用或异常。这时就需要另一段汇编：`__alltraps`。例如当 CPU 执行完一条`ecall`指令准备从 U 模式 Trap 到 S 模式时，硬件会自动完成如下事情：
 
 - `sstatus`寄存器的`SPP`字段修改为**当前 CPU 的特权级**（Trap 回来后是什么优先级）;
@@ -10308,7 +11380,7 @@ sscratch = 用户栈顶		// 保存了 原本用户栈的 SP 的值！
 
 ``` assembly
 sd x1, 1*8(sp)
-sd x3, 3*8(sp)
+sd x3, 3*8(sp)fu
 sd x4, 4*8(sp)
 ...
 sd x31, 31*8(sp)
@@ -10427,6 +11499,7 @@ void trap_handler()
         switch (cause_code) {
         case 8: {
             /* exec 会覆写 sepc，必须先跳过 4 字节的 ecall 指令。 */
+            /* 直接修改的 TrapContext,所以fork的子线程会跳过 ecall */
             cx->sepc += 4;
             uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
             /* 调度可能切换当前进程，返回值写入当前 trap 上下文。 */
@@ -10611,31 +11684,28 @@ void __sys_write(size_t fd, const char* data, size_t len)
 
 ``` c
 /* 返回当前执行的应用程序的satp token*/
-u64 current_user_token()
-{
-   return MAKE_SATP(tasks[_current].pagetable.root_ppn.value);
+u64 current_thread_user_token(void) {
+    return MAKE_SATP(current_proc()->pagetable.root_ppn.value);
 }
 
-void translated_byte_buffer(const char* data , size_t len)
+char * translated_byte_buffer(const char* data , size_t len)
 {
-    u64  user_satp = current_user_token();  // 获取TCB中存储的根页表地址
+    u64  user_satp = current_thread_user_token();
     PageTable  pt ;
     pt.root_ppn.value = MAKE_PAGETABLE(user_satp);
 
-    u64 start_va = data;
-    u64 end_va 	 = start_va + len;
+    u64 start_va = (u64)data;
+    u64 end_va = start_va + len;
     VirtPageNum vpn = floor_virts(virt_addr_from_size_t(start_va));
-    PageTableEntry *pte = find_pte(&pt , vpn);
+    PageTableEntry* pte = find_pte(&pt , vpn);
     
     //拿到物理页地址
     int mask = ~( (1 << 10) -1 );
     u64 phyaddr = ( pte->bits & mask) << 2 ;
     //拿到偏移地址
     u64 page_offset = start_va & 0xFFF;
-    //得到最终地址
     u64 data_d = phyaddr + page_offset;
-    char *data_p = (char*) data_d;
-    printk("%s",data_p); 
+    return (char*) data_d;
 }
 ```
 
@@ -10687,6 +11757,182 @@ void __sys_read(size_t fd, const char* data, size_t len)
     }
 }
 ```
+
+## `sys_fork()`系统调用
+
+`sys_fork()` 是一次**复制父进程地址空间并创建子进程主线程，并让父子进程从同一个位置继续执行**的操作。
+
+用户态 `sys_fork()` 发出编号为 `__NR_clone` 的 `ecall`，内核将它分派给 `__sys_fork()`。
+
+
+
+``` c
+/* fork: 复制当前进程, 子进程返回 0, 父进程返回子进程 pid */
+int sys_fork()
+{
+    return syscall(__NR_clone,0,0,0);
+}
+
+
+#define __NR_clone 220
+case __NR_clone:
+    return __sys_fork();
+```
+
+`_sys_fork()` **只支持由进程中唯一存活的 TID 0 线程调用**；如果还有其他线程（包括尚未回收的线程），返回 `-1`。
+
+``` c
+static int sole_main_thread(ProcessControlBlock *p)
+{
+    if (current_thread()->tid != 0 || p->live_threads != 1) return 0;
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (tasks[i].process == p && &tasks[i] != current_thread()) return 0;
+    return 1;
+}
+
+
+int __sys_fork(void)
+{
+    // 通过当前线程获取所属的进程的 PID
+    ProcessControlBlock *parent = current_proc();
+    // 获取当前运行的线程的 TID
+    TaskControlBlock *old = current_thread();
+    // 如果当前进程中还有其他线程则失败
+    if (!sole_main_thread(parent))
+        return -1;
+    
+    /*.....*/
+}
+```
+
+### `allocproc`：子进程分配`PID`
+
+调用 `allocproc()`，为**子进程分配新 `PID`、新 PCB 和新用户页表**：
+
+``` c
+// 为新进程分配 PID、页表
+ProcessControlBlock *child = allocproc();
+if (!child) return -1;
+```
+
+### 复制`PID`中记录的信息
+
+然后复制父进程记录的**ELF 映射区结束范围、栈基址和入口地址**，并设置父子关系：
+
+``` c
+// 子进程继承父进程的 ELF 映射区结束地址（页对齐）
+child->base_size = parent->base_size;
+// 用户栈起始地址
+child->ustack_base = parent->ustack_base;
+// 入口函数地址
+child->entry = parent->entry;
+// 设置父子关系
+child->parent = parent;
+```
+
+### 按页复制可加载段
+
+把父进程的可加载的段进行复制和映射：
+
+- 首先**逐页**遍历父进程用户地址空间 [0, base_size]；
+- 通过`PTE`和页表**找到每页对应的物理地址**和页属性；
+- 分配一页新的内存，通过`memcpy`函数**把父进程页的内容复制到子进程当前分配的页中**； 
+- 在子进程的页表下，映射一页的虚拟地址和分配的物理地址；
+
+``` c
+/* 将父进程用户地址空间 [0, sz] 逐页复制到子进程新页表 */
+int uvmcopy(PageTable* old, PageTable* new, u64 sz)
+{
+    PageTableEntry* pte;
+    u64 i;
+    u8 flags;
+
+    for (i = 0; i < sz; i+=PAGE_SIZE)
+    {
+        // 找到父进程的 base_size 之前所有页对应的物理地址
+        VirtPageNum vpn = floor_virts(virt_addr_from_size_t(i));
+        pte = find_pte(old, vpn);
+
+        if (pte != 0)
+        {
+            /* 通过 PTE 找到对应的物理地址*/
+            u64 phyaddr = PTE2PA(pte->bits);
+            /* 通过 PTE 找到映射物理页的 flags */
+            flags = PTE_FLAGS(pte->bits);
+            
+            /* 分配一页新的物理内存 */
+            PhysPageNum ppn = kalloc();
+            if (!ppn.value) return -1;
+            u64 paddr = phys_addr_from_phys_page_num(ppn).value;
+            
+            /* 把父进程当前物理地址的内容拷贝到新分配的物理页 */
+            memcpy((void*)paddr,(void*)phyaddr,PAGE_SIZE);
+
+            /* 映射内存 */
+            if (PageTable_try_map(new, i, paddr, flags & ~PTE_V) < 0) {
+                kfree(ppn);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+
+// uvmcopy() 遍历 ELF 映射范围 [0, base_size)：对父进程每个已映射页分配新的物理页、复制页内容，再以相同权限映射到子进程页表。这是逐页复制，父子之后修改这些页不会互相影响。用户栈和 TrapContext 不在这一范围内，下面单独处理。
+if (uvmcopy(&parent->pagetable, &child->pagetable, child->base_size) < 0) {
+    freeproc(child);
+    return -1;
+}
+```
+
+### **给子进程创建线程**
+
+分配子进程的 0 号线程的用户栈、内核栈和 TrapContext。
+
+``` c
+// make_thread() 给子进程创建 TID 0，
+TaskControlBlock *newt = make_thread(child, child->entry, 0, 0);
+if (!newt) {
+    freeproc(child);
+    return -1;
+}
+```
+
+### 复制父线程的用户栈和`TrapContext`
+
+随后**把父线程整页用户栈及 `TrapContext` 的内容复制过去，并将子 `TrapContext` 的 `sepc` 改成子线程的内核栈顶**： 
+
+``` c
+// 找到父进程的 0 号线程的用户栈的起始地址
+PageTableEntry *src = find_pte(&parent->pagetable, floor_virts(virt_addr_from_size_t(old->ustack - PAGE_SIZE)));
+// 找到子进程的 0 号线程的用户栈的起始地址
+PageTableEntry *dst = find_pte(&child->pagetable,  floor_virts(virt_addr_from_size_t(newt->ustack - PAGE_SIZE)));
+// 复制父进程的 0 号线程的用户栈的内容
+memcpy((void *)PTE2PA(dst->bits), (void *)PTE2PA(src->bits), PAGE_SIZE);
+// 复制父进程的 0 号线程的TRAPFRAME 的内容
+memcpy((void *)newt->trap_cx_paddr, (void *)old->trap_cx_paddr, sizeof(TrapContext));
+
+((TrapContext *)newt->trap_cx_paddr)->a0 = 0;
+((TrapContext *)newt->trap_cx_paddr)->kernel_sp = newt->kstack;
+
+return child->pid;
+} 
+```
+
+### 为什么父子返回值不同，却从同一位置继续？
+
+> 父线程走完当前这次内核调用，子线程跳过父线程的内核调用过程，直接从复制好的用户态现场开始。
+
+复制 `TrapContext` 时，父线程的 `sepc` 已指向 `ecall` **之后**；因此子线程恢复用户态后也从 `sys_fork()` 后面继续。内核显式把**子线程** `TrapContext` 的 `a0` 设为 `0`，而 `__sys_fork()` 向**父线程**返回子 PID，由 Trap 处理器写入父线程的 `a0`。
+
+```text
+同一条 ecall 之后
+├─ 父进程：sys_fork() 返回子 PID
+└─ 子进程：sys_fork() 返回 0
+```
+
+子线程的**内核 `TaskContext` 没有从父线程复制**：`make_thread()` 已将其初始化为“首次调度时进入 `trap_return`”。调度器选中子线程后，它会用子进程的用户页表和刚复制的用户 TrapContext 恢复现场。
 
 ## 用户态 printf 实现
 
@@ -10769,53 +12015,6 @@ void* memcpy(void* dest, const void* src, size_t count)
     return dest;
 }
 ```
-
-# 实现协作式任务调度
-
-让用户态程序调用`sys_yield()`系统调用主动放弃CPU的控制权，操作系统在 S 态进行任务切换，任务在操作系统切换完毕后，通过`__restore(pt_regs *next)`回到用户态执行切换后的任务。
-
-只有第一次执行应用程序A的时候的`ra`是`__restore`，当A任务执行完毕`__switch`后，它的`ra`就变成了`__switch`的下一条地址，就是`schedule()`函数执行完毕了。第二次B任务调用`__switch`切换回A的时候，此时就会返回到`__switch`的下一条地址执行，我们是在`__sys_yield()`中调用`schedule()`的，所以会依次完成函数调用返回，从`schedule()`返回`__sys_yield()`，再返回到`__SYSCALL`，最后返回到`trap_handler()`，而在本文开头提到过`trap_handler`执行完毕后会去执行`__restore`，所以这样A才能返回到用户空间程序继续执行。
-
-### 实现`sys_yield()`系统调用
-
-在`app.c`中：
-
-``` c
-size_t sys_yield(){
-    syscall(_NR_sched_yield, 0, 0, 0);
-}
-
-/*sys_yield---->ecall----->__alltrap----->trap_handler----->__SYSCALL----> __sys_yield----->schedule()---->__switch*/
-/*由于ra是被调用者保存的寄存器，因此内核栈中会层层保存这些函数的返回地址，最终返回到call trap_handler时ra的地址，也就是__restore*/
-void __sys_yield()
-{
-    schedule();
-}
-
-
-void schedule()
-{
-	if (_top <= 0) {
-		panic("Num of task should be greater than zero!\n");
-		return;
-	}
-    
-    /* 轮转调度 */
-    int next = _current + 1;	// _current 是一个全局变量，记录当前正在运行 task[] 中的第几个任务
-    next = next % _top;
-
-    if(tasks[next].task_state == Ready || tasks[next].task_state == Running)
-    {
-        struct TaskContext *current_task_cx_ptr = &(tasks[_current].task_context);
-        struct TaskContext *next_task_cx_ptr = &(tasks[next].task_context);
-        tasks[next].task_state = Running;
-        _current = next;
-        __switch(current_task_cx_ptr,next_task_cx_ptr);
-    }
-    
-}
-```
-
 # 实现分时抢占式任务调度
 
 分时多任务系统中任务的切换不是应用程序主动调用函数放弃CPU的使用权，而是**内核决定**何时切换任务。因此内核要有一个定时器，这个**定时器是通过硬件**提供的时钟中断来实现的。
@@ -10954,1082 +12153,6 @@ void trap_handler()
     trap_return();
 }
 ```
-
-
-# 应用程序的装载
-
-## 单独编译应用程序
-
-之前 U 模式下的应用程序是写在`app.c`中和内核程序通过同一个`makefile`文件编译打包并由里面指定的`os.ld`一起链接生成`os.elf`文件。但是内核和应用程序都需要开启虚拟地址，而两者的映射状态都是不同的，类比于`Linux/Windows`这些都是操作系统将程序加载到内存中来运行的，因此需要将内核和应用程序隔离开来。在`os`目录下新建`user`文件夹，组成如下：
-
-![分离](quard-star/分离.png)
-
-`time.c`和`write.c`是两个应用程序，`makefile`用于编译，`user.ld`是链接脚本，**开启虚拟地址后，用户程序就可以使用同一个链接脚本了，因为即使被链接到同一个虚拟地址，也会映射到不同的物理地址**。
-
-### 应用程序
-
-`time.c`：
-
-``` c
-#include <timeros/types.h>
-#include <timeros/syscall.h>
-#include <timeros/string.h>
-int main()
-{
-    while (1)
-    {
-        printf("time!!!!!!\n");
-    }
-}
-
-```
-
-`write.c`:
-
-``` c
-#include <timeros/os.h>
-#include <timeros/syscall.h>
-#include <timeros/stdio.h>
-uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
-
-    register uintptr_t a0 asm ("a0") = (uintptr_t)(arg1);
-    register uintptr_t a1 asm ("a1") = (uintptr_t)(arg2);
-    register uintptr_t a2 asm ("a2") = (uintptr_t)(arg3);
-    register uintptr_t a7 asm ("a7") = (uintptr_t)(id);
-
-    asm volatile ("ecall"
-		      : "+r" (a0)
-		      : "r" (a1), "r" (a2), "r" (a7)
-		      : "memory");
-    return a0;
-}
-
-uint64_t sys_write(size_t fd, const char* buf, size_t len)
-{
-    return syscall(__NR_write,fd,buf, len);
-}
-
-uint64_t sys_yield()
-{
-    return syscall(__NR_sched_yield,0,0,0);
-}
-
-uint64_t sys_gettime()
-{
-    return syscall(__NR_gettimeofday,0,0,0);
-}
-
-int main(int argc, char const *argv[])
-{
-
-    const char *message = "task1 is running!\n";
-    int len = strlen(message);
-    while (1)
-    {
-       printf(message);
-    }
-    return 0;
-}
-
-```
-
-### 编译应用的 Makefile
-
-``` makefile
-CROSS_COMPILE = riscv64-unknown-elf-
-CFLAGS = -nostdlib -fno-builtin -mcmodel=medany
-
-CC = ${CROSS_COMPILE}gcc
-OBJCOPY = ${CROSS_COMPILE}objcopy
-OBJDUMP = ${CROSS_COMPILE}objdump
-INCLUDE:=-I../include
-
-LIB = ../lib
-
-write: write.c $(LIB)/*.c
-	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/write $^
-
-time: time.c 
-	${CC} ${CFLAGS} $(INCLUDE) -T user.ld -o bin/time $^
-```
-
-### 链接脚本
-
-![用户态地址空间](./assets/用户态地址空间.png)
-
-`user.ld`：将程序入口符号指明为`main`，链接地址为`0x10000`：
-
-``` assembly
-OUTPUT_ARCH(riscv)
-ENTRY(main)
-BASE_ADDRESS = 0x10000;
-
-SECTIONS
-{
-    . = BASE_ADDRESS;
-    .text : {
-        *(.text.entry)
-        *(.text .text.*)
-    }
-    . = ALIGN(4K);
-    .rodata : {
-        *(.rodata .rodata.*)
-        *(.srodata .srodata.*)
-    }
-    . = ALIGN(4K);
-    .data : {
-        *(.data .data.*)
-        *(.sdata .sdata.*)
-    }
-    .bss : {
-        *(.bss .bss.*)
-        *(.sbss .sbss.*)
-    }
-    /DISCARD/ : {
-        *(.eh_frame)
-        *(.debug*)
-    }
-}
-```
-
-## 装载应用程序
-
-### `build.c`：遍历应用程序的`.bin`文件
-
-> 现在有一个问题：内核如何获得用户程序的二进制内容？如果你还没有实现文件系统，就不能依靠内核在运行时从磁盘读取这些程序。
-
-一个常见办法是：在编译内核时，就把用户程序的二进制内容嵌入内核 ELF 文件。使用C语言来实现就是`os/build.c`：代码逻辑就是**遍历`user/bin`目录下的文件个数，然后记录用户程序数量，生成`link_app.S`**。
-
-![build文件的功能](./assets/build文件的功能.png)
-
-`build.c`并不是内核程序的一部分，不是和内核程序一起编译的，是单独运行`make build_app`的，添加在项目的 Makefile中：
-
-``` makefile
-build_app: build.c
-	$(MAKE) -C ./user
-	gcc $< -o build.out
-	./build.out
-```
-
-所以可以`#include <stdio.h>`调用`glibc`等标准库 。
-
----
-
-具体代码如下：
-
-#### **创建汇编文件**
-
-``` c
-FILE *f = fopen("src/link_app.S", "w");
-```
-
-`FILE` 是 C 标准库中表示文件流的类型。`fopen` 返回一个指向 `FILE` 对象的指针。其中：`"w"`表示以写入模式打开文件。如果文件不存在，创建文件；如果文件已经存在，原有内容会被清空。
-
-接下来：
-
-```c
-if (f == NULL) {
-    perror("Failed to open file");
-    exit(EXIT_FAILURE);
-}
-```
-
-`NULL` 表示打开失败。`perror` 根据当前的 `errno` 输出对应的系统错误信息；`exit(EXIT_FAILURE)` 终止当前程序。
-
-这里可以联系此前学习过的系统调用：
-
-`fopen` 是用户态 C 库提供的接口，通常会在底层借助 `open` 或 `openat` 等系统调用获得文件描述符，并维护一个带缓冲的 `FILE` 流。
-
----
-
-#### **打开目录，通过 `readdir` 遍历文件**（处理文件名、放进字符串数组）
-
-```c
-DIR *dir = opendir("./user/bin");
-```
-
-与 `fopen` 不同：
-
-- `fopen`：打开文件流。
-- `opendir`：打开目录流。
-
-**`DIR *` 是目录流的指针**。接着：
-
-```c
-struct dirent *dir_entry;
-
-while ((dir_entry = readdir(dir)) != NULL) {
-    ...
-}
-
-closedir(dir);
-```
-
-这段写法值得仔细理解。它相当于：
-
-```c
-while (1) {
-    dir_entry = readdir(dir);
-
-    if (dir_entry == NULL) {
-        break;
-    }
-
-    // 处理当前目录项
-}
-```
-
-其中 `readdir()` 每次从目录流中读取下一个目录项。**目录项由 `struct dirent` 表示**，其中一个重要成员是：
-
-```c
-dir_entry->d_name
-```
-
-即当前目录项的名字。例如返回：
-
-```
-.
-..
-hello
-shell
-test
-```
-
-这里的 `.` 是当前目录，`..` 是父目录，都不是真正需要打包的用户程序。因此需要**排除它们**：
-
-```c
-char* name_with_ext = dir_entry->d_name;
-
-if (name_with_ext[0] == '.' &&
-    (name_with_ext[1] == '\0' ||
-    (name_with_ext[1] == '.' && name_with_ext[2] == '\0'))) {
-    continue;
-}
-```
-
-**然后去掉文件扩展名：**
-
-```c
-int len = strlen(name_with_ext);  // 计算字符串长度，但不包含结尾的 `\0`。
-
-for (int i = 0; i < len; i++) {
-    if (name_with_ext[i] == '.') {	// 直接把 '.bin' 替换为 '\0'
-        name_with_ext[i] = '\0';
-        break;
-    }
-}
-```
-
-它在内存中可以表示为：
-
-```
-h e l l o . b i n \0
-```
-
-执行后：
-
-```
-h e l l o \0 b i n \0
-```
-
-注意，后面的 `.bin` 并没有被删除，只是因为字符串提前遇到 `\0`，因此后续字符串函数只能看到：
-
-```
-hello
-```
-
-这里体现了 C 语言字符串的基本原理：**C 字符串本质上是一段以 `\0` 结尾的连续字符序列**。
-
-**为什么必须使用 `strdup`？**
-
-```c
-// char* apps[100]; // Assuming a maximum of 100 apps
-// int app_count = 0;
-
-apps[app_count] = strdup(name_with_ext);
-app_count++;
-```
-
-`strdup` 的主要功能是：
-
-1. 根据字符串长度**分配一块新的堆内存**。
-2. 把字符串内容复制进去。
-3. 返回新字符串的地址。
-
-例如：`char *p = strdup("hello");`大致相当于：
-
-```c
-char *p = malloc(strlen("hello") + 1);
-
-strcpy(p, "hello");
-```
-
-但这里的核心问题是：为什么不直接写 `apps[app_count] = name_with_ext;`？因为：
-
-```c
-char *name_with_ext = dir_entry->d_name;
-```
-
-`name_with_ext` 指向的是 `readdir` 返回的目录项数据。后续再调用 `readdir()`，先前返回的数据可能被覆盖。假如直接保存这个指针：
-
-```c
-apps[0] = name_with_ext;
-```
-
-那么下次读取目录项后，`apps[0]` 原本指向的内容就可能发生变化。而 `strdup()` 会为每个文件名单独分配内存，从而使所有文件名能够同时保存下来。这也是你后面需要调用`free(apps[i]);`的原因，因为 `strdup()` 分配的内存需要由程序释放。
-
----
-
-#### **遍历完目录项后，为什么要调用`qsort`对数组中的元素排序**
-
-因为 `readdir` 并不保证目录项返回顺序。
-
-如果不排序，不同构建过程中：
-
-```c
-app_0 = hello
-```
-
-可能变成：
-
-```c
-app_0 = test
-```
-
-这样内核通过编号定位应用时，其对应关系就不稳定。因此，排序使应用编号具有确定性，前提是输入文件集合和命名规则保持不变。
-
-```c
-// char *apps[100]; 实际向比较函数传入：compare_strings(&apps[0], &apps[1]);
-qsort(apps, app_count, sizeof(char*), compare_strings);
-```
-
-这是整个程序很值得掌握的一行。`qsort` 的函数原型是：
-
-```c
-void qsort(
-    void *base,
-    size_t nmemb,
-    size_t size,
-    int (*compar)(const void *, const void *)
-);
-```
-
-对照传入的参数：
-
-| 实际参数          | 含义                 |
-| ----------------- | -------------------- |
-| `apps`            | 要排序的数组首地址   |
-| `app_count`       | 数组中有效元素的数量 |
-| `sizeof(char*)`   | 每个元素占多少字节   |
-| `compare_strings` | 指向比较函数的指针   |
-
-例如在64位平台上：
-
-```c
-sizeof(char*) == 8
-```
-
-于是 `qsort` 知道数组每个元素占8字节。不过，**`qsort` 并不知道这些8字节代表一个整数、指针还是其他数据类型，因此它需要你提供比较函数告知如何比较这 8 个字节的每个元素**。这就是函数指针的价值：把需要执行的操作作为参数传递给另一个函数。
-
-``` c
-// char *a = "hello"; 传入 &a
-int compare_strings(const void *a, const void *b) { 		// a 和 b 是指向字符串指针的指针
-    return strcmp( *(const char**)a, *(const char**)b );
-}
-```
-
-逐层拆解：`a`类型为 `const void *`，它是**通用指针**，无法直接解引用为具体字符串。因此首先：
-
-```c
-(const char* *)a
-```
-
-将通用指针转换为**指向字符串指针的指针**。然后：
-
-```c
-*(const char **)a
-```
-
-**取出指针指向的字符串指针**，其类型是 `const char *`。所以：
-
-```c
-strcmp(*(const char**)a, *(const char**)b);
-```
-
-实际上等价于比较：
-
-```c
-strcmp("hello", "shell");
-```
-
-`strcmp` 的返回值规则为：
-
-- 负数：前一个字符串字典序更小。
-- 0：两个字符串相同。
-- 正数：前一个字符串字典序更大。
-
-因此，这个函数可以交给 `qsort` 来完成字符串排序。
-
----
-
-#### **如何生成汇编代码？**
-
-首先**生成用户程序数量与地址表：**
-
-```c
-fprintf(
-    f,
-    "\n.align 3\n.section .data\n.global _num_app\n_num_app:\n.quad %d",
-    app_count
-);
-```
-
-`fprintf` 将格式化文本写入文件。例如，`app_count == 3`，那么生成的内容是：
-
-```c
-.align 3
-.section .data
-.global _num_app
-_num_app:
-.quad 3
-```
-
-`.section .data`表示后续内容放在 `.data` 输入节中。按照通常的 ELF 使用方式，`.data` 是用于保存已初始化数据的节。
-
-`.align 3`在 RISC-V GNU 汇编语法中，这里通常表示按照 \(2^3=8\) 字节对齐。因此后面的数据起始位置满足：$ \text{Address}\bmod 8=0 $
-
-对齐有助于正确、高效地访问64位数据。
-
-`.global _num_app`把 `_num_app` 声明为全局符号，使其他目标文件能够引用它。`_num_app:`定义一个汇编标签（Label），标记当前位置。你可以将它理解为：`_num_app` = 当前汇编位置的地址；更准确地说，它定义了一个符号，其值由汇编器和链接器确定。
-
-`.quad 3`将数值3作为一个8字节整数存放在当前位置。例如 RISC-V 小端序机器中，这8字节可以表示为：
-
-```
-03 00 00 00 00 00 00 00
-```
-
-所以：
-
-```
-_num_app:
-.quad 3
-```
-
-表示 `_num_app` 指向一块存有数字 3 的内存。它与 C 语言中的：`uint64_t num_app = 3`在数据表达上有相似性，但二者并不是完全相同的源语言声明。
-
-**生成用户程序的地址表：**
-
-```c
-for (int i = 0; i < app_count; i++) {
-    fprintf(f, "\n.quad app_%d_start", i);
-}
-```
-
-如果有三个程序，生成：
-
-```
-.quad app_0_start
-.quad app_1_start
-.quad app_2_start
-```
-
-接下来：
-
-```c
-fprintf(f, "\n.quad app_%d_end", app_count - 1);
-```
-
-又生成：
-
-```c
-.quad app_2_end
-```
-
-注意：`.quad app_0_start` 与 `.quad 3` 有一个重要区别。前者表示把符号 `app_0_start` 对应的地址值存放在8字节数据中。后者表示直接存放数值3。因此，内核获得了一个地址表。假设三个用户程序对应的起始地址分别是：
-
-```
-app_0_start = 0x80210000
-app_1_start = 0x80212000
-app_2_start = 0x80215000
-app_2_end   = 0x80217000
-```
-
-那么生成的数据结构在逻辑上就是：
-
-| 相对偏移 | 存放的内容                 |
-| -------- | -------------------------- |
-| +0       | 3 （程序数量）             |
-| +8       | 0x80210000 （app_0_start） |
-| +16      | 0x80212000 （app_1_start） |
-| +24      | 0x80215000 （app_2_start） |
-| +32      | 0x80217000 （app_2_end）   |
-
-所有数值均为示意。真实地址由目标文件布局和链接脚本决定。
-
-如果采用由连续起始地址和最终结束地址构成的边界表，那么理论上第 \(i\) 个程序的范围可以表示为：$ [\text{app\_start}[i],\ \text{app\_start}[i+1]) $
-
-长度为：$ L_i=\text{app\_start}[i+1]-\text{app\_start}[i] $
-
-但这里存在一个值得你注意的细节：程序之间可能包含对齐填充（Padding），因为后面为每个用户程序都使用了 `.align 3`。因此，`app_(i+1)_start` 未必严格等于 `app_i_end`。
-
-#### `.incbin`：最关键的汇编伪指令
-
-```c
-fprintf(
-    f,
-    "\n.section .data\n.global app_%d_start\n.global app_%d_end\n.align 3\napp_%d_start:\n.incbin \"%s%s\"\napp_%d_end:",
-    i, i, i, TARGET_PATH, apps[i], i
-);
-```
-
-这段代码虽然很长，但理解起来并不复杂。假设：
-
-```
-i = 0;
-apps[i] = "hello";
-```
-
-最终写入：
-
-```c
-.section .data
-
-.global app_0_start
-.global app_0_end
-
-.align 3
-
-app_0_start:
-.incbin "../user/bin/hello"
-app_0_end:
-```
-
-其中最重要的是：
-
-```c
-.incbin "../user/bin/hello"
-```
-
-`.incbin` 是 GNU 汇编器提供的伪指令。它的作用是：汇编阶段，读取指定文件的原始二进制内容，将其中的字节直接嵌入当前输出节。
-
-例如 `hello` 文件包含：
-
-```
-7F 45 4C 46 ...
-```
-
-这其实就是 ELF 文件的开头：
-
-```
-7F 45 4C 46 = ELF Magic
-```
-
-在执行 `.incbin` 后，这些字节会被写入对应的目标文件节中。这里要特别注意：`.incbin` 并不是在内核启动后才读取 `hello` 文件。它是在宿主机汇编阶段执行的。因此，你可以将这个过程理解为：
-
-```c
-用户程序 hello（ELF文件）
-    ↓
-.incbin 读取 ELF 原始字节
-    ↓
-内核目标文件中的 .data
-    ↓
-内核最终 ELF 中的一段数据
-```
-
-还有一个容易混淆的地方：用户程序 ELF 被 `.incbin` 放入内核之后，并不意味着其中的代码已经完成了用户态加载，也不意味着 CPU 可以直接以用户态开始执行它。
-
-### 生成的`link_app.S`
-
-通过`build.c`遍历`user/bin`文件夹生成的汇编代码：
-
-``` assembly
-.align 3
-.section .data
-.global _num_app  	# 声明一个全局可见符号
-_num_app:			# 将 _num_app 符号绑定到当前位置
-.quad 2				# 在当前位置放置一个 8 字节整数，数值为2。
-.quad app_0_start
-.quad app_1_start
-.quad app_1_end
-.section .data
-.global app_0_start
-.global app_0_end
-.align 3
-app_0_start:
-.incbin "../user/bin/time"
-app_0_end:
-.section .data
-.global app_1_start
-.global app_1_end
-.align 3
-app_1_start:
-.incbin "../user/bin/write"
-app_1_end:
-```
-
-### 编写`loader`读取程序的`.bin`文件
-
-接下来读取这些信息：在`include`目录下新建一个`loader.h`文件,`src`目录下新建`loader.c`文件：
-
-`loader.h`：
-
-``` c
-#ifndef TOS_LOADER_H__
-#define TOS_LOADER_H__
-
-#include <timeros/types.h>
-#include <timeros/assert.h>
-#include <timeros/stdio.h>
-
-
-// 假设这个结构用于存储应用程序元数据
-typedef struct {
-    uint64_t start;
-    uint64_t size;
-    int id;      // app id; get_app_data_by_name 未找到时置 -1, 供 exec 判定
-} AppMetadata;
-
-// 获取加载的app数量
-size_t get_num_app();
-AppMetadata  get_app_data(size_t app_id);
-#endif
-```
-
-`_num_app`符号在汇编中进行了声明，在 C 语言中可以将其看作一个 8 字节数组来进行解析，`_num_app[0]`的值就是`app`的数量。
-
-`app`数据的起始地址也可以通过把`_num_app`看作 8 字节的数组来解析获得（从 1 开始）。
-
-根据传入的`app_id`进行索引（在`load_app(size_t app_id)`调用时是`get_app_data(app_id + 1)`），由于`app`的数据是挨着放置的，所以`app`数据的大小可用下一个`app`的起始地址减去当前`app`的起始地址。
-
-``` c
-#include <timeros/loader.h>
-
-extern u64 _num_app[];  // 在汇编代码声明了大小
-
-// 获取加载的app数量
-size_t get_num_app()
-{
-    return _num_app[0];
-}
-```
-
-## 加载`.elf`文件
-
-<img src="./assets/加载ELF文件流程.png" alt="加载ELF文件流程" style="zoom:67%;" />
-
-``` c
-void load_app(size_t app_id)
-{
-    //加载ELF文件
-    AppMetadata metadata = get_app_data(app_id + 1);	// 注意这里的 +1
-
-    //ELF 文件头
-    elf64_ehdr_t *ehdr = (elf64_ehdr_t*)metadata.start;
-
-    //校验 ELF 魔数与架构
-    elf_check(ehdr);
-
-    //创建任务
-    TaskControlBlock* proc = task_create_pt(app_id);
-
-    //加载程序段
-    load_segment(ehdr, proc);
-
-    //记录APP程序的入口地址，为 main 函数地址
-    proc->entry = (u64)ehdr->e_entry;
-
-    // 映射应用程序用户栈开始地址
-    proc_ustack(proc);
-}
-```
-
-### `get_app_data()`：找到 `.elf` 文件
-
-``` c
-//加载ELF文件
-AppMetadata metadata = get_app_data(app_id + 1);	// 注意这里的 +1
-
-
-AppMetadata  get_app_data(size_t app_id)
-{
-    AppMetadata metadata;
-
-    size_t num_app = get_num_app();
-
-    metadata.start = _num_app[app_id];  // 获取app起始地址
-    metadata.size  = _num_app[app_id + 1] - _num_app[app_id];    // 获取app结束地址
-
-    printk("app start:%x , app end: %x\n",metadata.start,metadata.size);
-    
-    assert(app_id <= num_app);
-
-    return metadata;
-}
-```
-
-ELF文件中最重要的便是**文件头（ELF_Header）**与**程序头表（Program Header）**。
-
-### 解析文件头 (`elf64_ehdr`)
-
-> 只要分析 ELF 文件头，就可以得到段表和段表字符串表，从而解析整个 ELF 文件。
-
-首先定义结构体存储文件头的信息：
-
-- **魔数 + 目标机器位数 + 大小端**；
-- **文件类型（可重定位、可执行、共享库）**；
-- **适配的处理器架构**；
-- **程序的入口地址**；
-- **程序头表 或 段头表 在文件中的位置**（偏移），以及对应的大小与描述符的个数。
-
-``` c
-typedef struct {
-    u8 e_ident[EI_NIDENT];  // 魔数 16个字节:"del" "E" "L" "F" /文件位数 /大小端 /版本（侧重文件本身格式）
-    u16 e_type;             // 文件类型：1.可重定位 2.可执行 3.共享库
-    
-    u16 e_machine;          // 处理器架构
-    u32 e_version;
-    
-    u64 e_entry;           // 程序入口的虚拟地址
-    
-    u64 e_phoff;           // 程序头表  在文件中的偏移
-    u64 e_shoff;           // 段头表	 在文件中的偏移
-    
-    u16 e_phentsize;       // 程序头描述符的大小（可以遍历每个段描述符）
-    u16 e_phnum;           // 程序头描述符的个数
-    
-    u16 e_shentsize;       // 段描述符的大小
-    u16 e_shnum;           // 段描述符的个数
-    
-    u32 e_flags;
-    u16 e_ehsize;          // 文件头大小
-    
-    u16 e_shstrndx;        // 段表字符串表在段表中的下标(通过这个可以在段表中找到段表字符串表)
-} elf64_ehdr_t;
-```
-
-**文件头位于 ELF 文件的地址开始处，并且结构体成员分布固定，逐字节即可进行读取：**
-
-``` c
-//ELF 文件头
-elf64_ehdr_t *ehdr = (elf64_ehdr_t*)metadata.start;
-```
-
-并完成魔数和处理器架构的检验：
-
-``` c
-//所有的ASCII码都可以用“\”加数字（一般是8进制数字）来表示。
-#define ELFMAG 0x464C457FU  // 0x464C457FU  "\177ELF"
-#define EM_RISCV 0xF3  		//risc-v 对应的 e_machine 的value值
-/* 校验 ELF 魔数与架构 */
-void elf_check(elf64_ehdr_t *ehdr)
-{
-    //判断 elf 文件的魔数
-    assert(*(u32 *)ehdr == ELFMAG);
-    //判断传入文件是否为 riscv64
-    if (ehdr->e_machine != EM_RISCV || ehdr->e_ident[EI_CLASS] != ELFCLASS64)
-    {
-        panic("only riscv64 elf file is supported");
-    }
-}
-```
-
-### `task_create_pt()`：创建 TCB，完成地址空间映射
-
-``` c
-// 在 void load_app(size_t app_id) 中调用
-TaskControlBlock* task_create_pt(size_t app_id)
-{
-  if(_top < MAX_TASKS)
-  {
-    // 分配 TRAPFRAME 物理页，并保存在 TCB 中
-    proc_trap(&tasks[app_id]);
-    // 创建根页表，映射跳板页和 TRAPFRAME 页
-    proc_pagetable(&tasks[app_id]); 
-    _top++;
-  }
-  
-  return &tasks[app_id];
-}
-```
-
-`task_create_pt(size_t app_id)`函数做了两件不同的事情：
-
-1. 为任务**分配保存 TrapContext 的物理内存，并保存在 TCB 中（`__resotre`时从`TrapContext`恢复用户态上下文时用的还是内核态页表，因此需要在 TCB 中直接保存物理地址、`trap_handler`中也要依据用户现场进行处理）**：
-
-   ``` c
-   /* 为应用程序分配一页物理内存保存 TrapContext，同时初始化 trapcontext 和 taskcontext */
-   void proc_trap(struct TaskControlBlock *p)
-   {
-     // 为程序分配一页保存 TrapContext 的物理页，并保存物理地址
-     p->trap_cx_paddr = phys_addr_from_phys_page_num(kalloc()).value;
-     // 初始化任务上下文全部为0
-     memset(&p->task_context, 0 ,sizeof(p->task_context));
-   }
-   ```
-
-2. **创建用户页表**，并**映射`TrapFrame`和跳板页**：
-
-``` c
-extern char trampoline[];
-/* 为用户程序创建根页表，并映射 跳板页 和 TrapContext页*/
-void proc_pagetable(struct TaskControlBlock *p)
-{
-  // 创建一个用户根页表，分配一页内存
-  PageTable pagetable;
-  pagetable.root_ppn = kalloc();
-  
-  //映射跳板页
-  PageTable_map(&pagetable,virt_addr_from_size_t(TRAMPOLINE),phys_addr_from_size_t((u64)trampoline),\
-                PAGE_SIZE , PTE_R | PTE_X);
-    
-  //映射用户程序的 TrapContext 页
-  PageTable_map(&pagetable,virt_addr_from_size_t(TRAPFRAME),phys_addr_from_size_t(p->trap_cx_paddr), \
-                PAGE_SIZE, PTE_R | PTE_W );
-    
-  p->pagetable = pagetable;
-}
-
-
-// Sv39的最大地址空间 512G
-#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
-//跳板页开始位置
-#define TRAMPOLINE (MAXVA - PAGE_SIZE)
-//Trap页开始位置
-#define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)
-```
-
-### `load_segment()`：加载程序段
-
-首先必须区分 ELF 的两种结构：
-
-- `Section Header`：主要用于链接、符号和节信息。如果是**可重定位 ELF 文件**则是**段头表（`Section Header`）**：
-
-  ``` c
-  typedef struct {
-      Elf64_Word    sh_name;        // 段名称在字符串表中的索引
-      
-      // 编译器通过段类型和段标志来决定如何处理一个段
-      Elf64_Word    sh_type;        // 段类型：无效段；程序段(代码段、数据段)；符号表；字符串表；段表字符串表；重定位表
-      Elf64_Xword   sh_flags;       // 段标志（可读、可写、可执行、需要在进程空间中分配内存）
-      
-      Elf64_Addr    sh_addr;        // 段需要加载在内存中的虚拟地址
-      Elf64_Off     sh_offset;      // 段在ELF文件中的偏移
-      Elf64_Xword   sh_size;        // 段大小
-      
-      Elf64_Word    sh_link;        // 链接到其他节区的索引
-      Elf64_Word    sh_info;        // 附加信息
-      Elf64_Xword   sh_addralign;   // 对齐要求
-      Elf64_Xword   sh_entsize;     // 表项大小（如有）
-  } Elf64_Shdr;
-  ```
-
-- `Program Header`：告诉加载器哪些内容应当放入进程内存，以及对应地址和权限。加载**可执行 ELF 文件主要依据程序头表(`Program Header`)**，而不是逐个加载 Section。
-
-  ``` c
-  typedef struct {
-      // 通过段类型和段标志来决定如何处理一个段
-      u32 p_type;		// 段类型：无效段；PT_LOAD：需要加载的程序段(代码段、数据段)；符号表；字符串表；段表字符串表；重定位表
-      u32 p_flags;	// 段标志（可读、可写、可执行、需要在进程空间中分配内存）
-      
-      u64 p_vaddr;	// 段被加载后在内存中的虚拟地址
-      u64 p_paddr;
-      u64 p_memsz;	// 在进程中占据多少字节
-      
-      u64 p_filesz;	// 段在文件中有多少有效字节
-      u64 p_offset;	// 段在ELF文件中的偏移
-      
-      u64 p_align;
-  } elf64_phdr_t;
-
-ELF 中的 Program Header 描述程序如何装载，而 `PT_LOAD` 表示需要映射到内存中的段。例如，一个 ELF 可能有以下程序段：
-
-| 程序段       | 典型内容        | 是否通常需要装载         |
-| ------------ | --------------- | ------------------------ |
-| `PT_LOAD`    | 代码、数据、BSS | 是                       |
-| `PT_DYNAMIC` | 动态链接信息    | 视加载器实现而定         |
-| `PT_NOTE`    | 注释、辅助信息  | 通常不作为普通内存段装载 |
-| `PT_INTERP`  | 动态链接器路径  | 需要相应动态链接支持     |
-
- 理解 `p_offset`、`p_vaddr`、`p_filesz` 和 `p_memsz`这四个字段是理解 ELF Loader 的关键。假设某个 `PT_LOAD`：
-
-| 字段       | 示例      | 含义                      |
-| ---------- | --------- | ------------------------- |
-| `e_phoff`  | `0x1000`  | 程序段在 ELF 文件中的偏移 |
-| `p_vaddr`  | `0x10000` | 程序段的目标虚拟地址      |
-| `p_filesz` | 5000      | 文件中有多少有效字节      |
-| `p_memsz`  | 9000      | 在进程内存中占多少字节    |
-
-注意：`p_memsz` 可以大于 `p_filesz`，超出的内存字节应当初始化为零，这是 ELF 规范明确规定的。
-
-![elf段的文件大小和进程大小](./assets/elf段的文件大小和进程大小.png)
-
----
-
-函数首先**遍历`Program Header`**，首先获取每个可加载的程序段描述符，**给每个可加载的程序段分配物理页并完成映射。**
-
-<img src="./assets/解析程序段表.png" alt="解析程序段表" style="zoom:80%;" />
-
-定义：
-
-``` c
-#define PGROUNDUP(sz)  (((sz)+PAGE_SIZE-1) & ~(PAGE_SIZE-1))
-#define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE-1))
-```
-
-假设：
-
-```c
-segment_start = 0x1800
-segment_end   = 0x4000
-PAGE_SIZE     = 0x1000
-```
-
-那么：
-
-```c
-first_page = PGROUNDDOWN(0x1800);
-```
-
-结果为：`first_page = 0x1000`。因为程序段虽然从 `0x1800` 开始，但包含的第一个物理页对应的虚拟地址页边界是 `0x1000`。
-
-接着：
-
-```c
-end_page = PGROUNDUP(0x4000);
-```
-
-结果仍然是：`end_page = 0x4000`.
-
-
-``` c
-/* 解析 program header, 把各 PT_LOAD 段装载到 proc 页表, 并计算 ustack/base_size */
-void load_segment(elf64_ehdr_t *ehdr, struct TaskControlBlock* proc)
-{
-    elf64_phdr_t *phdr;
-    u64 max_end_va = 0;
-	
-    // 遍历每个程序段描述符
-    for (size_t i = 0; i < ehdr->e_phnum; i++)
-    {
-        // 得到当前程序段描述符在 ELF 文件中的地址
-        phdr = (elf64_phdr_t*)((u8*)ehdr + ehdr->e_phoff + (u64)ehdr->e_phentsize * i);
-        
-        if (phdr->p_type == PT_LOAD)
-        {
-            assert(phdr->p_filesz <= phdr->p_memsz);
-            
-            // 在内核虚拟地址空间中加载的起始地址和结束地址
-            u64 segment_start = phdr->p_vaddr;
-            u64 segment_end   = segment_start + phdr->p_memsz;
-            u64 file_end 	  = segment_start + phdr->p_filesz;
-            // 检查有无溢出
-            assert(segment_end >= segment_start);
-		
-            if (segment_end > max_end_va)
-                max_end_va = segment_end;
-            if (phdr->p_memsz == 0)
-                continue;
-			
-            // 把 ELF 中的段权限 改为 页表权限
-            u8 map_perm = PTE_U | flags_to_mmap_prot(phdr->p_flags);
-            // 按页加载内存
-            u64 first_page = PGROUNDDOWN(segment_start);
-            u64 end_page   = PGROUNDUP(segment_end);
-            
-            // 从宽范围页开始遍历映射（包括 .bss 页）
-            for (u64 page_va = first_page; page_va < end_page; page_va += PAGE_SIZE)
-            {
-                PageTableEntry* pte = find_pte(&proc->pagetable, floor_virts(virt_addr_from_size_t(page_va)));
-                u64 paddr;
-                // 虚拟页还未映射物理页
-                if (pte == NULL)
-                {
-                    PhysPageNum ppn = kalloc();
-                    paddr = phys_addr_from_phys_page_num(ppn).value;
-                    PageTable_map(&proc->pagetable, virt_addr_from_size_t(page_va),
-                                  phys_addr_from_size_t(paddr), PAGE_SIZE, map_perm);
-                }
-                // 虚拟页已经完成了映射
-                else
-                {
-                    // #define PTE2PA(pte) (((pte) >> 10) << 12)
-                    assert(pte->bits & PTE_U);
-                    paddr = PTE2PA(pte->bits);
-                    pte->bits |= map_perm;
-                }
-				
-                // 当前映射页的结束地址
-                u64 page_end = page_va + PAGE_SIZE;
-                // 只 copy 页中有数据的地址（取当前页的起始地址与程序段起始地址中的较大值）
-                u64 copy_start = page_va > segment_start ? page_va : segment_start;
-                // 只 copy 页中有数据的地址（取当前页的结束地址与文件数据结束地址中的较小值）
-                u64 copy_end = page_end < file_end ? page_end : file_end;
-                if (copy_start < copy_end)
-                    memcpy((void*)(paddr + (copy_start - page_va)),	// (copy_start - page_va) ：数据在当前页面中的偏移
-                           (u8*)ehdr + phdr->p_offset + (copy_start - segment_start),
-                           copy_end - copy_start);
-				
-                // 清除 .bss 区
-                u64 zero_start = page_va > file_end ? page_va : file_end;
-                u64 zero_end   = page_end < segment_end ? page_end : segment_end;
-                if (zero_start < zero_end)
-                    memset((void*)(paddr + zero_start - page_va), 0, zero_end - zero_start);
-            }
-        }
-    }
-
-    // 计算用户栈位置与应用数据总大小(base_size 供 fork/exit 释放页表使用)
-    proc->ustack = 2 * PAGE_SIZE + PGROUNDUP(max_end_va);
-    proc->base_size = proc->ustack;
-}
-```
-
-### **`proc_ustack()`：创建用户栈并完成映射：**
-
-``` c
-void proc_ustack(struct TaskControlBlock *p)
-{
-    // 分配一页物理内存并获取物理地址
-    PhysPageNum ppn = kalloc();
-    u64 paddr = phys_addr_from_phys_page_num(ppn).value;
-    
-    PageTable_map(&p->pagetable, virt_addr_from_size_t(p->ustack - PAGE_SIZE), phys_addr_from_size_t(paddr), \
-                  PAGE_SIZE, PTE_R | PTE_W | PTE_U);
-}
-```
-
-## 符号表/重定位表
-
-全局符号 (Global): 可被其他模块引用局部符号； (Local): 仅在当前模块可见弱符号 ；(Weak): 可以被覆盖的全局符号。
-
-``` c
-typedef struct {
-    Elf64_Word    st_name;     // 符号名在字符串表中的索引
-    Elf64_Addr    st_value;    // 符号值（在可重定位文件中为所在段的偏移，可执行文件中为地址）
-    unsigned char st_info;     // 符号类型(变量、函数、段)和绑定属性(局部、全局、弱引用)
-    
-    unsigned char st_other;
-    
-    Elf64_Half    st_shndx;    // 符号所在段的索引
-    Elf64_Xword   st_size;     // 符号大小（字节数）
-} Elf64_Sym;
-
-
-typedef struct{
-    Elf64_Addr r_offset;  // 当前段需要重定位的地方相较于当前段的偏移地址
-    Elf64_Word r_info;    // 第八位表示重定位入口的类型，高24位表示符号在符号表中的下标
-}
-```
-
-**链接**的时候编译器会把所有可重定位文件中符号表中定义的所有符号和符号引用给收集起来，统一放到一个**全局符号表中**；使用收集到的信息来进行符号解析与重定位，调整代码中的地址。
-
----
-
-**符号解析**：链接器首先将每个可重定位文件的`.text,.data`段**合并**；由于**可重定位文件中的符号表中`st_value`是符号相对于当前段的偏移量和`st_name`是在字符串表中的下标**，因此链接器可以获取到每个符号的绝对地址与符号名,形成`“符号名- 地址”`的全局符号表。
-
-**重定位**：然后链接器再查找每个可重定位文件的重定位表，重定位表中每个元素存的是每个段需要重定位的符号相较于当前段的偏移地址（链接器可以获取到链接完成后的文件的哪里需要进行重定位）,以及需要重定位的符号在符号表中的下标（获取到需要重定位的符号名）, 然后链接器在全局符号表中依据符号名查找到真正的地址，完成重定位。
-
-**重定位操作只针对代码段（.text），数据段（.data/.bss）本身不需要被重定位。**
 
 
 
