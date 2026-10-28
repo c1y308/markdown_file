@@ -1,11 +1,10 @@
-```json
 {
   "http.proxy": "http://127.0.0.1:7900",
   "http.proxySupport": "override",
   "http.proxyStrictSSL": false,
   "http.noProxy": ["127.0.0.1", "localhost", "::1"]
 }
-```
+
 # 重构内核
 
 ## 卸载原内核
@@ -215,6 +214,1876 @@ make modules ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -C /home/dev/Luban
 sudo dpkg -i linux-image-6.1.99-rt36-rk3588_*_arm64.deb
 sudo dpkg -i linux-headers-6.1.99-rt36-rk3588_*_arm64.deb
 ```
+
+# 线程
+
+## 线程实时化
+
+### 锁页
+
+#### 内存交换
+
+核心作用：**把进程的内存页锁在物理内存RAM中，避免被换出到swap**。它最主要的目的**不是“让内存访问更快”**，而是：**降低不可预测的 page falut / paging 延迟**。普通 Linux 程序看到的是**虚拟内存（virtual memory）**。例如：
+
+```c
+double joint_pos[32];
+```
+
+从进程角度看，它有一个虚拟地址：
+
+```
+0x7f123456...
+```
+
+但这个虚拟地址对应的物理内存页，并不一定始终存在于 RAM。大概可以理解成：
+
+```
+程序虚拟地址
+     │
+     ▼
+Virtual Page
+     │
+     ├── RAM 中       ← 快
+     │
+     └── swap / 尚未装入
+```
+
+如果 CPU 访问一个当前不在 RAM 中的页面，就可能产生：$$\boxed{\text{page fault}}$$，然后内核需要处理：
+
+```
+CPU access
+   ↓
+page fault
+   ↓
+进入 kernel
+   ↓
+找到 / 分配 physical page
+   ↓
+必要时从磁盘 swap 读取
+   ↓
+更新 page table
+   ↓
+恢复程序运行
+```
+
+这个过程对普通程序没什么。但对于：
+
+```
+EtherCAT RT thread
+1000 Hz
+period = 1 ms
+```
+
+如果某个周期理论预算是：$T=1 ms,T=1\text{ ms}$,却突然因为 page fault 卡：$50μs, 200μs, 1ms$，实时周期就可能 miss deadline。
+
+#### 线程栈
+
+**进程负责提供资源和地址空间，线程负责执行代码，而栈负责保存线程执行过程中的函数调用状态。**但这句话只是第一层理解。我们需要进一步回答几个问题：
+
+1. 为什么一个进程可以有多个线程，但每个线程都需要自己的栈？
+2. 为什么线程之间可以访问彼此的栈，却还要为每个线程分配独立的栈？
+3. 线程的栈和进程的堆（Heap）有什么本质区别？
+4. CPU 是如何利用栈执行函数调用、处理中断和完成线程切换的？
+5. 用户态栈（User Stack）与内核态栈（Kernel Stack）是什么关系？
+
+下面按照 进程 → 地址空间 → 堆与栈 → 线程 → 函数调用 → 上下文切换 的逻辑来讲。
+
+##### 保存线程的函数调用状态
+
+一个进程内部可以存在多个执行流，这些线程处于同一个进程中，因此能够共享一些资源，但是它们各自具有独立的执行状态。
+
+<img src="./assets/线程总览.png" alt="线程总览" style="zoom: 80%;" />
+
+这里引出一个关键区别：**线程之间共享进程的虚拟地址空间，但是不共享同一套函数调用栈**。为什么？假设一个进程创建两个线程：
+
+``` c
+void worker()
+{
+    int counter = 0;
+
+    counter++;
+
+    do_something();
+}
+```
+
+线程 A、B 同时执行 `worker()`。虽然它们执行的是同一份代码，但是运行过程完全独立。
+
+![为什么线程要独立的栈](./assets/为什么线程要独立的栈.png)
+
+此时：
+
+- 线程 A 正在 `do_something()` 中，已经调用了另一个函数；
+- 线程 B 还在 `worker()` 内执行；
+- 两个线程的程序计数器 `PC` 不同；
+- 两个线程的栈指针 `SP` 不同；
+- 两个 `counter` 是两个不同的局部变量实例。
+
+如果它们使用同一个栈，就会产生严重问题。线程 A 刚保存返回地址和局部变量，线程 B 可能就修改了相同的位置。线程 A 后续恢复执行时，函数调用现场已经被破坏，程序便无法正确运行。因此，每个普通线程都需要一块独立的栈空间。
+
+##### 线程切换时栈保存上下文
+
+假设同一进程有两个线程：
+
+- Thread A：正在控制电机；
+- Thread B：正在执行神经网络推理。
+
+CPU 只有一个可用核心，两条线程必须交替执行。开始时：
+
+```c
+CPU 正在执行 Thread A
+
+PC = A 当前执行地址
+SP = A 的栈地址
+```
+
+突然发生定时器中断，操作系统决定调度线程 B。CPU 应该如何从线程 A 切换到线程 B？
+
+**CPU 寄存器必须保存。**CPU 的寄存器是当前执行硬件线程的资源，不会天然为每个软件线程复制一套。例如：
+
+```
+Thread A:
+PC = 0x1000
+SP = 0x8000
+ra = 0x1200
+
+Thread B:
+PC = 0x2000
+SP = 0x9000
+ra = 0x2300
+```
+
+CPU 准备执行 B 之前，必须保证 A 的必要寄存器状态得到保存。这样以后重新调度 A 时，才能继续从之前的位置执行。操作系统把这件事称为：上下文切换（Context Switch）。对用户线程而言，需要区分：
+
+- 用户态执行现场：进入内核时保存的用户寄存器、用户 PC、用户 SP 等；
+- 内核态调度现场：内核暂停当前任务、切换其他任务时需要保存的寄存器及内核栈位置。
+
+在之前研究的 RISC-V 教学内核里，`__alltraps` 和 `__switch` 就分别与这两个层次相关。
+
+<img src="./assets/上下文切换.png" alt="上下文切换" style="zoom: 80%;" />
+
+假设发生切换时，线程 A 的调用栈是：
+
+```c
+Thread A 的用户栈
+┌─────────────────────┐
+│ send_command()      │
+├─────────────────────┤
+│ motor_control()     │
+├─────────────────────┤
+│ main()              │
+└─────────────────────┘
+```
+
+线程 B 的调用栈是：
+
+```c
+Thread B 的用户栈
+┌─────────────────────┐
+│ forward()           │
+├─────────────────────┤
+│ infer()             │
+├─────────────────────┤
+│ policy_thread()     │
+└─────────────────────┘
+```
+
+**线程 A 被切换出去，不意味着其调用栈被删除，栈仍然存在于内存中，只是 CPU 暂时不再使用它。**等到 A 再次获得 CPU，只需恢复相应执行状态，包括 `sp`，就可以继续使用 A 原来的调用栈。因此，线程能够被暂停、恢复，一个重要前提就是每个线程拥有可独立保留的调用栈及对应上下文。线程程切换并不需要复制整块栈内存，通常只需要保存和恢复必要的寄存器、栈指针及相关调度状态，**原有栈内容就留在原处**。
+
+#### `mlockall()`：锁进程页
+
+```c
+#include <sys/mman.h>
+
+int mlockall(int flags);
+```
+
+Linux 手册定义的是：它可以把调用进程地址空间中全部或部分页面锁入 RAM，阻止这些页面被换出到 swap；**以完整的 `memory page` 为单位**。
+
+```c
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+可以理解为：
+
+```
+           process virtual memory
+                    │
+       ┌────────────┴─────────────┐
+       ▼                          ▼
+currently mapped            future mappings
+     pages                       pages
+       │                          │
+ MCL_CURRENT                 MCL_FUTURE
+       │                          │
+       └────────────┬─────────────┘
+                    ▼
+              locked in RAM
+```
+
+##### `MCL_CURRENT`
+
+```c
+mlockall(MCL_CURRENT);
+```
+
+意思是：$\boxed{\text{锁住当前已经映射进进程地址空间的所有页面}}$，包括很多东西，Linux 手册明确说明，**`mlockall()` 可以覆盖代码段、数据段、栈、共享库、共享内存以及 mmap 文件等当前映射**。关键词是：**CURRENT**。假设：
+
+```c
+mlockall(MCL_CURRENT);
+
+std::vector<double> x;
+x.resize(10000000);
+```
+
+后面这次 `resize()` 新分配出来的内存：$\boxed{不一定被锁定}$，因为它是之后产生的 mapping。
+
+##### `MCL_FUTURE`
+
+所以实时程序经常还加：$\boxed{MCL\_FUTURE}$，即：
+
+```c
+mlockall(MCL_CURRENT | MCL_FUTURE);
+```
+
+含义是：$\boxed{\text{当前 + 将来映射的内存都进行锁定}}$，例如以后出现：
+
+```c
+malloc();
+new;
+mmap();
+stack growth;
+```
+
+对应的新页面也进入 memory locking 范围。Linux 文档特别列出了 heap / stack growth、`mmap()`、`malloc()` 等后续映射场景。所以实时程序里最常见的是：
+
+```
+if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+    perror("mlockall");
+}
+```
+
+而不是单独：
+
+```
+MCL_CURRENT
+```
+
+##### `MCL_ONFAULT`
+
+Linux 4.4 起还有$\boxed{MCL\_ONFAULT}$，例如：
+
+```c
+mlockall(
+    MCL_CURRENT |
+    MCL_FUTURE  |
+    MCL_ONFAULT
+);
+```
+
+它和普通模式稍微不同。普通是现在就把需要的页面弄 resident 并 lock，而`MCL_ONFAULT`的思想是：
+
+```
+先标记 mapping
+        ↓
+页面第一次真正 fault in
+        ↓
+再 lock
+```
+
+因此**对于地址空间很大，但只会用其中一小部分的程序**，`ONFAULT` 可以避免一上来锁大量实际上不会访问的页面。Linux 文档也说明 `MCL_ONFAULT` 是为了高效处理大型映射、但实际只使用少量页面的场景。
+
+##### 一定检查返回值
+
+典型代码应该永远检查返回值：
+
+```c
+if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+    perror("mlockall");
+    return -1;
+}
+```
+
+成功：`0`；失败：`-1`。同时设置：`errno`。Linux 上最常见的原因之一就是：$\boxed{\texttt{RLIMIT\_MEMLOCK}}$，**它限制普通进程最多能锁多少 RAM**。当前 Linux 对非特权进程会根据 `RLIMIT_MEMLOCK` 限制可锁内存，而具有 `CAP_IPC_LOCK` capability 的特权进程不受这一限制。可以通过：
+
+```
+ulimit -l
+```
+
+也可以通过：
+
+```
+ulimit -a
+```
+
+Linux 还存在 `CAP_IPC_LOCK`，它允许进程进行 memory locking。所以一些实时程序会通过：
+
+- systemd service；
+- limits.conf；
+- capabilities；
+
+给进程合适的权限，而不是简单粗暴：
+
+```
+sudo ./robot
+```
+
+例如 systemd 服务里经常能看到类似配置：
+
+```
+LimitMEMLOCK=infinity
+```
+
+其目标就是允许实时进程锁住需要的 RAM。
+
+#### `munlockall()`（解除锁页）
+
+对应的解除操作：
+
+```
+munlockall();
+```
+
+意思是：$\boxed{\text{解除当前进程所有 locked pages}}$，之后这些页面重新允许被内核换出。不过进程退出时锁也会自动解除，所以很多长期运行的 RT daemon 不一定显式调用。
+
+#### 查看进程锁了多少？
+
+Linux 可以通过：
+
+```shell
+cat /proc/<pid>/status
+```
+
+查看`VmLck:`这一项。例如：
+
+```shell
+grep VmLck /proc/12345/status
+```
+
+可能得到：
+
+```shell
+VmLck:    82432 kB
+```
+
+它表示该进程目前锁住了多少内存。Linux man page 也明确指出 `/proc/PID/status` 中的 `VmLck` 字段可以观察 `mlock()`、`mlockall()` 等锁定的内存量。也可以：
+
+```shell
+grep VmLck /proc/$(pidof your_program)/status
+```
+
+#### 注意`fork()`
+
+Linux 文档特别警告实时进程：
+
+> 在 `mlockall()` 之后应避免 `fork()`。
+
+原因是 `fork()` 会为地址空间准备：$\text{Copy-on-Write}$，之后一旦写：
+
+```
+write
+ ↓
+COW page fault
+ ↓
+allocate/copy page
+```
+
+可能出现明显 latency。Linux man page 甚至明确指出，在 `mlockall()` / `mlock()` 后，对实时进程来说不应调用 `fork()`，即使是进程中的低优先级线程调用也应避免。所以：
+
+```
+初始化
+ ↓
+fork / daemonize（如果需要）
+ ↓
+初始化资源
+ ↓
+mlockall
+ ↓
+进入 realtime
+```
+
+通常比：
+
+```
+mlockall
+ ↓
+RT running
+ ↓
+fork()
+```
+
+合理得多。
+
+### 绑核
+
+$\boxed{CPU \  affinity = 限制某个线程在哪些CPU \ core上运行}$，比如一台 8 核机器逻辑 CPU 编号为：
+
+```
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+```
+
+默认情况下，一个普通 Linux 线程可能这一毫秒在 CPU2：下一次被调度时又跑到 CPU5：RT thread ──> CPU5。如果设置：`affinity = {CPU6}`，那么：
+
+```
+RT thread
+    │
+    └────────> CPU6 only
+```
+
+Linux scheduler 以后只能在 CPU6 上调度它。
+
+> 绑核和设置线程调度策略和优先级的区别
+
+`SCHED_FIFO + priority` 决定：$\boxed{\text{同一个 CPU 上，谁优先运行}}$；绑核决定：$\boxed{\text{这个线程允许去哪些 CPU 上运行}}$。例如：
+
+```
+Thread A: RT EtherCAT, FIFO 80
+Thread B: policy, FIFO 70
+Thread C: logging
+Thread D: ROS
+Thread E: kernel worker
+```
+
+如果不绑核，可能出现：
+
+```
+           t0        t1        t2        t3
+
+RT       CPU3      CPU5      CPU2      CPU5
+Policy   CPU1      CPU3      CPU4      CPU2
+Logger   CPU5      CPU1      CPU6      CPU4
+```
+
+RT thread 在 CPU 之间迁移。这种行为叫：$\boxed{\text{CPU migration}}$，对于普通软件问题不大，但对实时系统不够理想，这是 affinity 最关键的意义之一。假设 RT thread 原来跑在 CPU3：
+
+```text
+CPU3:
+L1 cache
+L2 cache
+TLB
+branch predictor state
+```
+
+RT thread 最近使用的数据，例如：
+
+```
+motor_state
+pdo_buffer
+controller_state
+setpoint
+```
+
+可能已经大量进入 CPU3 的 cache。下一周期 Linux 把线程迁移到 CPU6：
+
+```
+CPU3                    CPU6
+
+L1: motor_state         L1: ???
+L2: controller          L2: ???
+     ↓
+ RT thread migrates ────────>
+```
+
+CPU6 的本地 cache 中很可能没有这些数据。于是要重新：
+
+```
+L1 miss
+   ↓
+L2 miss
+   ↓
+LLC
+   ↓
+memory
+```
+
+这会增加执行时间的不确定性。实时系统最怕的其实不一定是：平均执行时间稍微长，而是：$\boxed{\text{最坏执行时间 / jitter 不稳定}}$。所以希望：
+
+```
+cycle 1      RT → CPU6
+cycle 2      RT → CPU6
+cycle 3      RT → CPU6
+...
+cycle 10000  RT → CPU6
+```
+
+而不是到处漂。
+
+#### 本质是 CPU mask
+
+Linux 内核里，CPU affinity 通常不是 cpu = 6 这种单个数字概念。而是$\boxed{CPU \ mask}$，比如：
+
+```c++
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+ 0    0    0    0    0    0    1    0
+```
+
+意思是：
+
+```c++
+allowed CPUs = {6}
+```
+
+也可以写：
+
+```c++
+CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
+ 0    0    0    0    1    0    1    0
+```
+
+代表：
+
+```c++
+allowed CPUs = {4, 6}
+```
+
+因此 affinity 并不一定是“绑死一个核”。它真正的含义是：**scheduler 只能从这个 allowed CPU set 中选。**具体代码（**相关操作宏的参数都是先CPU序号，再集合**）：
+
+``` c++
+#include<pthread.h>			// 哪个线程		// 多少个 cpu			// cpu 集合
+int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
+
+#include<sched.h>
+
+cpu_set_t expected;
+CPU_ZERO(&expected);
+
+for (const int cpu : options.cpu_ids) {  // options.cpu_ids 是一个 vector 容器
+    CPU_SET(cpu, &expected);
+}
+
+result = pthread_setaffinity_np(self, sizeof(expected), &expected);
+
+if (result != 0) {
+    return thread_setup_error("pthread_getaffinity_np", result);
+}
+```
+
+验证是否绑核成功：
+
+``` c
+    // 验证 CPU 绑核是否成功
+    cpu_set_t actual;
+    CPU_ZERO(&actual);
+    result = pthread_getaffinity_np(self, sizeof(actual), &actual);
+    if (result != 0) {
+        return thread_setup_error("pthread_getaffinity_np", result);
+    }
+    if (!CPU_EQUAL(&expected, &actual)) {
+        return thread_setup_error("thread affinity verification", 0);
+    }
+```
+
+#### `lscpu`：查看核分布
+
+RK3588（瑞芯微 Rockchip RK3588）采用 8 核 ARM CPU，4 个 Cortex-A76 大核 + 4 个 Cortex-A55 小核，属于异构多核（Heterogeneous Multi-Core）架构。
+
+| CPU 编号 | 核心类型   | 最高标称频率 | 性能定位 | 调频策略组 |
+| -------- | ---------- | ------------ | -------- | ---------- |
+| CPU0     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU1     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU2     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU3     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
+| CPU4     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
+| CPU5     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
+| CPU6     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
+| CPU7     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
+
+``` shell
+cat@lubancat:~/robot_deploy$ lscpu -e
+CPU SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ       MHZ
+  0      0    0 0:0:0:0          yes 1800.0000 408.0000 1008.0000
+  1      0    1 1:1:1:0          yes 1800.0000 408.0000 1008.0000
+  2      0    2 2:2:2:0          yes 1800.0000 408.0000 1008.0000
+  3      0    3 3:3:3:0          yes 1800.0000 408.0000 1800.0000
+  4      0    0 4:4:4:0          yes 2304.0000 408.0000 1416.0000
+  5      0    1 5:5:5:0          yes 2304.0000 408.0000 1416.0000
+  6      0    2 6:6:6:0          yes 2304.0000 408.0000  600.0000
+  7      0    3 7:7:7:0          yes 2304.0000 408.0000  600.0000
+```
+
+#### 绑核是"线程级"理解
+
+假设：
+
+```
+robot_controller process
+│
+├── EtherCAT RT thread
+├── Policy thread
+├── Monitor thread
+├── IMU thread
+└── Logger thread
+```
+
+它们虽然属于同一个 process，但 Linux scheduler 真正调度的是：$\boxed{\text{task / thread}}$，所以完全可以：
+
+```
+EtherCAT RT      → CPU6
+Policy           → CPU4
+IMU              → CPU3
+Monitor          → CPU2
+Logger           → CPU1
+```
+
+而不是：
+
+```
+整个 robot_controller process → CPU6
+```
+
+这也是为什么实时程序通常在线程创建后，对每个关键线程单独配置 affinity。
+
+#### 真正的 RT CPU 通常是“绑核 + 隔离”
+
+真正追求低 jitter 时，一般不是只做：
+
+```
+RT thread → CPU6
+```
+
+还希望：
+
+```
+                CPU6
+
+RT thread ─────────────→ CPU6
+
+normal process ──X─────→ CPU6
+kworker        ──X─────→ CPU6
+IRQ            ──X─────→ CPU6   （视配置而定）
+```
+
+这才接近：$\boxed{\text{dedicated realtime CPU}}$，Linux 中常见手段包括：
+
+```
+isolcpus
+nohz_full
+rcu_nocbs
+cpuset
+IRQ affinity
+```
+
+这些和 thread affinity 是配套关系。可以先把它理解成三个层级：
+
+$\boxed{Thread \ affinity→CPU \ isolation→IRQ \ | \ kernel \ housekeeping \  isolation}$
+
+### 调度策略与优先级
+
+告诉 Linux scheduler，当多个 runnable thread 同时竞争 CPU 时，哪一个线程应该优先运行。它最主要的目的不是“让线程计算得更快”，而是：**让时间敏感的实时线程在需要运行时，能够尽快抢到 CPU，从而降低 scheduling latency 和 jitter。**
+
+#### 调度策略
+
+Linux 常见 scheduling policy 包括：
+
+```c
+SCHED_OTHER    0   普通 Linux 调度
+
+SCHED_BATCH    3   batch workload
+
+SCHED_IDLE     5   极低优先级普通任务
+
+SCHED_FIFO     1   实时 FIFO
+SCHED_RR       2   实时 Round-Robin
+
+SCHED_DEADLINE  6  deadline-based RT scheduling
+
+// 本项目中定义调度策略：
+enum class ThreadSchedulingPolicy {
+    INHERIT,    // 继承，不修改当前线程的调度策略和优先级
+    OTHER,      // SCHED_OTHER，普通调度策略，优先级为 0（用 nice 值）
+    FIFO,       // SCHED_FIFO，实时调度策略，优先级范围为 [1, 99]
+};
+```
+
+#### 查询系统支持的优先级
+
+``` c
+int min_priority = sched_get_priority_min(SCHED_FIFO);
+
+int max_priority = sched_get_priority_max(SCHED_FIFO);
+```
+
+#### `pthread_setschedparam()`：设置线程的策略和优先级
+
+你的 C++ pthread 程序里最常见的是：
+
+```c++
+#include <pthread.h>
+
+int pthread_setschedparam(
+    pthread_t thread,					// 线程
+    int policy,							// 调度策略
+    const struct sched_param *param		// 优先级
+);
+```
+
+`pthread_setschedparam()` 同时设置：$\boxed{ \text{scheduling policy} + \text{scheduling priority} }$。
+
+描述优先级的数据结构为：
+
+``` c
+struct sched_param {
+    int sched_priority;
+};
+```
+
+#### `pthread_setschedprio()`：只设置线程的优先级
+
+如果线程已经是$\boxed{SCHED\_FIFO}$，只是想修改优先级，可以：
+
+```c++
+pthread_setschedprio(thread, 80);
+```
+
+#### `chrt`：查看线程优先级
+
+例如查看进程：
+
+```shell
+chrt -p <pid>
+```
+
+可能得到：
+
+```shell
+pid 1234's current scheduling policy: SCHED_FIFO
+pid 1234's current scheduling priority: 80
+```
+
+`chrt` 可以查看或设置 `SCHED_OTHER`、`SCHED_FIFO`、`SCHED_RR` 等调度策略。也可以直接启动：
+
+```
+sudo chrt -f 80 ./robot_controller
+```
+
+意思：
+
+```
+-f
+ ↓
+SCHED_FIFO
+
+80
+ ↓
+priority 80
+```
+
+#### 注意锁带来的优先级翻转
+
+解决经典 priority inversion 的一个办法是：$\boxed{\text{Priority Inheritance}}$，mutex 可以配置：
+
+```c++
+PTHREAD_PRIO_INHERIT
+```
+
+例如：
+
+```c++
+pthread_mutexattr_t attr;
+
+pthread_mutexattr_init(&attr);
+
+pthread_mutexattr_setprotocol(
+    &attr,
+    PTHREAD_PRIO_INHERIT
+);
+
+pthread_mutex_init(&mutex, &attr);
+```
+
+现在：
+
+```
+L priority 40
+持有 mutex
+```
+
+H开始等待这个 mutex，系统临时把 L 提升：
+
+```
+L:
+
+40
+ ↓
+80 temporarily
+```
+
+于是 M priority 60 无法再抢占 L。L 可以赶快：
+
+```
+finish critical section
+      ↓
+unlock
+      ↓
+H 获取 mutex
+```
+
+然后 L 再恢复原来的：
+
+```
+priority 40
+```
+
+POSIX 定义的 `PTHREAD_PRIO_INHERIT` 正是通过让 mutex owner 临时继承等待者的更高优先级，来限制这类 priority inversion。PREEMPT_RT 内核中的 `rtmutex` 也大量利用 priority inheritance。
+
+#### 注意中断饿死
+
+和MCU中的中断可以永远打断FreeRTOS的调度不同，PREEMPT_RT 很重要的一项改造是：$\boxed{\text{大多数 IRQ handler 被线程化}}$，即：
+
+```
+NIC hardware interrupt
+       ↓
+minimal hard IRQ
+       ↓
+wake IRQ thread
+       ↓
+IRQ thread 由 scheduler 调度
+```
+
+内核当前文档说明，**PREEMPT_RT 中默认 threaded IRQ handler 使用**：
+
+```
+SCHED_FIFO
+priority = 50
+```
+
+（具体系统仍应实际检查配置。）
+
+于是你的系统可能实际存在：
+
+```
+EtherCAT RT thread      FIFO 80
+
+EtherCAT NIC IRQ        FIFO 50
+```
+
+这时候就出现**用户 RT priority 太高可能反过来饿死设备 IRQ**。假设：
+
+```
+EtherCAT RT  = FIFO 80
+NIC IRQ      = FIFO 50
+```
+
+如果 EtherCAT RT thread：
+
+```c
+while (...) {
+    busy_wait();
+}
+```
+
+因为：80>50那么 IRQ thread甚至可能无法运行。于是出现：
+
+```
+RT thread 等 NIC 数据
+       ↑
+       │
+NIC IRQ thread 想处理数据
+       │
+       └── 被 RT 80 抢占
+```
+
+变成：$\boxed{\text{自己把自己依赖的 producer 饿死}}$所以 realtime priority 设计绝不能只看：“谁最重要？”而应该看：$\boxed{\text{dependency graph}}$即：谁依赖谁先完成工作？以EtherCAT电机控制为例，现在大致是：
+
+```
+EtherCAT / motor RT    1 kHz
+Policy                 50 Hz
+IMU
+diagnostics
+logger
+```
+
+类似这样的优先级关系通常比较合理：
+
+```
+时间敏感程度
+
+EtherCAT RT
+    │
+    │ high
+    ▼
+Policy
+    │
+    ▼
+IMU / auxiliary RT
+    │
+    ▼
+monitor
+    │
+    ▼
+logger
+```
+
+例如作为初始实验配置：
+
+```
+EtherCAT RT       FIFO 80
+Policy            FIFO 70
+IMU               FIFO 60 或普通
+Monitor           SCHED_OTHER
+Logger            SCHED_OTHER
+```
+
+## 线程分配
+
+最关键的线程关系：`policy_main` 内同步执行观测和 ORT；`policy_cmd` 消费模型关节目标，结合更新的反馈计算电机命令；`ecat_rt` 消费命令并收发 PDO。三者按各自周期运行，没有每帧互相等待的同步屏障。日志通过命令线程回传，由策略线程入队，最后在后台线程写盘。
+
+| 线程                        | 当前配置                               | 职责                                                     |
+| --------------------------- | -------------------------------------- | -------------------------------------------------------- |
+| `policy_main`               | CPU4，SCHED_OTHER，策略周期 20 ms      | 主程序、观测构建、ORT 推理、结果准入和日志入队           |
+| `imu_can_rx`                | CPU2，SCHED_OTHER，按 CAN 到达事件运行 | 接收/解析 IMU，发布 AHRS 快照                            |
+| `policy_cmd`                | CPU6，FIFO70，1 ms                     | 消费目标、读取反馈、计算脚踝力矩及阻抗命令               |
+| `ecat_rt`                   | CPU7，FIFO80，1 ms                     | 命令/STOP 状态机、EtherCAT PDO 收发、反馈发布            |
+| `xbox_poll`                 | CPU0–1，SCHED_OTHER                    | 设备事件读取和速度缓存；20 ms 参数是 poll 等待超时       |
+| `infer_log`                 | CPU0–1，SCHED_OTHER                    | CSV 写入，默认每 1 s 或退出时 flush                      |
+| `motor_status` / `rt_event` | CPU0–1，SCHED_OTHER                    | 公共状态发布和实时事件转发；电机 controller.start 中启动 |
+
+## 配置实时线程
+
+### `ThreadRuntimeOptions`
+
+`ThreadRuntimeOptions`存储每个线程的**实时性配置参数**：
+
+``` c
+// 调度策略
+enum class ThreadSchedulingPolicy {
+    INHERIT,    // 继承，不修改当前线程的调度策略和优先级
+    OTHER,      // SCHED_OTHER，普通调度策略，优先级为 0（用 nice 值）
+    FIFO,       // SCHED_FIFO，实时调度策略，优先级范围为 [1, 99]
+};
+
+// 线程运行时选项
+struct ThreadRuntimeOptions {
+    std::vector<int> cpu_ids;               // 允许线程运行的 CPU 集合(绑核)
+    ThreadSchedulingPolicy scheduling_policy{ThreadSchedulingPolicy::INHERIT};  // 调度策略 
+    int priority{0};                        // 调度优先级
+    std::size_t stack_prefault_bytes{0};    // 进入业务循环前预触碰的栈空间
+};
+```
+
+通过`make_thread_options()`将传入的配置参数配置为`ThreadRuntimeOptions`结构体：
+
+``` c++
+inline robot_base::ThreadRuntimeOptions make_thread_options(
+    std::vector<int> cpu_ids,								// 许线程运行的 CPU 集合(绑核)
+    robot_base::ThreadSchedulingPolicy scheduling_policy,	// 调度策略 
+    int priority = 0,										// 调度优先级
+    std::size_t stack_prefault_bytes = 0U)					// 进入业务循环前预触碰的栈空间
+{
+    robot_base::ThreadRuntimeOptions options;
+    options.cpu_ids = std::move(cpu_ids);
+    options.stack_prefault_bytes = stack_prefault_bytes;
+    options.scheduling_policy = scheduling_policy;
+    options.priority = priority;
+    return options;
+}
+```
+
+### `RuntimeThreadingConfig`
+
+``` c
+// src/inference/include/robot/robot_config.hpp
+struct RuntimeThreadingConfig {
+    bool require_host_preflight{false};			// 是否需要硬件环境检查
+    bool require_process_memory_lock{false};	// 是否需要锁内存
+
+    robot_base::ThreadRuntimeOptions policy_main;
+    // 保留独立电机工具的 FIFO80 默认调度，不指定 CPU 集合。
+    robot_base::ThreadRuntimeOptions motor_rt{{}, robot_base::ThreadSchedulingPolicy::FIFO, 80, 0};
+    robot_base::ThreadRuntimeOptions policy_command;
+    robot_base::ThreadRuntimeOptions imu_reader;
+    robot_base::ThreadRuntimeOptions background;
+	
+    // onnx 内部线程配置
+    int onnx_intra_op_threads{1};
+    int onnx_worker_cpu_id{-1};  // 双线程实验模式的额外 worker；单线程时不使用。
+};
+
+
+struct RobotInterfaceConfig {
+	/*.其他配置结构体.*/
+    
+    // 线程运行配置
+    RuntimeThreadingConfig runtime;
+};
+```
+
+最终向外暴露`make_rk3588_runtime_profile`，**通过此函数得到配置完毕的`RuntimeThreadingConfig`**：
+
+| 线程                          | CPU  | 调度策略 | 优先级 | 栈预触碰 |
+| ----------------------------- | ---- | -------- | ------ | -------- |
+| 策略主线程:`policy_main`      | 4    | OTHER    | 0      | 128 KiB  |
+| EtherCAT 实时线程:`motor_rt`  | 7    | FIFO     | 80     | 128 KiB  |
+| 策略命令线程:`policy_command` | 6    | FIFO     | 70     | 128 KiB  |
+| IMU 接收线程:`imu_reader`     | 2    | OTHER    | 0      | 64 KiB   |
+| 日志等后台线程:`background`   | 0、1 | OTHER    | 0      | 0        |
+
+``` c
+// 固定 RK3588 部署配置，由调用方显式选择。
+inline RuntimeThreadingConfig make_rk3588_runtime_profile()
+{
+    RuntimeThreadingConfig profile;
+    profile.require_host_preflight = true;
+    profile.require_process_memory_lock = true;
+    using robot_base::ThreadSchedulingPolicy;
+    profile.policy_main     = make_thread_options({4}, ThreadSchedulingPolicy::OTHER,
+                                                  0, 128U * 1024U);
+    profile.motor_rt        = make_thread_options({7}, ThreadSchedulingPolicy::FIFO,
+                                                  80, 128U * 1024U);
+    profile.policy_command  = make_thread_options({6}, ThreadSchedulingPolicy::FIFO,
+                                                  70, 128U * 1024U);
+    profile.imu_reader      = make_thread_options({2}, ThreadSchedulingPolicy::OTHER,
+                                                  0, 64U * 1024U);
+    profile.background      = make_thread_options({0, 1}, ThreadSchedulingPolicy::OTHER);
+    profile.onnx_intra_op_threads = 1;
+    profile.onnx_worker_cpu_id = 5;
+    return profile;
+}
+
+// src/inference/examples/policy_test.cpp 中调用
+cfg.runtime = inference::make_rk3588_runtime_profile();
+```
+
+### 硬件环境检查
+
+#### `environment_check()`
+
+``` c
+// src/inference/examples/policy_test.cpp 中调用
+if (cfg.runtime.require_host_preflight && !robot_base::environment_check(config_error)) {
+    std::cerr << "[ERROR] RK3588 RT host preflight failed: "
+              << config_error << "\n";
+    return 1;
+}
+```
+
+`environment_check`中调用`deploy/rk3588/robot-rt-setup.sh`进行硬件环境检查：
+
+``` c
+// 调用固定 RK3588 部署脚本检查当前环境；检查规则由 robot-rt-setup 维护。
+inline bool environment_check(std::string& error)
+{
+    error.clear();
+    char executable[] = "/usr/local/sbin/robot-rt-setup";
+    char check[] = "check";
+    char* arguments[] = {executable, check, nullptr};
+    pid_t child;
+    const int spawn_error = ::posix_spawn(
+        &child, executable, nullptr, nullptr, arguments, environ);
+    if (spawn_error != 0) {
+        error = std::string("cannot execute /usr/local/sbin/robot-rt-setup check: ") +
+            std::strerror(spawn_error);
+        return false;
+    }
+
+    int status;
+    pid_t waited;
+    do {
+        waited = ::waitpid(child, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    if (waited == -1) {
+        error = std::string("cannot wait for robot-rt-setup check: ") + std::strerror(errno);
+        return false;
+    }
+    if (WIFEXITED(status)) {
+        if (WEXITSTATUS(status) == 0) {
+            return true;
+        }
+        error = "robot-rt-setup check failed: exit_status=" + std::to_string(WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        error = "robot-rt-setup check terminated: signal=" + std::to_string(WTERMSIG(status));
+    } else {
+        error = "robot-rt-setup check did not exit normally";
+    }
+    return false;
+}
+```
+
+#### `robot-rt-setup.sh`
+
+### 线程配置函数
+
+#### `ThreadSetupResult`：存储配置结果
+
+``` c
+// src/base/include/rt_thread_config/thread_runtime.hpp
+// 线程启动握手的设置结果。
+struct ThreadSetupResult {
+    bool success{false};
+    std::string error;
+};
+```
+
+#### `start_configured_thread()`：启动并配置线程
+
+```c
+// 启动配置好的线程（用启动握手消除竞态）
+template <typename Callable>
+bool start_configured_thread(std::thread& output,   // 线程对象
+                             const char*  name,     // 线程名称
+                             const ThreadRuntimeOptions& options,   // 线程运行时选项
+                             Callable&& callable,   // 线程执行函数
+                             std::string& error)
+{
+    if (output.joinable()) {
+        error = "thread is already joinable";
+        return false;
+    }
+
+    // 一次性结果发送端（producer）
+    std::promise<ThreadSetupResult> setup_promise;
+    // 一次性结果接收端（consumer）
+    std::future<ThreadSetupResult>  setup_future = setup_promise.get_future();
+
+    try {
+        output = std::thread(
+            [name_string = std::string(name ? name : ""),
+             options,
+             setup_promise = std::move(setup_promise),
+             function      = std::forward<Callable>(callable)
+            ] () mutable {
+
+                ThreadSetupResult setup;
+
+                // 配置子线程
+                try {
+                    setup = configure_current_thread(name_string.c_str(), options);
+                } catch (const std::exception& exception) {
+                    setup.error = std::string("thread setup exception: ") +
+                                  exception.what();
+                } catch (...) {
+                    setup.error = "thread setup exception";
+                }
+
+                // 传递配置结果给主线程
+                setup_promise.set_value(setup);
+
+                // 配置成功才执行线程函数（保证业务函数绝不会在配置成功前执行）
+                if (setup.success) {
+                    function();
+                }
+            });
+    } catch (const std::exception& exception) {
+        error = std::string("failed to create thread: ") + exception.what();
+        return false;
+    } catch (...) {
+        error = "failed to create thread";
+        return false;
+    }
+
+    // 父线程等待子线程配置完成（阻塞等待，直到子线程调用 set_value() 或者异常退出）
+    ThreadSetupResult setup;
+    try {
+        setup = setup_future.get();  // 阻塞行为（休眠-唤醒）
+    } catch (const std::exception& exception) {
+        error = std::string("thread setup handshake failed: ") +
+                exception.what();
+        if (output.joinable()) {
+            output.join();
+        }
+        return false;
+    }
+    if (!setup.success) {
+        error = setup.error;
+        if (output.joinable()) {
+            output.join();
+        }
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+```
+
+#### `configure_current_thread()`：依据参数配置线程
+
+首先**检测线程名称的合法性**，如果合法则通过`pthread_setname_np`设置线程名称：
+
+``` c
+inline ThreadSetupResult configure_current_thread(
+    const char* name,
+    const ThreadRuntimeOptions& options)
+{
+    // 检测线程名称是否为空
+    if (!name || name[0] == '\0') {
+        return thread_setup_error("thread name is empty", EINVAL);
+    }
+    // 检测线程名称长度是否超过 Linux 的 15 字节限制
+    if (std::strlen(name) > 15U) {
+        return thread_setup_error("thread name exceeds Linux 15-byte limit", ERANGE);
+    }
+    // 获取当前线程的 pthread_t 对象 设置线程名称
+    const pthread_t self = pthread_self();
+    int result = pthread_setname_np(self, name);
+    if (result != 0) {
+        return thread_setup_error("pthread_setname_np", result);
+    }
+```
+
+然后**进行 CPU 绑核**：
+
+``` c
+    // 进行 CPU 绑核
+    if (!options.cpu_ids.empty()) {
+        cpu_set_t expected;
+        CPU_ZERO(&expected);
+        for (const int cpu : options.cpu_ids) {
+            if (cpu < 0 || cpu >= CPU_SETSIZE) {
+                return thread_setup_error("CPU id is outside cpu_set_t", EINVAL);
+            }
+            CPU_SET(cpu, &expected);
+        }
+
+        result = pthread_setaffinity_np(self, sizeof(expected), &expected);
+        if (result != 0) {
+            return thread_setup_error("pthread_setaffinity_np", result);
+        }
+
+        // 验证 CPU 绑核是否成功
+        cpu_set_t actual;
+        CPU_ZERO(&actual);
+        result = pthread_getaffinity_np(self, sizeof(actual), &actual);
+        if (result != 0) {
+            return thread_setup_error("pthread_getaffinity_np", result);
+        }
+        if (!CPU_EQUAL(&expected, &actual)) {
+            return thread_setup_error("thread affinity verification", 0);
+        }
+    }
+
+```
+
+**建立所需的栈页映射：**
+
+``` c
+    // 在进入可能的 FIFO 实时调度前建立所需栈页映射。
+    const int prefault_error =
+        prefault_current_thread_stack(options.stack_prefault_bytes);
+    if (prefault_error != 0) {
+        return thread_setup_error("stack prefault (maximum 1 MiB; valid page size required)",
+                                  prefault_error);
+    }
+```
+
+**设置调度策略以及优先级：**
+
+``` c
+    // 设置线程调度策略和优先级（采用带有时间片的是否更好？）
+    if (options.scheduling_policy != ThreadSchedulingPolicy::INHERIT) {
+        const int policy = options.scheduling_policy == ThreadSchedulingPolicy::FIFO ? SCHED_FIFO : SCHED_OTHER;
+        // OTHER 策略的优先级必须为 0，FIFO 策略的优先级必须在 [1, 99] 范围内
+        if (policy == SCHED_OTHER && options.priority != 0) {
+            return thread_setup_error("SCHED_OTHER priority must be zero", EINVAL);
+        }
+        if (policy == SCHED_FIFO) {
+            const int minimum = sched_get_priority_min(SCHED_FIFO);
+            const int maximum = sched_get_priority_max(SCHED_FIFO);
+            if (minimum < 0 || maximum < 0 || options.priority < minimum ||
+                options.priority > maximum) {
+                return thread_setup_error("SCHED_FIFO priority is out of range", EINVAL);
+            }
+        }
+        sched_param requested{};
+        requested.sched_priority = options.priority;
+        result = pthread_setschedparam(self, policy, &requested);
+        if (result != 0) {
+            return thread_setup_error("pthread_setschedparam", result);
+        }
+
+        // 验证调度策略与优先级是否设置成功
+        int actual_policy = 0;
+        sched_param actual{};
+        result = pthread_getschedparam(self, &actual_policy, &actual);
+        if (result != 0) {
+            return thread_setup_error("pthread_getschedparam", result);
+        }
+        if (actual_policy != policy || actual.sched_priority != options.priority) {
+            return thread_setup_error("thread scheduling verification", 0);
+        }
+    }
+
+    ThreadSetupResult success;
+    success.success = true;
+    return success;
+}
+```
+#### `initialize()`：编排线程初始化
+
+``` c
+/* 编排机器人完整运行态：电机、策略、IMU 和站立姿态复位。 */
+bool RobotInterface::initialize() {
+
+    if (!initialize_model_processors()) {
+        shutdown();
+        return false;
+    }
+    // 模型 load/warmup、ORT worker 校验和内存锁定发生在电机、IMU 或 recorder 线程启动之前，保证新增 TID 可归因且失败时不会触碰电机。
+    if (!policy_runtime_.load(config_.policy, config_.runtime)) {
+        std::cerr << "[RobotInterface] load_policy failed: "
+                  << policy_runtime_.last_error() << "\n";
+        shutdown();
+        return false;
+    }
+
+    // 进程/主线程运行环境：模型就绪后、其他线程和硬件启动前完成。
+    if (config_.runtime.require_process_memory_lock) {
+        // 解决 MCL_FUTURE 在创建线程时一次性填充并锁定整个默认栈，
+        // 拉长 EtherCAT 启动收发交接空档并导致失同步的问题。
+        // 按需锁页，时序敏感线程仍在进入业务循环前预触碰所需栈页。
+        if (::mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0) {
+            const int saved_errno = errno;
+            std::cerr << "[RobotInterface] mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) "
+                      << "failed: errno=" << saved_errno << " ("
+                      << std::strerror(saved_errno)
+                      << "). Check RLIMIT_MEMLOCK and CAP_IPC_LOCK.\n";
+            policy_runtime_.shutdown();
+            shutdown();
+            return false;
+        }
+
+        const int prefault_error =
+            robot_base::prefault_current_thread_stack(
+                config_.runtime.policy_main.stack_prefault_bytes);
+        if (prefault_error != 0) {
+            std::cerr << "[RobotInterface] policy_main stack prefault after "
+                      << "mlockall failed: errno=" << prefault_error << " ("
+                      << std::strerror(prefault_error)
+                      << "); maximum 1 MiB and valid page size required\n";
+            policy_runtime_.shutdown();
+            shutdown();
+            return false;
+        }
+    }
+
+    // 日志生命周期：按已校验的观测维度启动独立记录器。
+    if (config_.recorder.enabled) {
+        config_.recorder.policy_observation_size =
+            policy_observation::observation_size(config_.policy.gait.enabled);
+        if (!inference_recorder_.start(config_.recorder, config_.runtime.background)) {
+            std::cerr << "[RobotInterface] failed to open inference log: "
+                      << inference_recorder_.last_error() << "\n";
+            inference_recorder_failed_ = true;
+            shutdown();
+            return false;
+        }
+        std::cout << "[RobotInterface] inference log: "
+                  << inference_recorder_.log_path() << "\n";
+    }
+
+    // 初始化电机
+    if (!motor_session_.initialize(/*defer_communication_protection=*/true)) {
+        shutdown();
+        return false;
+    }
+    if (!motor_session_.restart(-1)) {
+        shutdown();
+        return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // 初始化 IMU
+    if (!imu_session_.initialize()) {
+        shutdown();
+        return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // 恢复到初始位置
+    std::array<double, motor_base::kMaxMotors> startup_hold_target_motor_rad{};
+    if (!reset_joints(startup_hold_target_motor_rad)) {
+        shutdown();
+        return false;
+    }
+
+    // 初始化完成
+    initialized_ = true;
+
+    // 开启策略命令线程
+    if (!worker_.start(*action_processor_, std::move(startup_hold_target_motor_rad))) {
+        initialized_ = false;
+        shutdown();
+        return false;
+    }
+
+    return true;
+}
+```
+
+### 配置具体线程
+
+#### `PolicyRuntime`
+
+##### `class PolicyRuntime`
+
+``` c++
+// src/inference/include/policy/policy_runtime.hpp
+class PolicyRuntime {
+public:
+    static constexpr std::size_t kDof = policy_observation::kDof;
+
+    PolicyRuntime();
+    ~PolicyRuntime();
+
+    PolicyRuntime(const PolicyRuntime&) = delete;
+    PolicyRuntime& operator=(const PolicyRuntime&) = delete;
+
+    // 由所有者线程串行调用；load 完成校验和预热，infer 复用固定缓冲区。
+    bool load(const PolicyRuntimeConfig& config,
+              const RuntimeThreadingConfig& runtime);
+    void shutdown();
+
+    bool is_loaded() const;
+    bool infer(const PolicyObservation& observation, PolicyRuntimeStepResult& result);
+
+    const std::string& last_error() const noexcept { return last_error_; }
+
+private:
+    struct Impl;
+
+    bool warm_up();
+
+    std::unique_ptr<Impl> impl_;
+    std::string last_error_;
+};
+
+```
+
+##### `load()`
+
+``` c
+bool PolicyRuntime::load(const PolicyRuntimeConfig& config,
+                         const RuntimeThreadingConfig& runtime)
+{
+    shutdown();
+    last_error_.clear();
+    const std::size_t input_size =
+        policy_observation::observation_size(config.gait.enabled);
+    if (std::filesystem::path(config.model_path).extension() != ".onnx") {
+        last_error_ = "policy model path must name an .onnx file";
+        return false;
+    }
+    if (runtime.onnx_intra_op_threads != 1 &&
+        runtime.onnx_intra_op_threads != 2) {
+        last_error_ = "ONNX intra-op threads must be 1 or 2";
+        return false;
+    }
+    const bool dual = runtime.onnx_intra_op_threads == 2;
+    if (dual && (runtime.policy_main.cpu_ids.size() != 1 ||
+                 runtime.onnx_worker_cpu_id < 0 ||
+                 runtime.onnx_worker_cpu_id >= CPU_SETSIZE ||
+                 runtime.policy_main.cpu_ids[0] == runtime.onnx_worker_cpu_id)) {
+        last_error_ = "two-thread ONNX mode requires distinct main and worker CPUs";
+        return false;
+    }
+
+    std::string setup_error;
+    if (!runtime.policy_main.cpu_ids.empty()) {
+        cpu_set_t main_mask;
+        if (!cpu_mask(runtime.policy_main.cpu_ids, main_mask, setup_error) ||
+            !verify_task(::gettid(), main_mask, "policy thread", setup_error)) {
+            last_error_ = setup_error;
+            return false;
+        }
+    }
+    std::set<pid_t> tasks_before;
+    if (dual && !list_task_ids(tasks_before, setup_error)) {
+        last_error_ = setup_error;
+        return false;
+    }
+
+    try {
+        impl_ = std::make_unique<Impl>();
+        Ort::SessionOptions options;
+        options.SetIntraOpNumThreads(runtime.onnx_intra_op_threads);
+        options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        options.SetGraphOptimizationLevel(
+            GraphOptimizationLevel::ORT_ENABLE_ALL);
+        options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        if (dual) {
+            // ORT's affinity string uses one-based processor numbers; Linux
+            // affinity APIs and RuntimeThreadingConfig use zero-based IDs.
+            // ORT sets this only on the extra intra-op worker.
+            const std::string cpu =
+                std::to_string(runtime.onnx_worker_cpu_id + 1);
+            options.AddConfigEntry(
+                kOrtSessionOptionsConfigIntraOpThreadAffinities, cpu.c_str());
+        }
+        impl_->session = Ort::Session(
+            impl_->env, config.model_path.c_str(), options);
+        if (impl_->session.GetInputCount() != 1 ||
+            impl_->session.GetOutputCount() != 1) {
+            last_error_ = "ONNX policy requires exactly one input and one output";
+            shutdown();
+            return false;
+        }
+        std::string port_error;
+        if (!validate_port(impl_->session.GetInputTypeInfo(0),
+                           {1, static_cast<int64_t>(input_size)},
+                           "input", port_error) ||
+            !validate_port(impl_->session.GetOutputTypeInfo(0),
+                           {1, static_cast<int64_t>(kDof)},
+                           "output", port_error)) {
+            last_error_ = port_error;
+            shutdown();
+            return false;
+        }
+
+        Ort::AllocatorWithDefaultOptions allocator;
+        impl_->input_name =
+            impl_->session.GetInputNameAllocated(0, allocator).get();
+        impl_->output_name =
+            impl_->session.GetOutputNameAllocated(0, allocator).get();
+        if (impl_->input_name.empty() || impl_->output_name.empty()) {
+            last_error_ = "ONNX input or output name is empty";
+            shutdown();
+            return false;
+        }
+        impl_->input_names[0] = impl_->input_name.c_str();
+        impl_->output_names[0] = impl_->output_name.c_str();
+
+        const std::array<int64_t, 2> input_shape{
+            1, static_cast<int64_t>(input_size)};
+        constexpr std::array<int64_t, 2> output_shape{
+            1, static_cast<int64_t>(kDof)};
+        const auto memory =
+            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        impl_->input_tensor = Ort::Value::CreateTensor<float>(
+            memory, impl_->input_buffer.data(), input_size,
+            input_shape.data(), input_shape.size());
+        impl_->output_tensor = Ort::Value::CreateTensor<float>(
+            memory, impl_->output_buffer.data(), impl_->output_buffer.size(),
+            output_shape.data(), output_shape.size());
+        impl_->input_size = input_size;
+        if (!warm_up()) {
+            shutdown();
+            return false;
+        }
+
+        if (dual) {
+            cpu_set_t worker_mask;
+            CPU_ZERO(&worker_mask);
+            CPU_SET(runtime.onnx_worker_cpu_id, &worker_mask);
+            cpu_set_t main_mask;
+            if (!cpu_mask(runtime.policy_main.cpu_ids, main_mask, setup_error)) {
+                last_error_ = setup_error;
+                shutdown();
+                return false;
+            }
+            // ORT 设置 worker affinity 是异步的；短预热不保证 worker 已调度。
+            // 仅在硬件启动前等待有界的就绪窗口，超时仍拒绝加载。
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(100);
+            std::set<pid_t> tasks_after;
+            for (;;) {
+                if (!list_task_ids(tasks_after, setup_error)) {
+                    last_error_ = setup_error;
+                    shutdown();
+                    return false;
+                }
+                std::size_t workers = 0;
+                bool tasks_valid = true;
+                for (pid_t tid : tasks_after) {
+                    if (tasks_before.count(tid)) continue;
+                    if (verify_task(tid, worker_mask, "ONNX worker", setup_error)) {
+                        ++workers;
+                    } else if (!verify_task(tid, main_mask,
+                                            "ONNX auxiliary thread", setup_error)) {
+                        tasks_valid = false;
+                        break;
+                    }
+                }
+                if (tasks_valid && workers == 1) break;
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    last_error_ = tasks_valid
+                        ? "expected exactly one ONNX worker, found " + std::to_string(workers)
+                        : setup_error;
+                    shutdown();
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    } catch (const std::exception& e) {
+        last_error_ = "failed to load ONNX policy: " + std::string(e.what());
+        shutdown();
+        return false;
+    }
+    return true;
+}
+```
+
+#### `policy_main`线程
+
+因为 **`policy_main` 就是正在执行 `main()` 的主线程，进程启动时已经存在**，只需配置当前线程。这里把主线程命名为 `policy_main`，设置并校验 CPU 亲和性、栈预触碰、调度策略和优先级。成功后，同一个线程继续初始化机器人并运行策略循环。
+
+``` c
+// // src/inference/examples/policy_test.cpp 中调用
+const robot_base::ThreadSetupResult main_setup =robot_base::configure_current_thread("policy_main", cfg.runtime.policy_main);
+
+if (!main_setup.success) {
+    std::cerr << "[ERROR] Failed to configure policy_main: "
+              << main_setup.error << "\n";
+    return 1;
+}
+```
+
+#### `infer_log`线程
+
+`InferenceRecorder::start()`：
+
+``` c
+// src/inference/src/recorder/inference_recorder.cpp
+bool InferenceRecorder::start(
+    InferenceRecorderConfig config,
+    robot_base::ThreadRuntimeOptions thread_options)
+{
+	/*infer_log线程的其他配置*/
+
+    std::string thread_error;
+    if (!robot_base::start_configured_thread(
+            worker_, "infer_log", thread_options,
+            [this] { worker_loop(); }, thread_error)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+        stop_requested_ = false;
+        queue_.clear();
+        if (file_.is_open()) {
+            file_.close();
+        }
+        last_error_ = "failed to start inference recorder worker: " + thread_error;
+        return false;
+    }
+
+    return true;
+}
+```
+
+#### `motor_status`线程
+
+``` c++
+template <typename Snapshot>
+bool LatestStatusChannel<Snapshot>::start()
+{
+    bool expected = false;
+    if (!publisher_running_.compare_exchange_strong(expected, true)) {
+        return true;
+    }
+    if (!robot_base::start_configured_thread(
+            publisher_thread_, thread_name_.c_str(), thread_options_,
+            [this] { thread_func(); }, last_start_error_)) {
+        publisher_running_.store(false);
+        return false;
+    }
+    return true;
+}
+```
+
+#### `rt_event`线程
+
+``` c++
+bool RtEventDispatcher::start()
+{
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true)) {
+        return true;
+    }
+    if (!robot_base::start_configured_thread(
+            thread_, "rt_event", thread_options_,
+            [this] { thread_func(); }, last_start_error_)) {
+        running_.store(false);
+        return false;
+    }
+    return true;
+}
+```
+
+#### `ecat_rt`线程
+
+``` c++
+bool MotorControllerBase::start()
+{
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (running_.load(std::memory_order_acquire)) {
+        return rt_scheduling_ready_.load(std::memory_order_acquire);
+    }
+
+    rt_scheduling_ready_.store(false, std::memory_order_release);
+    setpoint_channel_policy_.reset_empty();
+    active_setpoint_timing_ = CommandTiming{};
+    command_feedback_channel_.reset_empty();
+    policy_feedback_channel_.reset_empty();
+    if (!status_channel_.start()) {
+        std::cerr << "[MotorControllerBase] motor_status setup failed: "
+                  << status_channel_.last_start_error() << std::endl;
+        return false;
+    }
+    if (!rt_event_dispatcher_.start()) {
+        std::cerr << "[MotorControllerBase] rt_event setup failed: "
+                  << rt_event_dispatcher_.last_start_error() << std::endl;
+        status_channel_.stop();
+        return false;
+    }
+
+    if (!realtime_start_callback()) {
+        realtime_stop_callback();
+        rt_event_dispatcher_.stop();
+        status_channel_.stop();
+        return false;
+    }
+
+    running_.store(true, std::memory_order_release);
+
+    std::string thread_error;
+    if (!robot_base::start_configured_thread(
+            rt_thread_, "ecat_rt", rt_options_.rt_thread_options,
+            [this] { thread_func(); }, thread_error)) {
+        running_.store(false, std::memory_order_release);
+        
+        rt_scheduling_ready_.store(false, std::memory_order_release);
+        
+        std::cerr << "[MotorControllerBase] ecat_rt setup failed: "
+                  << thread_error << std::endl;
+        
+        realtime_stop_callback();
+        rt_event_dispatcher_.stop();
+        status_channel_.stop();
+        return false;
+    }
+
+    rt_scheduling_ready_.store(true, std::memory_order_release);
+
+    return true;
+}
+```
+
+#### `imu_can_rx`线程
+
+``` c
+bool XsensMtiCanReader::start(const imu_base::ReaderConfig& config)
+{
+    if (running_.load()) {
+        return true;
+    }
+
+    config_ = config;
+    start_time_ = std::chrono::steady_clock::now();
+    print_configuration();
+
+    parser_->reset();
+    if (config_.configure_can &&
+        !configure_socket_can_interface(config_.device, config_.can_bitrate)) {
+        return false;
+    }
+    if (!can_port_->open(config_.device)) {
+        return false;
+    }
+
+    running_.store(true);
+    std::string thread_error;
+    if (!robot_base::start_configured_thread(
+            worker_thread_, "imu_can_rx", config_.thread_options,
+            [this] { read_loop(); }, thread_error)) {
+        running_.store(false);
+        can_port_->close();
+        std::cerr << "[ERROR] Xsens MTi CAN reader thread setup failed: "
+                  << thread_error << std::endl;
+        return false;
+    }
+    std::cout << "[INFO] Xsens MTi CAN reader thread started." << std::endl;
+    return true;
+}
+```
+
+#### `policy_cmd`线程
+
+``` c++
+bool PolicyCommandWorker::start(
+    ActionProcessor&    action_processor,
+    std::array<double, motor_base::kMaxMotors> startup_hold_target_motor_rad)
+{
+    action_processor_ = &action_processor;
+    startup_hold_target_motor_rad_ = std::move(startup_hold_target_motor_rad);
+    {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        error_.clear();
+        failed_.store(false);
+    }
+
+    // 在线程接管前刷新一次复位命令，为首次 worker 调度保留完整有效期。
+    if (!motor_session_.apply_targets_rad(startup_hold_target_motor_rad_)) {
+        std::cerr << "[PolicyCommandWorker] start rejected: "
+                     "failed to refresh startup reset pose\n";
+        return false;
+    }
+
+    running_.store(true);
+
+    std::string thread_error;
+    if (!robot_base::start_configured_thread(
+            worker_thread_, "policy_cmd", config_.runtime.policy_command,
+            [this] { loop(); }, thread_error)) {
+        running_.store(false);
+        std::cerr << "[PolicyCommandWorker] failed to start thread: "
+                  << thread_error << "\n";
+        return false;
+    }
+
+    return true;
+}
+```
+
+#### `xbox_poll`线程
+
+``` c++
+/* 启动后台线程，将设备事件读取从控制主循环中移出。 */
+bool XboxController::start_polling(
+    std::chrono::milliseconds wait_timeout,
+    robot_base::ThreadRuntimeOptions thread_options)
+{
+    if (is_polling()) {
+        return true;
+    }
+    /* 如果后台线程已经存在，退出后台线程 */
+    if (polling_thread_.joinable()) {
+        polling_thread_.join();
+    }
+
+    if (!is_open()) {
+        set_error("controller device is not open");
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        last_error_.clear();
+    }
+
+    /* 关闭退出信号，启动后台线程活跃信号 */
+    stop_polling_requested_.store(false);
+    polling_active_.store(true);
+
+    /* 创建后台线程 */
+    std::string thread_error;
+    if (!robot_base::start_configured_thread(
+            polling_thread_, "xbox_poll", thread_options,
+            [this, wait_timeout] { polling_loop(wait_timeout); }, thread_error)) {
+        polling_active_.store(false);
+        stop_polling_requested_.store(true);
+        set_error("start controller polling thread failed: " + thread_error);
+        return false;
+    }
+
+    return true;
+}
+```
+
+
+
+
 
 # 脉塔电机
 
@@ -2944,1084 +4813,4 @@ uint8_t IMUParser::CRC8_Table(const std::vector<uint8_t>& data) {
     }
     return crc8;
 }
-```
-
-# RT-Linux
-
-## `mlockall()`（锁页）
-
-### 内存交换
-
-核心作用：**把进程的内存页锁在物理内存RAM中，避免被换出到swap**。它最主要的目的**不是“让内存访问更快”**，而是：**降低不可预测的 page falut / paging 延迟**。普通 Linux 程序看到的是**虚拟内存（virtual memory）**。例如：
-
-```c
-double joint_pos[32];
-```
-
-从进程角度看，它有一个虚拟地址：
-
-```
-0x7f123456...
-```
-
-但这个虚拟地址对应的物理内存页，并不一定始终存在于 RAM。大概可以理解成：
-
-```
-程序虚拟地址
-     │
-     ▼
-Virtual Page
-     │
-     ├── RAM 中       ← 快
-     │
-     └── swap / 尚未装入
-```
-
-如果 CPU 访问一个当前不在 RAM 中的页面，就可能产生：$$\boxed{\text{page fault}}$$，然后内核需要处理：
-
-```
-CPU access
-   ↓
-page fault
-   ↓
-进入 kernel
-   ↓
-找到 / 分配 physical page
-   ↓
-必要时从磁盘 swap 读取
-   ↓
-更新 page table
-   ↓
-恢复程序运行
-```
-
-这个过程对普通程序没什么。但对于：
-
-```
-EtherCAT RT thread
-1000 Hz
-period = 1 ms
-```
-
-如果某个周期理论预算是：$T=1 ms,T=1\text{ ms}$,却突然因为 page fault 卡：$50μs, 200μs, 1ms$，实时周期就可能 miss deadline。
-
-### 线程栈
-
-***进程负责提供资源和地址空间，线程负责执行代码，而栈负责保存线程执行过程中的函数调用状态。**但这句话只是第一层理解。我们需要进一步回答几个问题：
-
-1. 为什么一个进程可以有多个线程，但每个线程都需要自己的栈？
-2. 为什么线程之间可以访问彼此的栈，却还要为每个线程分配独立的栈？
-3. 线程的栈和进程的堆（Heap）有什么本质区别？
-4. CPU 是如何利用栈执行函数调用、处理中断和完成线程切换的？
-5. 用户态栈（User Stack）与内核态栈（Kernel Stack）是什么关系？
-
-下面按照 进程 → 地址空间 → 堆与栈 → 线程 → 函数调用 → 上下文切换 的逻辑来讲。
-
-#### 进程
-
-进程可以理解为**一个正在运行的程序所对应的资源管理与执行环境**。例如，在 Linux 中执行：
-
-```shell
-./robot_controller
-```
-
-操作系统会为这个程序建立进程执行环境，其中包含：
-
-- 虚拟地址空间（Virtual Address Space）;
-- 地址空间相关的页表；
-- 堆内存与内存映射区域；
-- 程序代码与数据；
-- 打开的文件描述符（File Descriptors）；
-- 一个或多个线程；
-
-进程并不等于一段正在执行的代码。更严格地说，**进程是资源容器；线程才是 CPU 调度和执行的基本单位**。
-
-#### 栈：保存线程的函数调用状态
-
-一个进程内部可以存在多个执行流。比如当前机器人程序设计成：
-
-<img src="./assets/线程分布.png" alt="线程分布" style="zoom:80%;" />
-
-这些线程处于同一个进程中，因此能够共享一些资源，但是它们各自具有独立的执行状态。
-
-<img src="./assets/线程总览.png" alt="线程总览" style="zoom: 80%;" />
-
-这里引出一个关键区别：**线程之间共享进程的虚拟地址空间，但是不共享同一套函数调用栈**。为什么？假设一个进程创建两个线程：
-
-``` c
-void worker()
-{
-    int counter = 0;
-
-    counter++;
-
-    do_something();
-}
-```
-
-线程 A、B 同时执行 `worker()`。虽然它们执行的是同一份代码，但是运行过程完全独立。
-
-![为什么线程要独立的栈](./assets/为什么线程要独立的栈.png)
-
-此时：
-
-- 线程 A 正在 `do_something()` 中，已经调用了另一个函数；
-- 线程 B 还在 `worker()` 内执行；
-- 两个线程的程序计数器 `PC` 不同；
-- 两个线程的栈指针 `SP` 不同；
-- 两个 `counter` 是两个不同的局部变量实例。
-
-如果它们使用同一个栈，就会产生严重问题。线程 A 刚保存返回地址和局部变量，线程 B 可能就修改了相同的位置。线程 A 后续恢复执行时，函数调用现场已经被破坏，程序便无法正确运行。因此，每个普通线程都需要一块独立的栈空间。
-
-#### 栈：线程切换时保存上下文
-
-假设同一进程有两个线程：
-
-- Thread A：正在控制电机；
-- Thread B：正在执行神经网络推理。
-
-CPU 只有一个可用核心，两条线程必须交替执行。开始时：
-
-```c
-CPU 正在执行 Thread A
-
-PC = A 当前执行地址
-SP = A 的栈地址
-```
-
-突然发生定时器中断，操作系统决定调度线程 B。CPU 应该如何从线程 A 切换到线程 B？
-
-**CPU 寄存器必须保存。**CPU 的寄存器是当前执行硬件线程的资源，不会天然为每个软件线程复制一套。例如：
-
-```
-Thread A:
-PC = 0x1000
-SP = 0x8000
-ra = 0x1200
-
-Thread B:
-PC = 0x2000
-SP = 0x9000
-ra = 0x2300
-```
-
-CPU 准备执行 B 之前，必须保证 A 的必要寄存器状态得到保存。这样以后重新调度 A 时，才能继续从之前的位置执行。操作系统把这件事称为：上下文切换（Context Switch）。对用户线程而言，需要区分：
-
-- 用户态执行现场：进入内核时保存的用户寄存器、用户 PC、用户 SP 等；
-- 内核态调度现场：内核暂停当前任务、切换其他任务时需要保存的寄存器及内核栈位置。
-
-在之前研究的 RISC-V 教学内核里，`__alltraps` 和 `__switch` 就分别与这两个层次相关。
-
-<img src="./assets/上下文切换.png" alt="上下文切换" style="zoom: 80%;" />
-
-假设发生切换时，线程 A 的调用栈是：
-
-```c
-Thread A 的用户栈
-┌─────────────────────┐
-│ send_command()      │
-├─────────────────────┤
-│ motor_control()     │
-├─────────────────────┤
-│ main()              │
-└─────────────────────┘
-```
-
-线程 B 的调用栈是：
-
-```c
-Thread B 的用户栈
-┌─────────────────────┐
-│ forward()           │
-├─────────────────────┤
-│ infer()             │
-├─────────────────────┤
-│ policy_thread()     │
-└─────────────────────┘
-```
-
-**线程 A 被切换出去，不意味着其调用栈被删除，栈仍然存在于内存中，只是 CPU 暂时不再使用它。**等到 A 再次获得 CPU，只需恢复相应执行状态，包括 `sp`，就可以继续使用 A 原来的调用栈。因此，线程能够被暂停、恢复，一个重要前提就是每个线程拥有可独立保留的调用栈及对应上下文。
-
-程切换并不需要复制整块栈内存，通常只需要保存和恢复必要的寄存器、栈指针及相关调度状态，**原有栈内容就留在原处**。
-
-#### 堆
-
-栈（Stack）：主要用于**管理函数调用过程中的临时执行状态**；堆（Heap）：主要用于**动态内存分配**。在 64 位 Linux 用户态进程中，可以用下面的简化模型理解：
-
-<img src="./assets/典型虚拟地址空间.png" alt="典型虚拟地址空间" style="zoom:80%;" />
-
-第一，**堆与栈都处于进程的虚拟地址空间中**。并不是操作系统专门准备了两块物理内存，一块只能当堆，另一块只能当栈。堆和栈的区别主要在于使用方式、内存管理方式以及用途。
-
-第二，多个线程共享同一个虚拟地址空间。假设进程中有三个线程，那么三者**能够访问相同的全局变量和动态分配的堆对象**。
-
-第三，**每个线程有自己的栈区域**。它们的栈虽然是不同的内存区域，但依然处于同一个进程的虚拟地址空间中。
-
-在 C++ 中看得更清楚：
-
-```c
-void function()
-{
-    int a = 10;
-
-    int* p = new int(20);
-
-    delete p;
-}
-```
-
-这里有三个不同的东西：
-
-- `a`：通常作为**局部变量放在当前函数的栈帧**中。
-- `p`：指针变量本身通常放在栈帧中。
-- `new int(20)`：这个 `int` 对象通过**动态分配获得存储空间，通常来自堆**。
-
-### 如何使用？
-
-#### 函数定义
-
-```c
-#include <sys/mman.h>
-
-int mlockall(int flags);
-```
-
-Linux 手册定义的是：它可以把调用进程地址空间中全部或部分页面锁入 RAM，阻止这些页面被换出到 swap；**以完整的 `memory page` 为单位**。
-
-```c
-mlockall(MCL_CURRENT | MCL_FUTURE);
-```
-
-可以理解为：
-
-```
-           process virtual memory
-                    │
-       ┌────────────┴─────────────┐
-       ▼                          ▼
-currently mapped            future mappings
-     pages                       pages
-       │                          │
- MCL_CURRENT                 MCL_FUTURE
-       │                          │
-       └────────────┬─────────────┘
-                    ▼
-              locked in RAM
-```
-
-#### `MCL_CURRENT`
-
-```c
-mlockall(MCL_CURRENT);
-```
-
-意思是：$\boxed{\text{锁住当前已经映射进进程地址空间的所有页面}}$，包括很多东西，Linux 手册明确说明，**`mlockall()` 可以覆盖代码段、数据段、栈、共享库、共享内存以及 mmap 文件等当前映射**。
-
-关键词是：
-
-> **CURRENT**
-
-假设：
-
-```c
-mlockall(MCL_CURRENT);
-
-std::vector<double> x;
-x.resize(10000000);
-```
-
-后面这次 `resize()` 新分配出来的内存：$\boxed{不一定被锁定}$，因为它是之后产生的 mapping。
-
-#### `MCL_FUTURE`
-
-所以实时程序经常还加：$\boxed{MCL\_FUTURE}$，即：
-
-```c
-mlockall(MCL_CURRENT | MCL_FUTURE);
-```
-
-含义是：$\boxed{\text{当前 + 将来映射的内存都进行锁定}}$，例如以后出现：
-
-```c
-malloc();
-new;
-mmap();
-stack growth;
-```
-
-对应的新页面也进入 memory locking 范围。Linux 文档特别列出了 heap / stack growth、`mmap()`、`malloc()` 等后续映射场景。
-
-所以实时程序里最常见的是：
-
-```
-if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
-    perror("mlockall");
-}
-```
-
-而不是单独：
-
-```
-MCL_CURRENT
-```
-
-#### `MCL_ONFAULT`
-
-Linux 4.4 起还有$\boxed{MCL\_ONFAULT}$，例如：
-
-```c
-mlockall(
-    MCL_CURRENT |
-    MCL_FUTURE  |
-    MCL_ONFAULT
-);
-```
-
-它和普通模式稍微不同。普通是现在就把需要的页面弄 resident 并 lock，而`MCL_ONFAULT`的思想是：
-
-```
-先标记 mapping
-        ↓
-页面第一次真正 fault in
-        ↓
-再 lock
-```
-
-因此**对于地址空间很大，但只会用其中一小部分的程序**，`ONFAULT` 可以避免一上来锁大量实际上不会访问的页面。Linux 文档也说明 `MCL_ONFAULT` 是为了高效处理大型映射、但实际只使用少量页面的场景。
-
-#### `munlockall()`（解除锁页）
-
-对应的解除操作：
-
-```
-munlockall();
-```
-
-意思是：$\boxed{\text{解除当前进程所有 locked pages}}$，之后这些页面重新允许被内核换出。不过进程退出时锁也会自动解除，所以很多长期运行的 RT daemon 不一定显式调用。
-
-### 为什么会失败？
-
-典型代码应该永远检查返回值：
-
-```c
-if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
-    perror("mlockall");
-    return -1;
-}
-```
-
-成功：`0`；失败：`-1`。同时设置：`errno`。
-
-Linux 上最常见的原因之一就是：$\boxed{\texttt{RLIMIT\_MEMLOCK}}$，**它限制普通进程最多能锁多少 RAM**。当前 Linux 对非特权进程会根据 `RLIMIT_MEMLOCK` 限制可锁内存，而具有 `CAP_IPC_LOCK` capability 的特权进程不受这一限制。
-
-#### `ulimit`命令
-
-可以看：
-
-```
-ulimit -l
-```
-
-也可以看：
-
-```
-ulimit -a
-```
-
-#### `CAP_IPC_LOCK`
-
-Linux 还存在 capability：
-
-```
-CAP_IPC_LOCK
-```
-
-它允许进程进行 memory locking。
-
-所以一些实时程序会通过：
-
-- systemd service；
-- limits.conf；
-- capabilities；
-
-给进程合适的权限，而不是简单粗暴：
-
-```
-sudo ./robot
-```
-
-例如 systemd 服务里经常能看到类似配置：
-
-```
-LimitMEMLOCK=infinity
-```
-
-其目标就是允许实时进程锁住需要的 RAM。
-
-#### 查看进程锁了多少？
-
-Linux 可以通过：
-
-```shell
-cat /proc/<pid>/status
-```
-
-查看`VmLck:`这一项。
-
-例如：
-
-```
-grep VmLck /proc/12345/status
-```
-
-可能得到：
-
-```
-VmLck:    82432 kB
-```
-
-它表示该进程目前锁住了多少内存。Linux man page 也明确指出 `/proc/PID/status` 中的 `VmLck` 字段可以观察 `mlock()`、`mlockall()` 等锁定的内存量。
-
-你也可以：
-
-```
-grep VmLck /proc/$(pidof your_program)/status
-```
-
-### 深入理解
-
-#### 是提高实时确定性
-
-你可以把：
-
-```
-mlockall(MCL_CURRENT | MCL_FUTURE);
-```
-
-直接记成：
-
-> **把这个实时进程现在和以后使用的内存尽可能钉在 RAM 里，避免实时循环因为 paging 突然卡住。**
-
-即：
-
-$\boxed{ \texttt{mlockall} \rightarrow \text{memory residency} \rightarrow \text{减少 paging/page-fault latency} \rightarrow \text{提高实时确定性} }$
-
-而不是：
-
-$\boxed{ \texttt{mlockall} \rightarrow \text{程序整体运行更快} }$
-
-后者是常见误解。
-
-#### 注意`fork()`
-
-Linux 文档特别警告实时进程：
-
-> 在 `mlockall()` 之后应避免 `fork()`。
-
-原因是 `fork()` 会为地址空间准备：$\text{Copy-on-Write}$，之后一旦写：
-
-```
-write
- ↓
-COW page fault
- ↓
-allocate/copy page
-```
-
-可能出现明显 latency。
-
-Linux man page 甚至明确指出，在 `mlockall()` / `mlock()` 后，对实时进程来说不应调用 `fork()`，即使是进程中的低优先级线程调用也应避免。
-
-所以：
-
-```
-初始化
- ↓
-fork / daemonize（如果需要）
- ↓
-初始化资源
- ↓
-mlockall
- ↓
-进入 realtime
-```
-
-通常比：
-
-```
-mlockall
- ↓
-RT running
- ↓
-fork()
-```
-
-合理得多。
-
-## 绑核
-
-$\boxed{CPU \  affinity = 限制某个线程在哪些CPU \ core上运行}$，比如一台 8 核机器逻辑 CPU 编号为：
-
-```
-CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
-```
-
-默认情况下，一个普通 Linux 线程可能这一毫秒在 CPU2：下一次被调度时又跑到 CPU5：RT thread ──> CPU5。如果设置：`affinity = {CPU6}`，那么：
-
-```
-RT thread
-    │
-    └────────> CPU6 only
-```
-
-Linux scheduler 以后只能在 CPU6 上调度它。
-
-> 绑核和设置线程调度策略和优先级的区别
-
-`SCHED_FIFO + priority` 决定：$\boxed{\text{同一个 CPU 上，谁优先运行}}$；绑核决定：$\boxed{\text{这个线程允许去哪些 CPU 上运行}}$。例如：
-
-```
-Thread A: RT EtherCAT, FIFO 80
-Thread B: policy, FIFO 70
-Thread C: logging
-Thread D: ROS
-Thread E: kernel worker
-```
-
-如果不绑核，可能出现：
-
-```
-           t0        t1        t2        t3
-
-RT       CPU3      CPU5      CPU2      CPU5
-Policy   CPU1      CPU3      CPU4      CPU2
-Logger   CPU5      CPU1      CPU6      CPU4
-```
-
-RT thread 在 CPU 之间迁移。这种行为叫：$\boxed{\text{CPU migration}}$，对于普通软件问题不大，但对实时系统不够理想，这是 affinity 最关键的意义之一。假设 RT thread 原来跑在 CPU3：
-
-```text
-CPU3:
-L1 cache
-L2 cache
-TLB
-branch predictor state
-```
-
-RT thread 最近使用的数据，例如：
-
-```
-motor_state
-pdo_buffer
-controller_state
-setpoint
-```
-
-可能已经大量进入 CPU3 的 cache。下一周期 Linux 把线程迁移到 CPU6：
-
-```
-CPU3                    CPU6
-
-L1: motor_state         L1: ???
-L2: controller          L2: ???
-     ↓
- RT thread migrates ────────>
-```
-
-CPU6 的本地 cache 中很可能没有这些数据。于是要重新：
-
-```
-L1 miss
-   ↓
-L2 miss
-   ↓
-LLC
-   ↓
-memory
-```
-
-这会增加执行时间的不确定性。实时系统最怕的其实不一定是：平均执行时间稍微长，而是：$\boxed{\text{最坏执行时间 / jitter 不稳定}}$。所以希望：
-
-```
-cycle 1      RT → CPU6
-cycle 2      RT → CPU6
-cycle 3      RT → CPU6
-...
-cycle 10000  RT → CPU6
-```
-
-而不是到处漂。
-
-### 如何使用
-
-#### 本质是 CPU mask
-
-Linux 内核里，CPU affinity 通常不是 cpu = 6 这种单个数字概念。而是$\boxed{CPU \ mask}$，比如：
-
-```c++
-CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
- 0    0    0    0    0    0    1    0
-```
-
-意思是：
-
-```c++
-allowed CPUs = {6}
-```
-
-也可以写：
-
-```c++
-CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
- 0    0    0    0    1    0    1    0
-```
-
-代表：
-
-```c++
-allowed CPUs = {4, 6}
-```
-
-因此 affinity 并不一定是“绑死一个核”。它真正的含义是：
-
-> scheduler 只能从这个 allowed CPU set 中选。
-
-具体代码（**相关操作宏的参数都是先CPU序号，再集合**）：
-
-``` c++
-#include<pthread.h>			// 哪个线程		// 多少个 cpu			// cpu 集合
-int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
-
-#include<sched.h>
-
-cpu_set_t expected;
-CPU_ZERO(&expected);
-
-for (const int cpu : options.cpu_ids) {  // options.cpu_ids 是一个 vector 容器
-    CPU_SET(cpu, &expected);
-}
-
-result = pthread_setaffinity_np(self, sizeof(expected), &expected);
-
-if (result != 0) {
-    return thread_setup_error("pthread_getaffinity_np", result);
-}
-```
-
-验证是否绑核成功：
-
-``` c
-    // 验证 CPU 绑核是否成功
-    cpu_set_t actual;
-    CPU_ZERO(&actual);
-    result = pthread_getaffinity_np(self, sizeof(actual), &actual);
-    if (result != 0) {
-        return thread_setup_error("pthread_getaffinity_np", result);
-    }
-    if (!CPU_EQUAL(&expected, &actual)) {
-        return thread_setup_error("thread affinity verification", 0);
-    }
-```
-
-#### `lscpu`（查看核分布）
-
-RK3588（瑞芯微 Rockchip RK3588）采用 8 核 ARM CPU，4 个 Cortex-A76 大核 + 4 个 Cortex-A55 小核，属于异构多核（Heterogeneous Multi-Core）架构。
-
-| CPU 编号 | 核心类型   | 最高标称频率 | 性能定位 | 调频策略组 |
-| -------- | ---------- | ------------ | -------- | ---------- |
-| CPU0     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
-| CPU1     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
-| CPU2     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
-| CPU3     | Cortex-A55 | 1.8 GHz      | 小核     | policy0    |
-| CPU4     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
-| CPU5     | Cortex-A76 | 2.4 GHz      | 大核     | policy4    |
-| CPU6     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
-| CPU7     | Cortex-A76 | 2.4 GHz      | 大核     | policy6    |
-
-``` shell
-cat@lubancat:~/robot_deploy$ lscpu -e
-CPU SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ       MHZ
-  0      0    0 0:0:0:0          yes 1800.0000 408.0000 1008.0000
-  1      0    1 1:1:1:0          yes 1800.0000 408.0000 1008.0000
-  2      0    2 2:2:2:0          yes 1800.0000 408.0000 1008.0000
-  3      0    3 3:3:3:0          yes 1800.0000 408.0000 1800.0000
-  4      0    0 4:4:4:0          yes 2304.0000 408.0000 1416.0000
-  5      0    1 5:5:5:0          yes 2304.0000 408.0000 1416.0000
-  6      0    2 6:6:6:0          yes 2304.0000 408.0000  600.0000
-  7      0    3 7:7:7:0          yes 2304.0000 408.0000  600.0000
-```
-
-#### `pthread_setaffinity_np()`
-
-对于 C++ pthread 实时线程，最常见的是：
-
-``` c++
-pthread_setaffinity_np()
-```
-
-例如：
-
-``` c++
-cpu_set_t cpuset;
-CPU_ZERO(&cpuset);		// 先清空 mask
-CPU_SET(6, &cpuset);	// 允许 CPU6
-
-int ret = pthread_setaffinity_np(	// 把当前 thread 限制到 CPU6
-    pthread_self(),
-    sizeof(cpu_set_t),
-    &cpuset
-);
-```
-
-但只意味着：
-
-> **这个 RT thread 只能跑在 CPU6。**
-
-它**不意味着**：
-
-> CPU6 只能运行这个 RT thread。
-
-也就是说，可能仍然有：
-
-```
-CPU6
-│
-├── your RT thread
-├── kworker
-├── softirq
-├── timer
-├── other process
-├── kernel thread
-└── random userspace task
-```
-
-所以：$\boxed{ \text{CPU affinity} \neq \text{CPU isolation} }$，这是非常重要的概念。
-
-### 深入理解
-
-#### 绑核是"线程级"理解
-
-假设：
-
-```
-robot_controller process
-│
-├── EtherCAT RT thread
-├── Policy thread
-├── Monitor thread
-├── IMU thread
-└── Logger thread
-```
-
-它们虽然属于同一个 process，但 Linux scheduler 真正调度的是：$\boxed{\text{task / thread}}$，所以完全可以：
-
-```
-EtherCAT RT      → CPU6
-Policy           → CPU4
-IMU              → CPU3
-Monitor          → CPU2
-Logger           → CPU1
-```
-
-而不是：
-
-```
-整个 robot_controller process → CPU6
-```
-
-这也是为什么实时程序通常在线程创建后，对每个关键线程单独配置 affinity。
-
-#### 真正的 RT CPU 通常是“绑核 + 隔离”
-
-真正追求低 jitter 时，一般不是只做：
-
-```
-RT thread → CPU6
-```
-
-还希望：
-
-```
-                CPU6
-
-RT thread ─────────────→ CPU6
-
-normal process ──X─────→ CPU6
-kworker        ──X─────→ CPU6
-IRQ            ──X─────→ CPU6   （视配置而定）
-```
-
-这才接近：$\boxed{\text{dedicated realtime CPU}}$，Linux 中常见手段包括：
-
-```
-isolcpus
-nohz_full
-rcu_nocbs
-cpuset
-IRQ affinity
-```
-
-这些和 thread affinity 是配套关系。可以先把它理解成三个层级：
-
-$\boxed{Thread \ affinity→CPU \ isolation→IRQ \ | \ kernel \ housekeeping \  isolation}$
-
-## 调度策略与优先级
-
-告诉 Linux scheduler，当多个 runnable thread 同时竞争 CPU 时，哪一个线程应该优先运行。它最主要的目的不是“让线程计算得更快”，而是：**让时间敏感的实时线程在需要运行时，能够尽快抢到 CPU，从而降低 scheduling latency 和 jitter。**
-
-### 调度策略
-
-Linux 常见 scheduling policy 包括：
-
-```text
-SCHED_OTHER    0   普通 Linux 调度
-
-SCHED_BATCH    3   batch workload
-
-SCHED_IDLE     5   极低优先级普通任务
-
-SCHED_FIFO     1   实时 FIFO
-SCHED_RR       2   实时 Round-Robin
-
-SCHED_DEADLINE  6  deadline-based RT scheduling
-```
-
-### 如何使用
-
-#### 查询系统支持的优先级
-
-``` c
-int min_priority = sched_get_priority_min(SCHED_FIFO);
-
-int max_priority = sched_get_priority_max(SCHED_FIFO);
-```
-
-#### `pthread_setschedparam()`（设置策略和优先级）
-
-你的 C++ pthread 程序里最常见的是：
-
-```c++
-#include <pthread.h>
-
-int pthread_setschedparam(
-    pthread_t thread,					// 线程
-    int policy,							// 调度策略
-    const struct sched_param *param		// 优先级
-);
-```
-
-`pthread_setschedparam()` 同时设置：$\boxed{ \text{scheduling policy} + \text{scheduling priority} }$。
-
-描述优先级的数据结构为：
-
-``` c
-struct sched_param {
-    int sched_priority;
-};
-```
-
-#### `pthread_setschedprio()`（只设置优先级）
-
-如果线程已经是$\boxed{SCHED\_FIFO}$，只是想修改优先级，可以：
-
-```c++
-pthread_setschedprio(thread, 80);
-```
-
-#### `chrt`（查看线程优先级）
-
-例如查看进程：
-
-```shell
-chrt -p <pid>
-```
-
-可能得到：
-
-```shell
-pid 1234's current scheduling policy: SCHED_FIFO
-pid 1234's current scheduling priority: 80
-```
-
-`chrt` 可以查看或设置 `SCHED_OTHER`、`SCHED_FIFO`、`SCHED_RR` 等调度策略。也可以直接启动：
-
-```
-sudo chrt -f 80 ./robot_controller
-```
-
-意思：
-
-```
--f
- ↓
-SCHED_FIFO
-
-80
- ↓
-priority 80
-```
-
-### 注意事项
-
-#### 解决锁带来的优先级翻转
-
-解决经典 priority inversion 的一个办法是：$\boxed{\text{Priority Inheritance}}$，mutex 可以配置：
-
-```c++
-PTHREAD_PRIO_INHERIT
-```
-
-例如：
-
-```c++
-pthread_mutexattr_t attr;
-
-pthread_mutexattr_init(&attr);
-
-pthread_mutexattr_setprotocol(
-    &attr,
-    PTHREAD_PRIO_INHERIT
-);
-
-pthread_mutex_init(&mutex, &attr);
-```
-
-现在：
-
-```
-L priority 40
-持有 mutex
-```
-
-H开始等待这个 mutex，系统临时把 L 提升：
-
-```
-L:
-
-40
- ↓
-80 temporarily
-```
-
-于是 M priority 60 无法再抢占 L。L 可以赶快：
-
-```
-finish critical section
-      ↓
-unlock
-      ↓
-H 获取 mutex
-```
-
-然后 L 再恢复原来的：
-
-```
-priority 40
-```
-
-POSIX 定义的 `PTHREAD_PRIO_INHERIT` 正是通过让 mutex owner 临时继承等待者的更高优先级，来限制这类 priority inversion。PREEMPT_RT 内核中的 `rtmutex` 也大量利用 priority inheritance。
-
-#### 注意中断饿死
-
-和MCU中的中断可以永远打断FreeRTOS的调度不同，PREEMPT_RT 很重要的一项改造是：$\boxed{\text{大多数 IRQ handler 被线程化}}$，即：
-
-```
-NIC hardware interrupt
-       ↓
-minimal hard IRQ
-       ↓
-wake IRQ thread
-       ↓
-IRQ thread 由 scheduler 调度
-```
-
-内核当前文档说明，**PREEMPT_RT 中默认 threaded IRQ handler 使用**：
-
-```
-SCHED_FIFO
-priority = 50
-```
-
-（具体系统仍应实际检查配置。）
-
-于是你的系统可能实际存在：
-
-```
-EtherCAT RT thread      FIFO 80
-
-EtherCAT NIC IRQ        FIFO 50
-```
-
-这时候就出现**用户 RT priority 太高可能反过来饿死设备 IRQ**。假设：
-
-```
-EtherCAT RT  = FIFO 80
-NIC IRQ      = FIFO 50
-```
-
-如果 EtherCAT RT thread：
-
-```c
-while (...) {
-    busy_wait();
-}
-```
-
-因为：80>50那么 IRQ thread甚至可能无法运行。于是出现：
-
-```
-RT thread 等 NIC 数据
-       ↑
-       │
-NIC IRQ thread 想处理数据
-       │
-       └── 被 RT 80 抢占
-```
-
-变成：$\boxed{\text{自己把自己依赖的 producer 饿死}}$所以 realtime priority 设计绝不能只看：
-
-> “谁最重要？”
-
-而应该看：$\boxed{\text{dependency graph}}$即：
-
-> 谁依赖谁先完成工作？
-
-以EtherCAT电机控制为例，现在大致是：
-
-```
-EtherCAT / motor RT    1 kHz
-Policy                 50 Hz
-IMU
-diagnostics
-logger
-```
-
-类似这样的优先级关系通常比较合理：
-
-```
-时间敏感程度
-
-EtherCAT RT
-    │
-    │ high
-    ▼
-Policy
-    │
-    ▼
-IMU / auxiliary RT
-    │
-    ▼
-monitor
-    │
-    ▼
-logger
-```
-
-例如作为初始实验配置：
-
-```
-EtherCAT RT       FIFO 80
-Policy            FIFO 70
-IMU               FIFO 60 或普通
-Monitor           SCHED_OTHER
-Logger            SCHED_OTHER
 ```
