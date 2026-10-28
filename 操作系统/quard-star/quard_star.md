@@ -3386,30 +3386,6 @@ enum {
     QUARD_STAR_FLASH,
     QUARD_STAR_DRAM,
 };
-
-
-enum {
-    QUARD_STAR_VIRTIO0_IRQ = 1,
-    QUARD_STAR_UART0_IRQ   = 10,  //定义了串口中断号为 10
-    QUARD_STAR_UART1_IRQ   = 11,
-    QUARD_STAR_UART2_IRQ   = 12,
-    QUARD_STAR_RTC_IRQ     = 13,
-};
-```
-
-#### 定义 PLIC 相关属性
-
-``` c++
-#define QUARD_STAR_PLIC_NUM_SOURCES    127      //PLIC 支持的中断源的最大数量
-#define QUARD_STAR_PLIC_NUM_PRIORITIES 7        //PLIC 支持的中断优先级的数量
-#define QUARD_STAR_PLIC_PRIORITY_BASE  0x04     //PLIC 中断优先级寄存器的基址偏移值，用于访问中断优先级信息
-#define QUARD_STAR_PLIC_PENDING_BASE   0x1000   //PLIC 中断挂起寄存器的基址偏移值，用于访问中断挂起状态
-#define QUARD_STAR_PLIC_ENABLE_BASE    0x2000   //PLIC 中断使能寄存器的基址偏移值，用于控制中断使能状态
-#define QUARD_STAR_PLIC_ENABLE_STRIDE  0x80     //PLIC 中断使能寄存器之间的地址间隔
-#define QUARD_STAR_PLIC_CONTEXT_BASE   0x200000 //PLIC 上下文保存寄存器的基址偏移值，用于保存中断处理程序的上下文信息
-#define QUARD_STAR_PLIC_CONTEXT_STRIDE 0x1000   //PLIC 上下文保存寄存器之间的地址间隔
-#define QUARD_STAR_PLIC_SIZE(__num_context) \
-    (QUARD_STAR_PLIC_CONTEXT_BASE + (__num_context) * QUARD_STAR_PLIC_CONTEXT_STRIDE)
 ```
 
 #### 设备硬件结构体(`MachineState`)
@@ -3889,52 +3865,6 @@ static void quard_star_flash_create(MachineState *machine)
 }
 ```
 
-#### 创建PLIC
-
-platform-level interrupt controller（PLIC）负责**全局外部中断**。负责将全局中断源（通常是I/O设备：UART, SPI, GPIO）连接到中断目标（通常是处理器的上下文）。它并不涉及任何实际硬件的具体实现。
-
-- **支持大量中断源和上下文**：理论上支持最多1023个外部中断源和15872个上下文。
-
-- **中断优先级管理**：每个中断源有**独立**的优先级和ID标识。中断目标可以根据优先级阈值寄存器来决定是否接收中断。
-
-- **中断使能和挂起**：通过中断使能位（IE）来控制中断是否被启用。同时，中断挂起位（IP）用于标识中断是否处于挂起状态。
-
-- **中断响应和完成**：中断目标可以通过读取claim寄存器来获取最高优先级的中断ID，并通过写入complete寄存器来完成中断处理。
-
----
-
-对**每个CPU**创建各自的PLIC：
-
-```c
-static void quard_star_plic_create(MachineState *machine)
-{
-    int socket_count = riscv_socket_count(machine);
-    QuardStarState *s = RISCV_VIRT_MACHINE(machine);
-    int i,hart_count,base_hartid;
-    for ( i = 0; i < socket_count; i++) {
-        hart_count = riscv_socket_hart_count(machine, i);
-        base_hartid = riscv_socket_first_hartid(machine, i);
-        char *plic_hart_config;
-        /* Per-socket PLIC hart topology configuration string */
-        plic_hart_config = riscv_plic_hart_config_string(hart_count);
-        
-        s->plic[i] = sifive_plic_create(
-            quard_star_memmap[QUARD_STAR_PLIC].base + i *quard_star_memmap[QUARD_STAR_PLIC].size ,
-            plic_hart_config, hart_count , base_hartid,
-            QUARD_STAR_PLIC_NUM_SOURCES,
-            QUARD_STAR_PLIC_NUM_PRIORITIES,
-            QUARD_STAR_PLIC_PRIORITY_BASE,
-            QUARD_STAR_PLIC_PENDING_BASE,
-            QUARD_STAR_PLIC_ENABLE_BASE,
-            QUARD_STAR_PLIC_ENABLE_STRIDE,
-            QUARD_STAR_PLIC_CONTEXT_BASE,
-            QUARD_STAR_PLIC_CONTEXT_STRIDE,
-            quard_star_memmap[QUARD_STAR_PLIC].size);
-        g_free(plic_hart_config);
-    }
-}
-```
-
 #### 创建 ACLINT
 
 advance-core-local-interrupt,是RISC-V架构中的一种高级**本地**中断控制器。主要功能为提供**多处理器(HART)之间的中断**与**定时器中断/软件中断**功能。
@@ -4173,7 +4103,7 @@ mret        # 异常反馈指令
 
 - **加载OpenSBI固件**`fw_jump.bin`的内容到   DRAM 内存区域`[0x80000000:0x80200000]`；
 - **加载设备树**`quard_star_sbi.dtb`的内容到 DRAM 内存区域`[0x82200000:0x82280000]`；
-- 加载完毕后**跳转到**`t0 = 0x80000000`的 DRAM 起始位置处**执行`OpenSBI`的代码**，然后 OpenSBI 通过`fw_platform_init()`函数获取设备树的信息来。（最终`a1 = 0x82200000`（设备树地址））
+- 加载完毕后**跳转到**`t0 = 0x80000000`的 DRAM 起始位置处**执行`OpenSBI`的代码**，然后 OpenSBI 通过`fw_platform_init()`函数获取设备树的信息来。（`a1 = 0x82200000`（设备树地址））
 
 <img src="quard-star/移植opensbi.png" alt="移植opensbi" style="zoom:80%;" />
 
@@ -7798,7 +7728,7 @@ _no_wait:
     .end
 ```
 
-# 调用SBI接口实现控制台输出（创建 OS）
+# 调用 SBI 接口实现控制台输出（创建 OS）
 
 在`untrusted-domain`中运行自己写的操作系统。
 
@@ -8120,6 +8050,2658 @@ dd of=fw.bin bs=1k conv=notrunc seek=4K if=$SHELL_FOLDER/output/trusted_domain/t
 dd of=fw.bin bs=1k conv=notrunc seek=8K if=$SHELL_FOLDER/output/os/os.bin
 ```
 
+# 实现系统调用
+
+以应用程序调用`sys_write()`函数为例：传入`fd`, `buf`, `len`等相关信息与系统调用号`__NR_write`，`sys_write()`本质上是`syscall()`系统调用的封装，将系统调用号传入`a7`寄存器，参数传入`a0,a1,a2`寄存器：
+
+``` c
+size_t sys_wirte(size_t fd, const char* buf, size_t len)
+{
+    syscall(__NR_write, fd, buf, len);  // 传入__NR_write系统调用号，在trap_handler中对此调用号进行处理
+}
+```
+
+然后触发`trap`也就是调用`__alltrap`：
+
+- 首先从`sscratch`寄存器获取保存`trapcontext`的地址，将应用程序的寄存器值保存进内核栈；
+
+- 其次将`a0`寄存器指向内核栈中保存用户态寄存器结构体的地址（使`__SYSCALL()`可以进行处理）；
+
+- 最后调用`trap_handler(TrapContext* cx)`；如果`scause`为 8 则调用`__SYSCALL()`依据内核栈中保存的用户态寄存器结构体值对不同系统调用号调用相关处理函数，如`__sys_write(arg1, arg2, arg3)`进行处理。
+
+## 系统调用号分发
+
+将系统调用号传入到`a7`寄存器，然后将传入的三个参数分别传入到`a0,a1,a2`寄存器，然后调用`ecall`指令进入内核的异常处理程序，调用完成后内核会将返回值放在`a0`寄存器中。
+
+``` c
+uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
+
+    register uintptr_t a0 asm ("a0") = (uintptr_t)(arg1);
+    register uintptr_t a1 asm ("a1") = (uintptr_t)(arg2);
+    register uintptr_t a2 asm ("a2") = (uintptr_t)(arg3);
+    register uintptr_t a7 asm ("a7") = (uintptr_t)(id);
+
+    asm volatile ("ecall"
+		      : "+r" (a0)
+		      : "r" (a1), "r" (a2), "r" (a7)
+		      : "memory");
+    return a0;
+}
+
+
+void trap_handler()
+{
+    set_kernel_trap_entry();
+    TrapContext* cx = (TrapContext*)get_current_trap_cx();
+    reg_t scause = r_scause();
+    reg_t cause_code = scause & 0xfff;
+
+    if (scause & 0x8000000000000000ULL) {
+        switch (cause_code) {
+        case 5:
+            set_next_trigger();
+            schedule();
+            break;
+        default:
+            printk("undefined interrupt scause:%lx\n", scause);
+            panic("unexpected user interrupt");
+        }
+    } else {
+        switch (cause_code) {
+        case 8: {
+            /* exec 会覆写 sepc，必须先跳过 4 字节的 ecall 指令。 */
+            cx->sepc += 4;
+            uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
+            /* 调度可能切换当前进程，返回值写入当前 trap 上下文。 */
+            cx = (TrapContext*)get_current_trap_cx();
+            cx->a0 = result;
+            break;
+        }
+        default:
+            printk("undefined exception scause:%lx sepc:%lx stval:%lx\n",
+                   scause, cx->sepc, r_stval());
+            panic("unexpected user exception");
+        }
+    }
+    trap_return();
+}
+
+
+uint64_t __SYSCALL(size_t id, reg_t arg1, reg_t arg2, reg_t arg3)
+{
+    char name[EFS_NAME_MAX + 1];
+    switch (id) {
+    case __NR_write:
+        return syscall_write(arg1, arg2, arg3);
+    case __NR_read:
+        return syscall_read(arg1, arg2, arg3);
+    case __NR_open:
+        return user_name(arg1, name) < 0 ? (u64)-1 :
+               (u64)(long)fs_open(current_proc(), name, arg2);
+    case __NR_close:
+        return fs_close(current_proc(), arg1);
+    case __NR_sched_yield:
+        schedule();
+        return 0;
+    case __NR_gettimeofday:
+        return get_time_us();
+    case __NR_exit:
+        exit_current_and_run_next(arg1);
+        return 0;
+    case __NR_clone:
+        return __sys_fork();
+    case __NR_execve:
+        return user_name(arg2, name) < 0 ? (u64)-1 : (u64)(long)exec(name);
+    case __NR_waitid:
+        return wait();
+    case __NR_getpid:
+        return current_proc()->pid;
+    case __NR_thread_create:
+        return thread_create(arg1, arg2, arg3);
+    case __NR_gettid:
+        return current_thread()->tid;
+    case __NR_waittid:
+        return waittid(arg1);
+    case __NR_thread_exit:
+        thread_exit((int)arg1);
+        return 0;
+    default:
+        return (u64)-1;
+    }
+}
+```
+
+## 实现`strlen()`/`memcpy()`
+
+创建`string.c`：
+
+``` c
+#include "os.h"
+//计算字符串的长度 
+size_t strlen(const char *str)
+{
+    char *ptr = (char *)str;
+    while (*ptr != EOS)  // `\0`
+    {
+        ptr++;
+    }
+    return ptr - str;
+}
+
+
+// 从存储区 src 复制 n 个字节到存储区 dest。
+void* memcpy(void* dest, const void* src, size_t count)
+{
+    char *ptr = dest;
+    while (count--)
+    {
+        *ptr++ = *( (char*) (src++) );
+    }
+    return dest;
+}
+```
+
+## 用户虚拟地址空间 <-> 内核虚拟地址空间（可以优化）
+
+### `user_page()`：查找物理地址
+
+它负责**把单个用户虚拟地址翻译成一个内核可以解引用的指针**，并在翻译的同时完成**权限校验**。可以把它看作 `user_copy` 每页循环里调用的“单页翻译器”。
+
+| 参数       | 含义                                                         |
+| :--------- | :----------------------------------------------------------- |
+| `va`       | 用户虚拟地址（`user_copy` 里传入的是 `va + done`，即当前页内起点） |
+| `write`    | 是否需要**写权限**（1 = 要写该页；0 = 只读）                 |
+| `physical` | **输出参数**：成功时写入可直接访问的地址（物理基址 + 页内偏移） |
+
+``` c
+static int user_page(u64 va, int write, unsigned char **physical)
+{
+    if (va >= TRAMPOLINE)
+        return -1;
+    
+    // 依据当前当前进程的用户根页表查找用户态虚拟地址（转换为页）的页表项
+    PageTableEntry *pte = find_pte(&current_proc()->pagetable, floor_virts(virt_addr_from_size_t(va)));
+    // 首先检查物理页的权限
+    u64 required = PTE_V | PTE_U | (write ? PTE_W : PTE_R);
+    if (!pte || (pte->bits & required) != required)
+        return -1;
+    // 返回物理地址
+    *physical = (unsigned char *)(PTE2PA(pte->bits) + (va & (PAGE_SIZE - 1)));
+    return 0;
+}
+```
+
+### `copy_from_user()`：按页搬运数据到内核虚拟地址
+
+**按页搬运**数据，把用户态虚拟地址的数据搬运到内核的虚拟地址中去：
+
+``` c
+// *dst 为内核虚拟地址，src 为用户虚拟地址
+static int copy_from_user(void *dst, u64 src, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        
+        // 找到 src 用户虚拟地址对应的物理地址
+        unsigned char *physical;
+        if (user_page(src + done, 0, &physical) < 0)
+            return -1;
+        
+        // 当前页还需要拷贝多少字节（当前页内偏移：(src + done) & (PAGE_SIZE - 1)）
+        size_t n = PAGE_SIZE - ((src + done) & (PAGE_SIZE - 1));
+        // 只拷贝有数据的长度
+        if (len - done < n)
+            n = len - done;
+        memcpy((unsigned char *)dst + done, physical, n);
+        done += n;
+    }
+    return 0;
+}
+```
+
+### `copy_to_user()`：按页搬运数据到用户虚拟地址
+
+**按页搬运**数据，把内核态虚拟地址的数据搬运到用户的虚拟地址中去：
+
+``` c
+// dst 为用户虚拟地址，*src 为内核虚拟地址
+static int copy_to_user(u64 dst, const void *src, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        
+        // 找到 dst 用户虚拟地址对应的物理地址
+        unsigned char *physical;
+        if (user_page(dst + done, 1, &physical) < 0) 
+            return -1;
+        
+        // 当前页还需要拷贝多少字节（当前页内偏移：(src + done) & (PAGE_SIZE - 1)）
+        size_t n = PAGE_SIZE - ((dst + done) & (PAGE_SIZE - 1));
+        // 只拷贝有数据的长度
+        if (n > len - done)
+            n = len - done;
+        
+        memcpy(physical, (const unsigned char *)src + done, n);
+        done += n;
+    }
+    return 0;
+}
+```
+
+### `user_range()`：检查地址是否合法
+
+ "**预算式预检**"：一次性确认"`[va, va+len)` 这一段用户地址，每一页都合法、都属于用户、权限都够"，但**不搬运任何数据**。
+
+``` c
+static int user_range(u64 va, size_t len, int write)
+{
+    if (va >= TRAMPOLINE || len > TRAMPOLINE - va)
+        return -1;
+    
+    // 从 va 所在页的页首开始（清除页内偏移向下对齐：va & ~(PAGE_SIZE - 1)），按照页查找
+    for (u64 page = va & ~(PAGE_SIZE - 1); page < va + len; page += PAGE_SIZE) {
+        unsigned char *physical;
+        if (user_page(page, write, &physical) < 0)
+            return -1;
+    }
+    return 0;
+}
+```
+
+### `user_name()`：读取用户态的字符串
+
+**`user_name`** = "**逐字节读一个 C 字符串**"：从用户态读文件名，遇到 `\0` 停，最多 `EFS_NAME_MAX + 1` 字节。
+
+``` c
+static int user_name(u64 va, char name[EFS_NAME_MAX + 1])
+{
+    for (int i = 0; i <= EFS_NAME_MAX; ++i) {
+        if (user_copy(va + i, &name[i], 1, 0) < 0)
+            return -1;
+        if (!name[i])
+            return i ? 0 : -1;
+    }
+    return -1;
+}
+```
+
+## `sys_read()`系统调用
+
+### 通过`fd`区分读取源
+
+依据传入的`fd`不同来区别从哪个文件读取数据。（例如`stdin`标准输入定向为从串口读取数据）
+
+``` c
+int sys_read(size_t fd ,const char* buf , size_t len)
+{
+    return syscall(__NR_read, fd, buf, len);
+}
+
+// a7 为 调用号
+uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
+
+    register uintptr_t a0 asm ("a0") = (uintptr_t)(arg1);
+    register uintptr_t a1 asm ("a1") = (uintptr_t)(arg2);
+    register uintptr_t a2 asm ("a2") = (uintptr_t)(arg3);
+    register uintptr_t a7 asm ("a7") = (uintptr_t)(id);
+
+    asm volatile ("ecall"
+		      : "+r" (a0)
+		      : "r" (a1), "r" (a2), "r" (a7)
+		      : "memory");
+    return a0;
+}
+
+
+//												  调用号   fd      buf    len
+// trap_handler中调用：uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
+// uint64_t __SYSCALL(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) 中：
+    case __NR_read:
+        return syscall_read(arg1, arg2, arg3);
+```
+
+### `syscall_read()`：读取执行函数
+
+``` c
+// 此刻 user 为用户态数组的虚拟地址
+static efs_ssize syscall_read(size_t fd, u64 user, size_t len)
+{
+    // Reading a file writes into the user buffer.
+    if (fd >= MAX_FD || !current_proc()->fds[fd] || user_range(user, len, 1) < 0)
+        return -1;
+
+    unsigned char buf[EFS_BLOCK_SIZE];
+    size_t done = 0;
+    
+    while (done < len) {
+        // 还需要读取多少字节
+        size_t n = len - done;
+        // 防止数组越界
+        if (n > sizeof(buf))
+            n = sizeof(buf);
+        
+        // 先读取到内核数组
+        efs_ssize result = fs_read(current_proc(), fd, buf, n);
+        
+        if (result < 0) return done ? (efs_ssize)done : -1;
+        
+        // 把内核数组读取到的内容拷贝到用户数组
+        if (result && copy_to_user(user + done, buf, result) < 0)
+            return -1;
+        done += result;
+        if ((efs_size)result < n) break;
+    }
+    return done;
+}
+```
+
+### `fs_read()`：依据`fd`执行读取函数
+
+`fs_read`中依据`fd`来对`read`操作进行分发，`getchar()`是**标准输入，**调用`uart0_getchar`从串口读取一个字符到`dst`：
+
+``` c
+efs_ssize fs_read(ProcessControlBlock *p, int fd, void *dst, efs_size len)
+{
+    if (!p || fd < 0 || fd >= MAX_FD || !p->fds[fd])
+        return -1;
+    
+    // 依据 fd 获取当前进程的 OpenFile
+    OpenFile *file = p->fds[fd];
+    
+    // stdin 对应串口读取
+    if (file->kind == FILE_STDIN) {
+        if (!len)	// 读取的字节长度为 0 则返回
+            return 0;
+        ((unsigned char *)dst)[0] = uart0_getchar();
+        return 1;
+    }
+    
+    // 磁盘读取
+    if (file->kind != FILE_DISK || (file->flags & 3U) == FS_WRONLY)
+        return -1;
+    
+    efs_ssize n = efs_read_at(&root_fs, file->inode, file->offset, dst, len);
+    if (n > 0) file->offset += n;
+    return n;
+}
+```
+
+### 串口读取函数
+
+`getchar()`是通过封装通过`int sys_read(size_t fd ,const char* buf , size_t len)`；指定`fd = stdin`：
+
+``` c
+/* 获取一个字符 */
+char getchar()
+{
+    char data[1];
+    // fd = stdin
+    sys_read(stdin, data, 1);
+    return data[0];
+}
+```
+
+实现`uart0_getchar()`：
+
+``` c
+static inline void intr_off()
+{
+  w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+}
+
+// 打开中断
+static inline void intr_on()
+{
+  w_sstatus(r_sstatus() | SSTATUS_SIE);
+}
+
+static unsigned char rx_buffer[UART_RX_CAPACITY];
+static unsigned int  rx_read;
+static unsigned int  rx_write;
+static unsigned int  rx_count;
+
+
+int uart0_getchar(void)
+{
+    reg_t old_status = r_sstatus();
+    intr_off();
+    /* 目前没有可读取的字符，Yield to another runnable thread, then sleep if still empty. */
+    while (rx_count == 0) {
+        schedule();
+        if (rx_count == 0) {
+            intr_on();
+            asm volatile("wfi" ::: "memory");
+            intr_off();
+        }
+    }
+    int ch = rx_buffer[rx_read];
+    rx_read = (rx_read + 1) % UART_RX_CAPACITY;
+    --rx_count;
+    w_sstatus(old_status);
+    return ch;
+}
+```
+
+### 调用 SBI 读取控制台函数
+
+使用OpenSBI提供的 API 封装为可调用的函数：
+
+``` c
+int sbi_console_getchar(void)
+{
+	struct sbiret ret;
+
+	ret = sbi_ecall(SBI_EXT_0_1_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
+
+	return ret.error;
+}
+```
+
+依据此函数来实现`sys_read`，应用程序就是调用这个函数来获取一个字符，内核在接受到用户态的系统调用时会进行分发，然后去调用`int sbi_console_getchar(void)`：
+
+``` c
+void __sys_read(size_t fd, const char* data, size_t len)
+{
+    if(fd == stdin)
+    {
+        int c ;
+        assert( len == 1);
+        while (1)
+        {
+            c = sbi_console_getchar();
+            if(c != -1)
+                break;
+        }
+        char* str = translated_byte_buffer(data , len);
+        str[0]  = c;
+    }
+}
+```
+
+## `sys_write()`系统调用
+
+<img src="./assets/sys_write调用链.png" alt="sys_write调用链" style="zoom: 80%;" />
+
+
+
+本质是应用层调用 `syscall()`，将 `fd`、`buf`、`len` 分别放入 `a0`、`a1`、`a2`，将系统调用号 `64` 放入 `a7`，然后执行 `ecall`，`__alltrap`保存寄存器，切换 `satp` 到内核页表，再跳转到 `trap_handler()`。`trap_handler()`识别用户态 `ecall`，将保存的寄存器参数交给 `__SYSCALL()`，分发器找到 `__NR_write` 后调用 `syscall_write(fd, buf, len)`：
+
+``` c
+uint64_t sys_write(size_t fd, const char* buf, size_t len)
+{
+    return syscall(__NR_write, fd, (reg_t)buf, len);
+}
+
+// a7 为 调用号
+uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
+
+    register uintptr_t a0 asm ("a0") = (uintptr_t)(arg1);
+    register uintptr_t a1 asm ("a1") = (uintptr_t)(arg2);
+    register uintptr_t a2 asm ("a2") = (uintptr_t)(arg3);
+    register uintptr_t a7 asm ("a7") = (uintptr_t)(id);
+
+    asm volatile ("ecall"
+		      : "+r" (a0)
+		      : "r" (a1), "r" (a2), "r" (a7)
+		      : "memory");
+    return a0;
+}
+
+
+//												  调用号   fd      buf    len
+// trap_handler中调用：uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
+// uint64_t __SYSCALL(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) 中：
+uint64_t __SYSCALL(size_t id, reg_t arg1, reg_t arg2, reg_t arg3)
+{
+    char name[EFS_NAME_MAX + 1];
+    switch (id) {
+    case __NR_write:
+        return syscall_write(arg1, arg2, arg3);
+            
+}
+```
+
+#### `syscall_write()`：写入执行函数
+
+``` c
+// 此刻 user 为用户态数组的虚拟地址
+static efs_ssize syscall_write(size_t fd, u64 user, size_t len)
+{
+    // Writing a file reads from the user buffer.
+    if (fd >= MAX_FD || !current_proc()->fds[fd] || user_range(user, len, 0) < 0)
+        return -1;
+
+    unsigned char buf[EFS_BLOCK_SIZE];
+    size_t done = 0;
+    
+    while (done < len) {
+        // 还需要写入多少
+        size_t n = len - done;
+        // 防止数组越界
+        if (n > sizeof(buf))
+            n = sizeof(buf);
+        
+        // 把传递的user需要写入的数组中的内容拷贝到 buf
+        if (copy_from_user(buf, user + done, n) < 0)
+            return -1;
+        
+        // 依据 fd执行写入函数
+        efs_ssize result = fs_write(current_proc(), fd, buf, n);
+        if (result < 0) return done ? (efs_ssize)done : -1;
+        
+        done += result;
+        if ((efs_size)result < n) break;
+    }
+    return done;
+}
+```
+
+#### `fs_write()`：依据`fd`执行写入函数
+
+``` c
+efs_ssize fs_write(ProcessControlBlock *p, int fd, const void *src, efs_size len)
+{
+    if (!p || fd < 0 || fd >= MAX_FD || !p->fds[fd])
+        return -1;
+    
+    // 依据 fd 获取当前进程的 OpenFile
+    OpenFile *file = p->fds[fd];
+    
+    // 写入（输出到控制台）
+    if (file->kind == FILE_STDOUT) {
+        const unsigned char *buf = src;
+        for (efs_size i = 0; i < len; ++i) sbi_console_putchar(buf[i]);
+        return len;
+    }
+    
+    if (file->kind != FILE_DISK || (file->flags & 3U) == FS_RDONLY)
+        return -1;
+    
+    efs_ssize n = efs_write_at(&root_fs, file->inode, file->offset, src, len);
+    if (n > 0) file->offset += n;
+    return n;
+}
+```
+
+#### 调用 SBI 写入控制台函数
+
+``` c
+void sbi_console_putchar(int ch)
+{
+	sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
+}
+```
+
+
+
+## `sys_fork()`系统调用
+
+`sys_fork()` 是一次**复制父进程地址空间并创建子进程主线程，并让父子进程从同一个位置继续执行**的操作。用户态 `sys_fork()` 发出编号为 `__NR_clone` 的 `ecall`，内核将它分派给 `__sys_fork()`。
+
+``` c
+/* fork: 复制当前进程, 子进程返回 0, 父进程返回子进程 pid */
+int sys_fork()
+{
+    return syscall(__NR_clone,0,0,0);
+}
+
+
+#define __NR_clone 220
+case __NR_clone:
+    return __sys_fork();
+```
+
+`_sys_fork()` **只支持由进程中唯一存活的 TID 0 线程调用**；如果还有其他线程（包括尚未回收的线程），返回 `-1`。
+
+``` c
+static int sole_main_thread(ProcessControlBlock *p)
+{
+    if (current_thread()->tid != 0 || p->live_threads != 1) return 0;
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (tasks[i].process == p && &tasks[i] != current_thread()) return 0;
+    return 1;
+}
+
+
+int __sys_fork(void)
+{
+    // 通过当前线程获取所属的进程的 PID
+    ProcessControlBlock *parent = current_proc();
+    // 获取当前运行的线程的 TID
+    TaskControlBlock *old = current_thread();
+    // 如果当前进程中还有其他线程则失败
+    if (!sole_main_thread(parent))
+        return -1;
+    
+    /*.....*/
+}
+```
+
+### `allocproc`：子进程分配`PID`
+
+调用 `allocproc()`，为**子进程分配新 `PID`、新 PCB 和新用户页表**：
+
+``` c
+// 为新进程分配 PID、页表
+ProcessControlBlock *child = allocproc();
+if (!child) return -1;
+```
+
+### 复制`PID`中记录的信息
+
+然后复制父进程记录的**ELF 映射区结束范围、栈基址和入口地址**，并设置父子关系：
+
+``` c
+// 子进程继承父进程的 ELF 映射区结束地址（页对齐）
+child->base_size = parent->base_size;
+// 用户栈起始地址
+child->ustack_base = parent->ustack_base;
+// 入口函数地址
+child->entry = parent->entry;
+// 设置父子关系
+child->parent = parent;
+```
+
+### 按页复制可加载段
+
+把父进程的可加载的段进行复制和映射：
+
+- 首先**逐页**遍历父进程用户地址空间 [0, base_size]；
+- 通过`PTE`和页表**找到每页对应的物理地址**和页属性；
+- 分配一页新的内存，通过`memcpy`函数**把父进程页的内容复制到子进程当前分配的页中**； 
+- 在子进程的页表下，映射一页的虚拟地址和分配的物理地址；
+
+``` c
+/* 将父进程用户地址空间 [0, sz] 逐页复制到子进程新页表 */
+int uvmcopy(PageTable* old, PageTable* new, u64 sz)
+{
+    PageTableEntry* pte;
+    u64 i;
+    u8 flags;
+
+    for (i = 0; i < sz; i+=PAGE_SIZE)
+    {
+        // 找到父进程的 base_size 之前所有页对应的物理地址
+        VirtPageNum vpn = floor_virts(virt_addr_from_size_t(i));
+        pte = find_pte(old, vpn);
+
+        if (pte != 0)
+        {
+            /* 通过 PTE 找到对应的物理地址*/
+            u64 phyaddr = PTE2PA(pte->bits);
+            /* 通过 PTE 找到映射物理页的 flags */
+            flags = PTE_FLAGS(pte->bits);
+            
+            /* 分配一页新的物理内存 */
+            PhysPageNum ppn = kalloc();
+            if (!ppn.value) return -1;
+            u64 paddr = phys_addr_from_phys_page_num(ppn).value;
+            
+            /* 把父进程当前物理地址的内容拷贝到新分配的物理页 */
+            memcpy((void*)paddr,(void*)phyaddr,PAGE_SIZE);
+
+            /* 映射内存 */
+            if (PageTable_try_map(new, i, paddr, flags & ~PTE_V) < 0) {
+                kfree(ppn);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+
+// uvmcopy() 遍历 ELF 映射范围 [0, base_size)：对父进程每个已映射页分配新的物理页、复制页内容，再以相同权限映射到子进程页表。这是逐页复制，父子之后修改这些页不会互相影响。用户栈和 TrapContext 不在这一范围内，下面单独处理。
+if (uvmcopy(&parent->pagetable, &child->pagetable, child->base_size) < 0) {
+    freeproc(child);
+    return -1;
+}
+```
+
+### **给子进程创建线程**
+
+分配子进程的 0 号线程的用户栈、内核栈和 TrapContext。
+
+``` c
+// make_thread() 给子进程创建 TID 0，
+TaskControlBlock *newt = make_thread(child, child->entry, 0, 0);
+if (!newt) {
+    freeproc(child);
+    return -1;
+}
+```
+
+### 复制父线程的用户栈和`TrapContext`
+
+随后**把父线程整页用户栈及 `TrapContext` 的内容复制过去，并将子 `TrapContext` 的 `sepc` 改成子线程的内核栈顶**： 
+
+``` c
+// 找到父进程的 0 号线程的用户栈的起始地址
+PageTableEntry *src = find_pte(&parent->pagetable, floor_virts(virt_addr_from_size_t(old->ustack - PAGE_SIZE)));
+// 找到子进程的 0 号线程的用户栈的起始地址
+PageTableEntry *dst = find_pte(&child->pagetable,  floor_virts(virt_addr_from_size_t(newt->ustack - PAGE_SIZE)));
+// 复制父进程的 0 号线程的用户栈的内容
+memcpy((void *)PTE2PA(dst->bits), (void *)PTE2PA(src->bits), PAGE_SIZE);
+// 复制父进程的 0 号线程的TRAPFRAME 的内容
+memcpy((void *)newt->trap_cx_paddr, (void *)old->trap_cx_paddr, sizeof(TrapContext));
+
+((TrapContext *)newt->trap_cx_paddr)->a0 = 0;
+((TrapContext *)newt->trap_cx_paddr)->kernel_sp = newt->kstack;
+
+return child->pid;
+} 
+```
+
+### 为什么父子返回值不同，却从同一位置继续？
+
+> 父线程走完当前这次内核调用，子线程跳过父线程的内核调用过程，直接从复制好的用户态现场开始。
+
+复制 `TrapContext` 时，父线程的 `sepc` 已指向 `ecall` **之后**；因此子线程恢复用户态后也从 `sys_fork()` 后面继续。内核显式把**子线程** `TrapContext` 的 `a0` 设为 `0`，而 `__sys_fork()` 向**父线程**返回子 PID，由 Trap 处理器写入父线程的 `a0`。
+
+```text
+同一条 ecall 之后
+├─ 父进程：sys_fork() 返回子 PID
+└─ 子进程：sys_fork() 返回 0
+```
+
+子线程的**内核 `TaskContext` 没有从父线程复制**：`make_thread()` 已将其初始化为“首次调度时进入 `trap_return`”。调度器选中子线程后，它会用子进程的用户页表和刚复制的用户 TrapContext 恢复现场。
+
+## `sys_exec()`系统调用
+
+用户程序调用 `sys_exec("user_shell")` 时，`sys_exec` 把系统调用号 `221` 放入 RISC-V 的 `a7`，把程序名指针放入 `a1`，然后执行 `ecall`。
+
+``` c
+#define __NR_execve 221
+/* exec: 在当前进程中装载并运行名为 name 的应用 */
+int sys_exec(char* name)
+{
+    return syscall(__NR_execve, 0, (reg_t)name, 0);
+}
+```
+
+陷入内核后，`trap_handler()`先将保存的 `sepc` 加 4，跳过 `ecall` 指令；`__SYSCALL()`再按调用号分派。`__sys_exec` 把用户虚拟地址转换为内核可访问的地址，并调用 `exec(app_name)`。
+
+``` c
+case __NR_execve:
+    return __sys_exec((const char*)arg2);
+
+
+int __sys_exec(const char* name)
+{
+    char* app_name = translated_byte_buffer(name, 0);
+    printk("exec app_name:%s\n", app_name);
+    return exec(app_name);
+}
+
+int exec(const char *name)
+{
+    ProcessControlBlock *p 	= current_proc();
+    TaskControlBlock *t 	= current_thread();
+    if (!sole_main_thread(p))
+        return -1;
+    
+    /*...*/
+}
+```
+
+### 依据`app_name`查找 ELF 文件
+
+``` c
+/* 按名字查找 app: 命中返回其元数据(id>=0), 未命中返回 id==-1 的元数据 */
+AppMetadata get_app_data_by_name(char* path)
+{
+    AppMetadata metadata;
+    metadata.id = -1;
+    metadata.start = 0;
+    metadata.size  = 0;
+
+    size_t app_num = get_num_app();
+    for (size_t i = 0; i < app_num; i++)
+    {
+        if (strcmp(path, app_names[i]) == 0)
+        {
+            metadata = get_app_data(i + 1);
+            printk("find app:%s id:%d\n", path, metadata.id);
+            return metadata;
+        }
+    }
+    printk("app not exit!!\n");
+    return metadata;
+}
+
+
+    AppMetadata metadata = get_app_data_by_name((char *)name);
+    if (metadata.id < 0) return -1;
+    elf64_ehdr_t *ehdr = (elf64_ehdr_t *)metadata.start;
+    elf_check(ehdr);
+```
+
+### 替换应用程序
+
+**创建新页表替换当前进程的旧页表**，并**把已有的跳板页映射到新页表的固定虚拟地址`TRAMPOLINE`**：
+
+``` c
+static int new_pagetable(PageTable *pt)
+{
+    pt->root_ppn = kalloc();
+    if (!pt->root_ppn.value) return -1;
+    if (PageTable_try_map(pt, TRAMPOLINE, (u64)trampoline, PTE_R | PTE_X) < 0) {
+        kfree(pt->root_ppn);
+        pt->root_ppn.value = 0;
+        return -1;
+    }
+    return 0;
+}
+
+
+ProcessControlBlock staged = *p;
+if (new_pagetable(&staged.pagetable) < 0)
+    return -1;
+```
+
+将新程序的 ELF 的 `PT_LOAD` 段逐页映射，复制文件内容，并把 `.bss` 清零：
+
+``` c
+/* 解析 program header, 把各 PT_LOAD 段装载到 proc 页表, 并计算 ustack/base_size */
+int load_segment(elf64_ehdr_t *ehdr, ProcessControlBlock* proc)
+{
+    elf64_phdr_t *phdr;
+    u64 max_end_va = 0;
+
+    // 遍历每个程序段描述符
+    for (size_t i = 0; i < ehdr->e_phnum; i++) {
+        // 得到当前程序段描述符在 ELF 文件中的地址
+        phdr = (elf64_phdr_t*)((u8*)ehdr + ehdr->e_phoff + (u64)ehdr->e_phentsize * i);
+        if (phdr->p_type != PT_LOAD)
+            continue;
+        u64 end = phdr->p_vaddr + phdr->p_memsz;
+        if (end < phdr->p_vaddr || phdr->p_filesz > phdr->p_memsz)
+            return -1;
+        if (end > max_end_va) max_end_va = end;
+    }
+
+    u64 stack_limit = THREAD_TRAPFRAME(MAX_THREADS - 1) - (2 * MAX_THREADS + 2) * PAGE_SIZE;
+    if (max_end_va > stack_limit - PAGE_SIZE)
+        return -1;
+
+    proc->base_size   = PGROUNDUP(max_end_va);
+    proc->ustack_base = proc->base_size;
+
+    // 遍历每个程序段描述符
+    for (size_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        // 得到当前程序段描述符在 ELF 文件中的地址
+        phdr = (elf64_phdr_t*)((u8*)ehdr + ehdr->e_phoff + (u64)ehdr->e_phentsize * i);
+        if (phdr->p_type == PT_LOAD)
+        {
+            // 在内核虚拟地址空间中加载的起始地址和结束地址
+            u64 segment_start = phdr->p_vaddr;
+            u64 segment_end   = segment_start + phdr->p_memsz;
+            u64 file_end      = segment_start + phdr->p_filesz;
+            if (phdr->p_memsz == 0)
+                continue;
+            
+            // 把 ELF 中的段权限 改为 页表权限
+            u8 map_perm = PTE_U | flags_to_mmap_prot(phdr->p_flags);
+            // 按页加载内存
+            u64 first_page = PGROUNDDOWN(segment_start);
+            u64 end_page   = PGROUNDUP(segment_end);
+            // 从宽范围页开始遍历映射（包括 .bss 页）
+            for (u64 page_va = first_page; page_va < end_page; page_va += PAGE_SIZE)
+            {
+                PageTableEntry* pte = find_pte(&proc->pagetable,
+                                               floor_virts(virt_addr_from_size_t(page_va)));
+                u64 paddr;
+                 // 虚拟页还未映射物理页
+                if (pte == NULL)
+                {
+                    PhysPageNum ppn = kalloc(); // kalloc 已将新页清零
+                    if (!ppn.value) return -1;
+                    paddr = phys_addr_from_phys_page_num(ppn).value;
+                    if (PageTable_try_map(&proc->pagetable, page_va, paddr, map_perm) < 0) {
+                        kfree(ppn);
+                        return -1;
+                    }
+                }
+                // 虚拟页已经完成了映射
+                else
+                {
+                    assert(pte->bits & PTE_U);
+                    // #define PTE2PA(pte) (((pte) >> 10) << 12)
+                    paddr = PTE2PA(pte->bits);
+                    pte->bits |= map_perm;
+                }
+                // 当前映射页的结束地址
+                u64 page_end = page_va + PAGE_SIZE;
+                // 只 copy 页中有数据的地址（取当前页的起始地址与程序段起始地址中的较大值）
+                u64 copy_start = page_va > segment_start ? page_va : segment_start;
+                // 只 copy 页中有数据的地址（取当前页的结束地址与文件数据结束地址中的较小值）
+                u64 copy_end = page_end < file_end ? page_end : file_end;
+                
+                if (copy_start < copy_end)
+                    // (copy_start - page_va) ：数据在当前页面中的偏移
+                    memcpy((void*)(paddr + copy_start - page_va),
+                           (u8*)ehdr + phdr->p_offset + (copy_start - segment_start),
+                           copy_end - copy_start);
+
+                // 清除 .bss 区
+                u64 zero_start = page_va > file_end ? page_va : file_end;
+                u64 zero_end   = page_end < segment_end ? page_end : segment_end;
+                if (zero_start < zero_end)
+                    memset((void*)(paddr + zero_start - page_va), 0, zero_end - zero_start);
+            }
+        }
+    }
+
+    return 0;
+}
+
+
+    if (load_segment(ehdr, &staged) < 0) {
+        proc_freepagetable(&staged.pagetable, staged.base_size);
+        return -1;
+    }
+```
+
+由于替换了新的应用程序的 ELF 文件，而用户栈的栈基址是在 ELF 页结束开始，因此需要**映射新的用户栈**、而由于替换了页表，因此也需要**映射原线程的 `TRAPFRAME`**（物理页沿用原有的，页表映射重新建立）：
+
+> 为什么沿用原本的`TRAPFRAME`？
+>
+> 因此此时`exec`正在处理一次系统调用，当前线程的寄存器状态已经保存在这块`TRAPFRAME`物理页中，线程控制块`TID`也一直记录它的物理地址，`exec`直接修改这个 trap 上下文中的`sepc`和`sp`，分别指向新程序入口和新栈顶。
+
+``` c
+	// 计算得到新主线程的栈顶
+    u64 new_stack = staged.ustack_base + PAGE_SIZE;
+    PhysPageNum stack_page = kalloc();
+
+    // 映射用户栈页和 TRAPFRAME 页
+    if (!stack_page.value || new_stack + PAGE_SIZE >= t->trap_cx_va ||
+        PageTable_try_map(&staged.pagetable, new_stack,
+            phys_addr_from_phys_page_num(stack_page).value, PTE_R | PTE_W | PTE_U) < 0 ||
+        PageTable_try_map(&staged.pagetable, t->trap_cx_va,
+            t->trap_cx_paddr, PTE_R | PTE_W) < 0) {
+        if (stack_page.value)
+            kfree(stack_page);
+        /* 失败路径清除已映射的栈页，然后释放 ELF 页。 */
+        uvmunmap(&staged.pagetable, floor_virts(virt_addr_from_size_t(new_stack)), 1, 0);
+        proc_freepagetable(&staged.pagetable, staged.base_size);
+        return -1;
+    }
+```
+
+**修改原进程的`PID`中记录的信息**：页表、ELF 段结束地址、栈基地址、程序入口地址：
+
+``` c
+    PageTable old_pt = p->pagetable;
+    u64 old_size 	 = p->base_size;
+    u64 old_stack 	 = t->ustack - PAGE_SIZE;
+
+    p->pagetable 	= staged.pagetable;
+    p->base_size 	= staged.base_size;
+    p->ustack_base 	= staged.ustack_base;
+    p->entry = ehdr->e_entry;
+```
+
+修改`TRAPFRAME`物理页中保存的 trap 上下文，让这次 trap 之后线程可以运行新应用程序：
+
+``` c
+    t->ustack = new_stack + PAGE_SIZE;
+    TrapContext *cx = (TrapContext *)t->trap_cx_paddr;
+    /* 复用 trap 上下文物理页，但不要把旧程序的寄存器带入新程序。 */
+    memset(cx, 0, sizeof(*cx));
+    cx->sstatus = (r_sstatus() & ~SSTATUS_SPP) | SSTATUS_SPIE;
+    cx->sepc = p->entry;
+    cx->sp   = t->ustack;
+    cx->kernel_satp = kernel_satp;
+    cx->kernel_sp = t->kstack;
+    cx->trap_handler = (u64)trap_handler; 
+```
+
+最后释放旧程序的页和旧栈：
+
+``` c
+    uvmunmap(&old_pt, floor_virts(virt_addr_from_size_t(old_stack)), 1, 1);
+    uvmunmap(&old_pt, floor_virts(virt_addr_from_size_t(t->trap_cx_va)), 1, 0);
+    proc_freepagetable(&old_pt, old_size);
+    return 0;
+}
+```
+
+## `sys_exit()`系统调用
+
+此系统调用目的是：**退出当前进程**。
+
+把退出码放入`a0`，通过`ecall`进入内核态。系统调用分派随后调用`void exit_current_and_run_next(u64 exit_code)`。
+
+``` c
+/* 退出当前进程 */
+int sys_exit(u64 exit_code)
+{
+    return syscall(__NR_exit,exit_code,0,0);
+}
+
+void __sys_exit(u64 exit_code)
+{
+    exit_current_and_run_next(exit_code);
+}
+
+void exit_current_and_run_next(u64 exit_code)
+{
+    ProcessControlBlock *p = current_proc();
+    if (p->pid == 0) panic("init exiting");
+    
+    /*...*/
+}
+```
+
+### 如果是 0 号进程
+
+`initproc`后来变成的 shell，直接`panic("init exiting")`。
+
+``` c
+    ProcessControlBlock *p = current_proc();
+    if (p->pid == 0) panic("init exiting");
+```
+
+### 把尚未退出的线程标记为`Zombie`
+
+线程状态：
+
+``` c
+typedef enum TaskState
+{
+	UnInit, // 未初始化
+    Ready, // 准备运行
+    Running, // 正在运行
+    Zombie, // 已退出，等待 waittid 或父进程 wait 回收
+}TaskState;
+```
+
+标记当前进程也为`Zombie`，并把它的子进程挂到 `0` 号进程名下：
+
+``` c
+static void process_became_zombie(ProcessControlBlock *p, int code)
+{
+    p->zombie = true;
+    p->exit_code = code;
+    children_proc_clear(p);
+}
+
+void children_proc_clear(ProcessControlBlock *p)
+{
+    for (int i = 0; i < MAX_TASKS; i++)
+        if (processes[i].used && processes[i].parent == p)
+            processes[i].parent = &processes[0];
+}
+```
+
+遍历线程池，如果遍历到的线程属于当前系统调用的进程，将其**标记为`Zombie`**，并**把线程退出码保存在`TID`中**，同时**也标记当前进程为`Zombie`态**：
+
+``` c
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (tasks[i].process == p && tasks[i].task_state != Zombie) {
+            tasks[i].task_state = Zombie;
+            tasks[i].exit_code = (int)exit_code;
+        }
+	p->live_threads = 0;
+	process_became_zombie(p, (int)exit_code);
+```
+
+### 调用`schedule()`切换可运行线程
+
+调度器只选择`Ready`的线程，因此这些僵尸线程不会再运行。
+
+``` c
+    schedule();
+    panic("process exit returned");
+```
+
+调度代码：
+
+``` c
+void schedule(void)
+{
+    TaskControlBlock *old = current_thread();
+    // 如果当前线程是运行状态，则将其状态设置为就绪状态
+    if (old && old->task_state == Running)
+        old->task_state = Ready;
+	
+    // 当前线程索引
+    int start = current_slot < 0 ? 0 : (current_slot + 1) % MAX_THREADS;
+    // 遍历找到下一个可运行的线程索引
+    for (int step = 0; step < MAX_THREADS; step++) {
+        int next = (start + step) % MAX_THREADS;
+        if (tasks[next].task_state != Ready)
+            continue;
+        if (next == current_slot) { tasks[next].task_state = Running; return; }
+        
+        TaskContext *oldcx = old ? &old->task_context : &boot_context;
+        tasks[next].task_state = Running;
+        current_slot = next;
+        __switch(oldcx, &tasks[next].task_context);
+        return;
+    }
+    panic("schedule: no runnable thread");
+}
+```
+
+## `sys_waitpid()`系统调用
+
+``` c
+#define __NR_waitid 95
+
+/* 等待任一子进程退出, 返回其 pid */
+int sys_waitpid()
+{
+    return syscall(__NR_waitid,0,0,0);
+}
+
+
+case __NR_waitid:
+    return __sys_wait();
+
+
+int __sys_wait()
+{
+    return wait();
+}
+```
+
+### 遍历进程表，找到僵尸子进程
+
+找到僵尸子进程时，先记下`PID`，再调用`freeproc()`回收它，最后返回这个回收的`PID`。
+
+如果有不是僵尸的子进程，调用`shedule()`让出 CPU，之后继续检查。
+
+``` c
+int wait(void)
+{
+    ProcessControlBlock *p = current_proc();
+    for (;;) {
+        bool havekids = false;
+        for (int i = 0; i < MAX_TASKS; i++) {
+            ProcessControlBlock *child = &processes[i];
+            if (!child->used || child->parent != p)
+                continue;
+            havekids = true;
+            if (child->zombie) {
+                int pid = child->pid;
+                freeproc(child);
+                return pid;
+            }
+        }
+        
+        if (!havekids)
+            return -1;
+        
+        schedule();
+    }
+}
+```
+
+### 删除进程
+
+``` c
+void freeproc(ProcessControlBlock *p)
+{
+    // 不能删除自己
+    if (!p || !p->used || p == current_proc())
+        panic("freeproc: active");
+    // 删除这个进程下的所有线程
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (tasks[i].process == p) reap_thread(&tasks[i]);
+    proc_freepagetable(&p->pagetable, p->base_size);
+    memset(p, 0, sizeof(*p));
+}
+
+
+/* 线程私有映射由线程资源回收负责；这里只回收共享 ELF 页和页表。 */
+void proc_freepagetable(PageTable* pagetable, u64 sz)
+{
+  uvmunmap(pagetable, floor_virts(virt_addr_from_size_t(TRAMPOLINE)), 1, 0);
+  uvmfree(pagetable, sz);
+}
+
+
+static void reap_thread(TaskControlBlock *t)
+{
+    ProcessControlBlock *p = t->process;
+    if (!p || t == current_thread()) panic("reap running thread");
+    u64 stack_bottom = t->ustack - PAGE_SIZE;
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom)), 1, 1);
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va)), 1, 1);
+    uvmunmap(&kernel_pagetable, floor_virts(virt_addr_from_size_t(t->kstack - PAGE_SIZE)), 1, 1);
+    sfence_vma();
+    p->tid_used[t->tid] = false;
+    memset(t, 0, sizeof(*t));
+}
+```
+
+## `sys_waittid()`系统调用
+
+``` c
+int sys_waittid(int tid) { return (int)syscall(__NR_waittid, tid, 0, 0); }
+
+
+    case __NR_waittid:
+        return waittid(arg1);
+```
+
+### 遍历线程表，找到当前进程的`TID`线程
+
+**注意：`TID`是进程内部的线程编号，不是`task[]`的下标。**例如进程 A 的`TID=1`线程可能放在`task[7]`，进程 B 也可以有自己的`TID=1`，放在`task[11]`，因此遍历线程表要同时检查当前`task[x]`的`TID`中记录的所属进程：
+
+``` c
+int waittid(u64 tid)
+{
+    ProcessControlBlock *p = current_proc();
+    if (tid >= MAX_THREADS || tid == (u64)current_thread()->tid || !p->tid_used[tid])
+        return -1;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        TaskControlBlock *t = &tasks[i];
+        if (t->process != p || (u64)t->tid != tid) continue;
+        if (t->task_state != Zombie) return -2;
+        int code = t->exit_code;
+        reap_thread(t);
+        return code;
+    }
+    return -1;
+}
+```
+
+### 删除线程
+
+``` c
+static void reap_thread(TaskControlBlock *t)
+{
+    ProcessControlBlock *p = t->process;
+    if (!p || t == current_thread()) panic("reap running thread");
+    u64 stack_bottom = t->ustack - PAGE_SIZE;
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom)), 1, 1);
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va)), 1, 1);
+    uvmunmap(&kernel_pagetable, floor_virts(virt_addr_from_size_t(t->kstack - PAGE_SIZE)), 1, 1);
+    sfence_vma();
+    p->tid_used[t->tid] = false;
+    memset(t, 0, sizeof(*t));
+}
+```
+
+## 用户态 printf 实现
+
+因为之前的`printf()`函数是调用 OpenSBI 的指令来输出的，因此现在将之前的`printf()`修改名称为`printk()`作为内核输出函数。
+
+之前的应用程序是调用的`uint64_t sys_write(size_t fd, const char* buf, size_t len)`函数进行输出，因此把`sys_write()`封装为为`printf()`函数，用户态程序调用`printf()`先调用`sys_write()`再调用`printk()`函数进行输出。
+
+``` c
+int printf(const char* s, ...)
+{
+	int res = 0;
+	va_list vl;
+	va_start(vl, s);
+	res = vprintf(s, vl);
+	va_end(vl);
+	return res;
+}
+
+static char out_buf[1000];
+static int vprintf(const char* s, va_list vl)
+{
+	int res = _vsnprintf(NULL, -1, s, vl);
+	_vsnprintf(out_buf, res + 1, s, vl);
+	sys_write(stdout,out_buf,res + 1);  // 将 uart_puts 改成 sys_write就可以
+	return res;
+}
+```
+
+``` c
+int printk(const char* s, ...)
+{
+	int res = 0;
+	va_list vl;
+	va_start(vl, s);
+	res = _vprintf(s, vl);
+	va_end(vl);
+	return res;
+}
+
+static char out_buf[1000]; // buffer for _vprintf()
+static int _vprintf(const char* s, va_list vl)
+{
+	int res = _vsnprintf(NULL, -1, s, vl);
+	if (res+1 >= sizeof(out_buf)) {
+		uart_puts("error: output string size overflow\n");
+		while(1) {}
+	}
+	_vsnprintf(out_buf, res + 1, s, vl);
+	uart_puts(out_buf);
+	return res;
+}
+```
+
+# I/O 设备管理
+
+## 设备树
+
+首先，我们需要了解OS管理的计算机硬件系统– `QEMU riscv-64 virt machine` ，特别是其中的各种外部设备。 virt 表示了一台虚拟的RISC-V 64计算机，CPU的个数是可以通过参数 `-cpu num` 配置的，内存也是可通过参数 `-m numM/G` 来配置。这台虚拟计算机还有很多外设信息，**每个设备在物理上连接到了父设备上最后再通过总线等连接起来构成一整个设备树。QEMU 可以把它模拟的机器细节信息全都导出到`.dtb`格式的二进制文件中**，并可通过 `dtc` （Device Tree Compiler）工具转成可理解的文本文件。一个典型的设备树如下图所示：
+
+<img src="./assets/典型设备树.png" alt="典型设备树" style="zoom:80%;" />
+
+> **设备树与设备节点属性**
+>
+> 设备树（Device Tree）是一种数据结构，用于**描述（不是定义，由硬件定义）**硬件系统的结构和功能。 它是一个文本文件，描述了硬件系统的结构和功能，并将这些信息提供给操作系统。设备树包含了关于硬件系统的信息，如：
+>
+> - 处理器的类型和数量；
+> - 板载设备（如存储器、网卡、显卡等）的类型和数量；
+> - 硬件接口（如 I2C、SPI、UART 等）的类型和地址信息；
+>
+> 设备树中的节点是用来描述硬件设备的信息的。 一个设备树节点包含了一个或多个属性，每个属性都是一个键-值对，用来描述设备的某一特定信息。而操作系统就是通过这些节点上的信息来实现对设备的识别和初始化。具体而言，一个设备节点上会有一些常见的属性：
+>
+> - `compatible`：表示设备的类型，可以是设备的厂商名、产品名等，如 “virtio,mmio” 指的是这个设备通过 virtio 协议、MMIO（内存映射 I/O）方式来驱动；
+> - `reg`：表示设备在系统中的地址空间位置；
+> - `interrupts`：表示设备支持的中断信号；
+>
+> 设备树在很多嵌入式系统中都得到了广泛应用，它是一种常用的方法，用于将硬件（特别是外设）信息传递给操作系统。在桌面和服务器系统中，PCI总线可以起到设备树的作用，通过访问PCI总线上特定地址空间，也可以遍历出具有挂在PCI总线上的各种PCI设备。
+
+## RISC-V 架构中的中断
+
+在 RISC-V 架构语境下， **中断** (Interrupt) 和 **异常**（包括程序错误导致或执行 Trap 类指令如用于系统调用的 `ecall` ）**一样都是一种 Trap **，但是它们被触发的原因却是不同的。对于某个处理器核而言， 异常与当前 CPU 的指令执行是 **同步** (Synchronous) 的，异常被触发的原因一定能够追溯到某条指令的执行；而中断则 **异步** (Asynchronous) 于当前正在进行的指令，也就是说中断来自于哪个外设以及中断如何触发完全与处理器正在执行的当前指令无关。
+
+### 中断分类
+
+在不考虑指令集拓展的情况下，RISC-V 架构中定义了如下中断：
+
+| Interrupt | Exception Code | Description                   |
+| --------- | -------------- | ----------------------------- |
+| 1         | 1              | Supervisor software interrupt |
+| 1         | 3              | Machine software interrupt    |
+| 1         | 5              | Supervisor timer interrupt    |
+| 1         | 7              | Machine timer interrupt       |
+| 1         | 9              | Supervisor external interrupt |
+| 1         | 11             | Machine external interrupt    |
+
+RISC-V 的中断可以分成三类：
+
+- **软件中断** (Software Interrupt)：由软件控制发出的中断；
+- **时钟中断** (Timer Interrupt)：由时钟电路发出的中断；
+- **外部中断** (External Interrupt)：由外设发出的中断；
+
+另外，相比于异常，中断和特权级之间的联系更为紧密，可以看到**这三种中断每一个都有 M/S 特权级两个版本**。中断的特权级可以决定该中断是否会被屏蔽，以及需要 Trap 到 CPU 的哪个特权级进行处理。
+
+### 中断屏蔽机制
+
+在判断中断是否会被屏蔽的时候，有以下规则：
+
+- 如果中断的特权级低于 CPU 当前的特权级，则该中断会被屏蔽，不会被处理；
+- 如果中断的特权级**高于**与 CPU 当前的特权级**或相同**，则需要**通过相应的 CSR 判断该中断是否会被屏蔽**。
+
+以内核所在的 S 特权级为例，中断屏蔽相应的 CSR 有 `sstatus` 和 `sie` 。`sstatus` 的 `sie` 为 S 特权级的中断使能（**总开关**），能够同时控制三种中断，如果将其清零则会将它们全部屏蔽。
+
+``` c
+#define SSTATUS_SIE (1L << 1)  // Supervisor Interrupt Enable
+
+/* sstatus记录S模式下处理器内核的运行状态*/
+static inline reg_t r_sstatus()
+{
+  reg_t x;
+  asm volatile("csrr %0, sstatus" : "=r" (x) );
+  return x;
+}
+
+// 关闭中断
+static inline void intr_off()
+{
+  w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+}
+
+```
+
+即使 `sstatus.sie` 置 1 ，还要看 `sie` 这个 CSR，它的三个字段 `ssie/stie/seie` 分别控制 S 特权级的软件中断、时钟中断和外部中断的中断使能（**子开关**）。比如对于 S 态时钟中断来说，如果 CPU 不高于 S 特权级，需要 `sstatus.sie` 和 `sie.stie` 均为 1 该中断才不会被屏蔽；如果 CPU 当前特权级高于 S 特权级，则该中断一定会被屏蔽。
+
+如果中断没有被屏蔽，那么接下来就需要软件进行处理，而具体到哪个特权级进行处理与一些中断代理 CSR 的设置有关。默认情况下，所有的中断都需要到 M 特权级处理。而通过软件设置这些中断代理 CSR 之后，就可以到低特权级处理，但是 **Trap 到的特权级不能低于中断的特权级。事实上所有的中断/异常默认也都是到 M 特权级处理的**。在本书中我们只需要了解：
+
+- U 特权级的应用程序发出系统调用或产生错误异常都会跳转到 S 特权级的操作系统内核来处理；
+- S 特权级的时钟/软件/外部中断产生后，都会跳转到 S 特权级的操作系统内核来处理。
+
+**默认情况下**，当中断产生并进入某个特权级之后，**在中断处理的过程中同特权级的中断都会被屏蔽**。中断产生后，硬件会完成如下事务：
+
+- 当中断发生时，`sstatus.sie` 字段会被保存在 `sstatus.spie` 字段中，同时把 `sstatus.sie` 字段置零，这样软件在进行后续的中断处理过程中，所有 S 特权级的中断都会被屏蔽；
+- 当软件执行中断处理完毕后，会执行 `sret` 指令返回到被中断打断的地方继续执行，硬件会把 `sstatus.sie` 字段恢复为 `sstatus.spie` 字段内的值。
+
+也就是说，如果不去手动设置 `sstatus` CSR ，在只考虑 S 特权级中断的情况下，是不会出现 **嵌套中断** (Nested Interrupt) 的。嵌套中断是指在处理一个中断的过程中再一次触发了中断。由于默认情况下，在软件开始响应中断前， 硬件会自动禁用所有同特权级中断，自然也就不会再次触发中断导致嵌套中断了。
+
+> **嵌套中断与嵌套 Trap**
+>
+> 嵌套中断可以分为两部分：在处理一个中断的过程中又被同特权级/高特权级中断所打断。默认情况下硬件会避免同特权级再次发生，但高特权级中断则是不可避免的会再次发生。
+>
+> 嵌套 Trap 则是指处理一个 Trap（可能是中断或异常）的过程中又再次发生 Trap ，嵌套中断是嵌套 Trap 的一个特例。在内核开发时我们需要仔细权衡哪些嵌套 Trap 应当被允许存在，哪些嵌套 Trap 又应该被禁止，这会关系到内核的执行模型。
+
+## 平台级中断控制器：PLIC
+
+> **中断控制器（Interrupt Controller）**
+>
+> 计算机中的中断控制器是一种硬件，可帮助处理器处理来自多个不同I/O设备的中断请求（Interrupt Request，简称IRQ）。这些中断请求可能同时发生，并首先经过中断控制器的处理，即中断控制器根据 IRQ 的优先级对同时发生的中断进行排序，然后把优先级最高的IRQ传给处理器，让操作系统执行相应的中断处理例程 （Interrupt Service Routine，简称ISR）。
+
+> 数值越大，优先级越高。
+>
+> 如果优先级相同，标准 PLIC 规范规定较小的中断 ID 优先。
+
+### 工作原理
+
+<img src="./assets/PLIC示意图.png" alt="PLIC示意图" style="zoom:80%;" />
+
+在RISC-V中，与外设连接的 I/O 控制器的一个重要组成是平台级中断控制器（Platform-Level Interrupt Controller，PLIC），它的**一端汇聚了各种外设的中断信号，另一端连接到CPU的外部中断引脚上**。当一个外部设备发出中断请求时，PLIC 会将其转发给 RISC-V CPU, CPU 会执行对应的中断处理程序来响应中断。可以把一个 RISC-V 系统中的中断处理分成三个层次：
+
+| 层次             | 主要职责                              | 典型组件                    |
+| ---------------- | ------------------------------------- | --------------------------- |
+| 外设层           | 产生中断请求                          | UART、VirtIO、GPIO          |
+| 中断控制层       | 汇总、筛选、仲裁、分发中断            | PLIC                        |
+| CPU 与操作系统层 | 进入 Trap、保存现场、调用中断处理程序 | CPU、Trap Handler、驱动程序 |
+
+<img src="./assets/外设中断处理流程.png" alt="外设中断处理流程" style="zoom: 80%;" />
+
+**CPU 负责响应中断，PLIC 负责分发中断，驱动程序负责处理外设事件。**假设操作系统正在 S-mode 运行，并且相应的中断条件都满足。CPU 响应 Supervisor External Interrupt，进入操作系统预先设置的 `__alltrap` 入口，`__alltrap`的汇编代码通常会保存被打断的执行现场，随后进入操作系统的 `Trap Handler`，在 RISC-V 中：
+
+- `scause` 的中断原因码为 `9`：Supervisor External Interrupt。
+- `mcause` 的中断原因码为 `11`：Machine External Interrupt。
+
+这里的原因码只表示中断类型，不表示具体是哪一个外设。因此外设产生中断后，CPU并不知道具体是哪个设备传来的中断，因此随后需要通过读 PLIC 的 `Claim` 寄存器来了解， **`Claim` 寄存器会返回 PLIC 接收到的优先级最高的中断**，如果没有外设中断产生，读 `Claim` 寄存器会返回 0；随后进入对应中断的处理函数；`Complete`（完成）：操作系统处理完相应中断后，**将该中断 ID 写回同一寄存器**，通知 PLIC 对应的 Gateway 中断处理已经完成。
+
+> 需要特别注意：Claim 和 Complete 使用的是同一个寄存器地址，但通过不同的访问操作实现不同的语义——读用于领取，写用于完成。
+
+---
+
+因此如果要让操作系统处理外设（例如时钟中断时RISC-V 处理器）产生的中断，就需要对中断控制器进行初始化设置。
+
+通过 RISC-V 的 `mie` 寄存器中的 `meie` 位，可以控制这个引脚**是否接收外部中断信号**。当然，通过RISC-V中 M Mode 的中断委托机制，也可以在 RISC-V 的 S Mode下，通过 `sie` 寄存器中的 `seie` 位，对中断信号是否接收进行控制。
+
+**阈值**决定当前上下文允许接收哪些优先级的中断。假设：
+
+- UART 优先级为 1。
+- VirtIO 优先级为 3。
+- 当前上下文的阈值设置为 1。
+
+那么，UART 中断不会触发该上下文的通知，而 VirtIO 中断可以。标准 PLIC 的判断条件是：$ \text{priority}>\text{threshold} $，因此阈值为 0 时，所有优先级非零且已使能、处于待处理状态的中断都有资格触发通知。
+
+### QEMU 创建 PLIC
+
+#### 分配 PLIC 的内存分布
+
+<img src="./assets/PLIC的MMIO.png" alt="PLIC的MMIO" style="zoom:80%;" />
+
+在`quard-star/qemu-11.1.1/include/hw/riscv/quard_star.h`中进行地址配置：
+
+``` c
+#define QUARD_STAR_PLIC_NUM_SOURCES    127      // PLIC 支持的中断源的最大数量
+#define QUARD_STAR_PLIC_NUM_PRIORITIES 7        // PLIC 支持的中断优先级的数量
+
+#define QUARD_STAR_PLIC_PRIORITY_BASE  0x00     // ID 0 保留，ID n 的优先级位于基址 + 4*n
+#define QUARD_STAR_PLIC_PENDING_BASE   0x1000   // PLIC 中断挂起寄存器的基址偏移值，用于访问中断挂起状态
+#define QUARD_STAR_PLIC_ENABLE_BASE    0x2000   // PLIC 中断使能寄存器的基址偏移值，用于控制中断使能状态
+#define QUARD_STAR_PLIC_CONTEXT_BASE   0x200000 // PLIC 上下文保存寄存器的基址偏移值，用于保存中断处理程序的上下文信息
+
+#define QUARD_STAR_PLIC_ENABLE_STRIDE  0x80     // PLIC 中断使能寄存器之间的地址间隔
+#define QUARD_STAR_PLIC_CONTEXT_STRIDE 0x1000   // PLIC 上下文保存寄存器之间的地址间隔
+#define QUARD_STAR_PLIC_SIZE(__num_context) \
+    (QUARD_STAR_PLIC_CONTEXT_BASE + (__num_context) * QUARD_STAR_PLIC_CONTEXT_STRIDE)
+
+
+static const MemMapEntry quard_star_memmap[] = {
+    [QUARD_STAR_MROM]  = {        0x0,        0x8000 },   
+    [QUARD_STAR_SRAM]  = {     0x8000,        0x8000 },
+    [QUARD_STAR_CLINT] = { 0x02000000,       0x10000 },
+    
+    /* 物理地址确定在这里 */
+    [QUARD_STAR_PLIC]  = { 0x0c000000,      0x210000 },
+    
+    [QUARD_STAR_UART0] = { 0x10000000,        0x1000 },
+    [QUARD_STAR_UART1] = { 0x10001000,        0x1000 },
+    [QUARD_STAR_UART2] = { 0x10002000,        0x1000 },
+    [QUARD_STAR_RTC]   = { 0x10003000,        0x1000 },
+    [QUARD_STAR_VIRTIO0] = { 0x10100000,      0x1000 },
+    [QUARD_STAR_FLASH] = { 0x20000000,     0x2000000 },   
+    [QUARD_STAR_DRAM]  = { 0x80000000,    0x40000000 },   
+};
+
+```
+
+#### 创建 PLIC
+
+在`struct QuardStarState`中添加 PLIC 对象：
+
+``` c
+struct QuardStarState {
+    /*< private >*/
+    MachineState parent;
+
+    /*< public >*/
+    RISCVHartArrayState soc[QUARD_STAR_SOCKETS_MAX];
+    PFlashCFI01 *flash;
+    DeviceState *plic[QUARD_STAR_SOCKETS_MAX];
+};
+```
+
+在 QEMU 中，**一台 PLIC 是一台模拟设备**。`DeviceState` 是 QEMU 设备模型的通用类型；PLIC 的具体类型是 `SiFivePLICState`，其结构以 `SysBusDevice parent_obj` 开头，包含优先级、pending、enable 和 MMIO 等状态，创建函数用 `qdev_new(TYPE_SIFIVE_PLIC)` 实例化它，再映射 MMIO，并以 `DeviceState *` 返回。因此板级代码用 `DeviceState *plic[]` 保存各个 PLIC 实例，随后通过这个指针取得第 10 路等中断输入，把 UART 接上去。
+
+在`quard-star/qemu-11.1.1/hw/riscv/quard_star.c`中传递给`static void quard_star_plic_create(MachineState machine)`创建 PLIC：
+
+``` c
+/* 创建plic */
+static void quard_star_plic_create(MachineState *machine)
+{
+    int socket_count = riscv_socket_count(machine);
+    QuardStarState *s = RISCV_VIRT_MACHINE(machine);
+    int i,hart_count,base_hartid;
+    
+    // 这里是为每个 hart 创建一个 PLIC
+    for ( i = 0; i < socket_count; i++) {
+    
+        hart_count = riscv_socket_hart_count(machine, i);
+        base_hartid = riscv_socket_first_hartid(machine, i);
+        char *plic_hart_config;
+        /* Per-socket PLIC hart topology configuration string */
+        plic_hart_config = riscv_plic_hart_config_string(hart_count);
+        
+        s->plic[i] = sifive_plic_create(
+            quard_star_memmap[QUARD_STAR_PLIC].base + i *quard_star_memmap[QUARD_STAR_PLIC].size ,
+            plic_hart_config, hart_count , base_hartid,
+            QUARD_STAR_PLIC_NUM_SOURCES,
+            QUARD_STAR_PLIC_NUM_PRIORITIES,
+            QUARD_STAR_PLIC_PRIORITY_BASE,
+            QUARD_STAR_PLIC_PENDING_BASE,
+            QUARD_STAR_PLIC_ENABLE_BASE,
+            QUARD_STAR_PLIC_ENABLE_STRIDE,
+            QUARD_STAR_PLIC_CONTEXT_BASE,
+            QUARD_STAR_PLIC_CONTEXT_STRIDE,
+            quard_star_memmap[QUARD_STAR_PLIC].size);
+        g_free(plic_hart_config);
+    }
+}
+```
+
+### 内核地址空间映射 PLIC
+
+新增`PLIC`在内核虚拟地址空间中的映射：
+
+``` c
+// quard-star/os/include/timeros/irq.h
+#define PLIC_BASE 0x0c000000UL
+#define PLIC_SIZE 0x210000UL
+
+
+PageTable kvmmake(void)
+{
+    PageTable pt;
+    PhysPageNum root_ppn =  kalloc();
+    pt.root_ppn = root_ppn;
+	
+    /*...*/
+    PageTable_map(&pt, virt_addr_from_size_t(PLIC_BASE), phys_addr_from_size_t(PLIC_BASE),
+                    PLIC_SIZE, PTE_R | PTE_W);
+    /*...*/
+}
+```
+
+### 初始化 PLIC
+
+操作系统如要响应外设的中断，需要做两方面的初始化工作。中断初始化过程，并需要把 `sie` 寄存器中的 `seie` 位设置为1，让CPU能够接收通过PLIC传来的外部设备中断信号。然后还需要通过MMIO方式对PLIC的寄存器进行初始设置，才能让外设产生的中断传到CPU处。其主要操作包括：
+
+- **设置外设中断的优先级**；
+- **设置外设中断的阈值**，优先级小于等于阈值的中断会被屏蔽；
+- **激活外设中断**，即把 `Enable` 寄存器的外设中断编号为索引的位设置为 1；
+
+``` c
+// quard-star/os/include/timeros/irq.h
+#define PLIC_BASE 0x0c000000UL
+
+/* QEMU quard-star uses context 0 for hart 0 M-mode and context 1 for S-mode. */
+#define PLIC_S_CONTEXT 1UL
+
+/* This board configures QEMU's PLIC priority-base as 0x04. */
+#define PLIC_PRIORITY(id) (PLIC_BASE + 0x04UL + (id) * 4UL)
+#define PLIC_ENABLE (PLIC_BASE + 0x2000UL + PLIC_S_CONTEXT * 0x80UL)
+#define PLIC_THRESHOLD (PLIC_BASE + 0x200000UL + PLIC_S_CONTEXT * 0x1000UL)
+#define PLIC_CLAIM (PLIC_THRESHOLD + 4UL)
+
+static volatile u32 *plic_reg(reg_t address)
+{
+    return (volatile u32 *)address;
+}
+
+void device_init(void)
+{
+    /* 设备初始化 */
+
+    /* A priority of 1 passes threshold 0 on the supervisor context. */
+    *plic_reg(PLIC_THRESHOLD) = 0;
+    *plic_reg(PLIC_PRIORITY(VIRTIO0_IRQ)) = 1;
+    *plic_reg(PLIC_PRIORITY(UART0_IRQ))   = 1;
+    *plic_reg(PLIC_ENABLE) = (1U << VIRTIO0_IRQ) | (1U << UART0_IRQ);
+    w_sie(r_sie() | SIE_SEIE);
+}
+```
+
+但外设产生中断后，CPU并不知道具体是哪个设备传来的中断，这可以通过读 PLIC 的 `Claim` 寄存器来了解。 `Claim` 寄存器会返回 PLIC 接收到的优先级最高的中断；如果没有外设中断产生，读 `Claim` 寄存器会返回 0。
+
+操作系统在收到中断并完成中断处理后，还需通知 PLIC 中断处理完毕。CPU需要在 PLIC 的 `Complete` 寄存器中写入对应中断号为索引的位，来通知 PLIC 中断已处理完毕。
+## 串口驱动程序
+
+### QEMU 创建串口
+
+#### 分配中断号与地址
+
+这些枚举值是板级代码给设备分配的 PLIC 中断源 ID。它们不是从 PLIC 寄存器地址推算出来的；板级代码先决定“设备接到 PLIC 的几号输入”，PLIC 再用这个 ID 索引寄存器和状态位。**通过`qdev_get_gpio_in(DEVICE(s->plic[0]), IRQ号)` 完成接线**。首先约定了每个中断源使用哪个编号：
+
+``` c
+enum {
+    QUARD_STAR_VIRTIO0_IRQ = 1,
+    QUARD_STAR_UART0_IRQ   = 10,  //定义了串口中断号为 10
+    QUARD_STAR_UART1_IRQ   = 11,
+    QUARD_STAR_UART2_IRQ   = 12,
+    QUARD_STAR_RTC_IRQ     = 13,
+};
+```
+
+然后确定通过 MMIO 映射在地址总线上的地址：
+
+``` c
+static const MemMapEntry quard_star_memmap[] = {
+    [QUARD_STAR_MROM]  = {        0x0,        0x8000 },   
+    [QUARD_STAR_SRAM]  = {     0x8000,        0x8000 },
+    [QUARD_STAR_CLINT] = { 0x02000000,       0x10000 },
+    [QUARD_STAR_PLIC]  = { 0x0c000000,      0x210000 },
+    
+    [QUARD_STAR_UART0] = { 0x10000000,        0x1000 },
+    [QUARD_STAR_UART1] = { 0x10001000,        0x1000 },
+    [QUARD_STAR_UART2] = { 0x10002000,        0x1000 },
+    
+    [QUARD_STAR_RTC]   = { 0x10003000,        0x1000 },
+    [QUARD_STAR_VIRTIO0] = { 0x10100000,      0x1000 },
+    [QUARD_STAR_FLASH] = { 0x20000000,     0x2000000 },   
+    [QUARD_STAR_DRAM]  = { 0x80000000,    0x40000000 },   
+};
+```
+
+**通过 `dtc` （Device Tree Compiler）工具生成的文本文件，我们也可以发现上述中断信号信息，以及基于MMIO的外设寄存器信息**。在后续的驱动程序中，这些信息我们可以用到。(这里是否需要和设备树对应？)
+
+#### 初始化并连接 PLIC
+
+随后，UART 初始化代码将这些编号用于**连接 PLIC**，并创建 UART：
+
+``` c
+ /* 创建3个 uart */
+static void quard_star_serial_create(MachineState *machine)
+{
+    MemoryRegion *system_memory = get_system_memory();
+    QuardStarState *s = RISCV_VIRT_MACHINE(machine);
+    
+    serial_mm_init(system_memory,
+                   quard_star_memmap[QUARD_STAR_UART0].base,	// 确定 UART 的 MMIO 的物理地址
+        		   0, 
+                   // DEVICE() 将 PLIC 转换为通用的 QEMU 设备类型指针。将其 10 号输入中断线作为 UART 的中断输出连接目标。
+                   qdev_get_gpio_in(DEVICE(s->plic[0]), QUARD_STAR_UART0_IRQ),  
+                   399193,
+        		   serial_hd(0),
+                   DEVICE_LITTLE_ENDIAN);
+    
+    serial_mm_init(system_memory,
+                   quard_star_memmap[QUARD_STAR_UART1].base,
+       			   0,
+                   qdev_get_gpio_in(DEVICE(s->plic[0]), QUARD_STAR_UART1_IRQ),
+                   399193,
+        	       serial_hd(1),
+                   DEVICE_LITTLE_ENDIAN);
+    
+    serial_mm_init(system_memory,
+                   quard_star_memmap[QUARD_STAR_UART2].base,
+        		   0,
+                   qdev_get_gpio_in(DEVICE(s->plic[0]),
+                   QUARD_STAR_UART2_IRQ),
+                   399193,
+        		   serial_hd(2),
+                   DEVICE_LITTLE_ENDIAN);
+ } 
+```
+
+### 内核地址空间映射寄存器
+
+在`kvmake()`函数中将串口在内核虚拟地址空间中采用恒等映射的方式，使开启分页后的内核依然能够访问串口：
+
+``` c
+// quard-star/os/include/timeros/irq.h
+#define UART0_BASE 0x10000000UL
+
+PageTable kvmmake(void)
+{
+    PageTable pt;
+    PhysPageNum root_ppn =  kalloc();
+    pt.root_ppn = root_ppn;
+
+	/*...*/
+    
+    PageTable_map(&pt, virt_addr_from_size_t(UART0_BASE), phys_addr_from_size_t(UART0_BASE),
+                    PAGE_SIZE, PTE_R | PTE_W);
+    
+    /*...*/
+    return pt;
+}
+```
+
+### 初始化串口
+
+NS16550 是 National Semiconductor 开发的 UART 芯片系列。这里所说的规范主要是指寄存器布局、各个寄存器的功能以及相应的控制位，而不是 UART 在线路上传输数据的帧格式规范。在 NS16550 兼容 UART 中，寄存器通过基地址加偏移量访问。假设 UART 基地址为 `UART_BASE`，常见寄存器如下：
+
+| 偏移量 | 寄存器          | 主要功能                             |
+| ------ | --------------- | ------------------------------------ |
+| `0x00` | RBR / THR / DLL | 接收数据、发送数据、波特率除数低字节 |
+| `0x01` | IER / DLM       | 中断使能、波特率除数高字节           |
+| `0x03` | LCR             | 线路控制寄存器                       |
+| `0x04` | MCR             | 调制解调器控制寄存器                 |
+| `0x05` | LSR             | 线路状态寄存器                       |
+
+这里有一个非常重要的特点：同一个寄存器偏移量，在不同配置下可能对应不同的功能。例如，偏移量 `0x01` 既可以对应 IER，也可以对应 DLM，究竟访问哪个寄存器，由 LCR 的第 7 位决定。在`device_init()`中调用`uart0_init()`：
+
+``` c
+#define UART_RBR 0
+#define UART_IER 1
+#define UART_LCR 3
+#define UART_MCR 4
+#define UART_LSR 5
+#define UART_LSR_RX_READY 0x01
+#define UART_RX_CAPACITY 256
+
+
+static volatile unsigned char *uart_reg(unsigned int offset)
+{
+    return (volatile unsigned char *)(UART0_BASE + offset);
+}
+
+
+void uart0_init(void)
+{
+    /* OpenSBI configured the baud rate. Keep it and enable RX interrupts. */
+    *uart_reg(UART_LCR) &= ~0x80U;	// 1000 0000，清除 LCR 第七位，恢复普通寄存器访问模式
+    *uart_reg(UART_MCR) = 0x0b; 	/* DTR, RTS, OUT2 */
+    *uart_reg(UART_IER) = 0x01;		// 设置 IER，开启接收中断
+}
+```
+
+### PLIC 开启串口中断
+
+在`device_init()`中在 PLIC 中设置串口的中断优先级：
+
+``` c
+void device_init(void)
+{
+    uart0_init();
+
+    /* A priority of 1 passes threshold 0 on the supervisor context. */
+    *plic_reg(PLIC_THRESHOLD) = 0;
+    
+    *plic_reg(PLIC_PRIORITY(UART0_IRQ)) = 1;
+    *plic_reg(PLIC_ENABLE) = (1U << VIRTIO0_IRQ) | (1U << UART0_IRQ);
+    
+    // 开启 sie.SEIE
+    w_sie(r_sie() | SIE_SEIE);
+}
+```
+
+### 读取串口信息
+
+#### UART 控制台给发送串口信息
+
+##### QEMU 内部接收控制台信息
+
+首先在内存中定义接收串口信息的`buffer`：
+
+``` c
+// quard-star/os/src/uart.c
+#define UART_RX_CAPACITY 256
+static unsigned char rx_buffer[UART_RX_CAPACITY];
+```
+
+以在 UART0 控制台输入字母 `a` 为例，数据和通知分别经过下面两条路径：以在 UART0 控制台输入字母 `a` 为例，数据和通知分别经过下面两条路径：
+
+<img src="./assets/串口数据路径.png" alt="串口数据路径" style="zoom:67%;" />
+
+在 QEMU 的 `hw/char/serial.c` 中，字符接收回调 `serial_receive1()` 负责处理收到的输入数据。概念上，这个过程可以理解为：
+
+```c
+/* 示意逻辑，不是 QEMU 源码的逐字复现 */
+void serial_receive1(SerialState *s, unsigned char ch)
+{
+    /* 将字符放入模拟 UART 的接收寄存器或 FIFO */
+    /* 更新接收数据就绪状态 */
+    s->lsr |= UART_LSR_DR;
+
+    /* 根据 UART 的中断配置更新中断输出 */
+    serial_update_irq(s);
+}
+```
+
+假设收到的字符为 `a`，`ASCII：0x61`，QEMU 会把这个字节放入模拟 UART 的接收寄存器，或者在 FIFO 模式下放入接收 FIFO。接着设置：
+
+```c
+s->lsr |= UART_LSR_DR;
+```
+
+其中，`LSR` 是线路状态寄存器（Line Status Register），`DR` 是 Data Ready，即接收数据就绪位。当 `LSR.DR = 1` 时，表示 UART 中有可供读取的接收数据。接收寄存器和 FIFO 是 UART 内部的设备状态。所以现在的数据关系是：
+
+| 所在位置                           | 当前状态         |
+| ---------------------------------- | ---------------- |
+| QEMU 模拟 UART 的接收寄存器或 FIFO | 保存字符 `0x61`  |
+| 内核 `rx_buffer`                   | 尚未写入这个字符 |
+
+##### 串口产生中断
+
+如果没有中断，CPU 也可以反复读取 LSR，检查 UART 是否收到数据。这种方法称为轮询（Polling）。但轮询意味着 CPU 必须主动检查设备状态。中断机制则不同：当接收数据满足中断条件时，UART 主动发出中断请求，让 CPU 在适当的时候处理。内核初始化代码：
+
+```c
+*uart_reg(UART_IER) = 0x01;
+```
+
+开启了接收数据可用中断。在 QEMU 的 UART 模型中，`serial_update_irq()` 会结合接收状态、中断使能和 FIFO 等配置判断是否需要更新中断输出。如果条件满足，就会通过类似下面的操作发出中断请求：
+
+```
+qemu_irq_raise(s->irq);
+```
+
+**这条信号接下来进入 PLIC**。如果启用了 FIFO，中断触发可能取决于 FIFO 阈值或接收超时，而不是每收到一个字符就必然立即触发一次中断。因此，不能把“收到一个字符”和“产生一次中断”简单地视为一一对应。
+
+##### PLIC 通知 CPU
+
+UART 发出中断请求后，PLIC 负责仲裁和转发中断。它不关心字符究竟是 `a` 还是 `b`，只负责告诉 CPU 哪个中断源需要处理。之前的 QEMU 初始化代码已经**把 UART0 的中断输出连接到 PLIC 输入 10**。当 UART 的中断请求有效时，PLIC 会将相应中断源标记为 pending（待处理），并根据配置判断是否向目标 CPU 上下文发送中断通知。PLIC 检查中断是否能够转发，通常需要满足以下条件：
+
+- 确保 RISC-V CPU 已正确开启相应的外部中断。
+
+- 对应中断源的优先级高于目标上下文的阈值。
+- 该中断源在目标上下文中已经使能。
+- 中断源处于待处理状态。
+
+当这些条件满足时，PLIC 就可以向 hart 0 的 Supervisor 上下文发出外部中断通知。
+
+#####  CPU 进入中断处理流程
+
+CPU 响应 Supervisor External Interrupt 后，会根据当前特权级、中断使能状态和 `stvec` 等配置进入相应的 trap 入口。随后，内核的 trap 处理代码识别出这是一个外部中断，并进一步调用 `irq_handler()`。需要区分两个概念：
+
+- Supervisor External Interrupt：CPU 收到的中断类型。
+- IRQ 10：PLIC 识别出的具体中断源编号。
+
+前者告诉 CPU 中断来自外部中断控制器，后者进一步告诉内核究竟是哪个设备发出了中断请求。
+
+``` c
+void trap_handler()
+{
+    set_kernel_trap_entry();
+    TrapContext* cx = (TrapContext*)get_current_trap_cx();
+    reg_t scause = r_scause();
+    reg_t cause_code = scause & 0xfff;
+
+    if (scause & 0x8000000000000000ULL) {
+        
+		/*...*/
+       
+        case 9:
+            irq_handler();
+            break;
+        default:
+            printk("undefined interrupt scause:%lx\n", scause);
+            panic("unexpected user interrupt");
+        }
+    } 
+	/*...*/
+	else {
+
+    }
+    trap_return();
+}
+```
+
+##### 在`irq_handler`中依据中断号处理
+
+``` c
+// quard-star/os/src/irq.c
+void irq_handler(void)
+{
+    u32 id;
+    // 读取中断号
+    while ((id = *plic_reg(PLIC_CLAIM)) != 0) {
+        switch (id) {
+		
+        /*...*/
+                
+        case UART0_IRQ:
+            uart0_irq();
+            break;
+                
+        default:
+            *plic_reg(PLIC_CLAIM) = id;
+            printk("unexpected PLIC IRQ %d\n", id);
+            panic("unexpected PLIC IRQ");
+        }
+        // 标记完成中断处理
+        *plic_reg(PLIC_CLAIM) = id;
+    }
+}
+```
+
+从串口寄存器中读取一个`char`，将其写入到`rx_buffer`中，并把`rx_write++`和`rx_count++`：
+
+``` c
+void uart0_irq(void)
+{
+    while (*uart_reg(UART_LSR) & UART_LSR_RX_READY) {
+        unsigned char ch = *uart_reg(UART_RBR);
+        if (rx_count < UART_RX_CAPACITY) {
+            rx_buffer[rx_write] = ch;
+            rx_write = (rx_write + 1) % UART_RX_CAPACITY;
+            ++rx_count;
+        }
+        /* When full, discard the newest byte but still drain the UART. */
+    }
+}
+```
+
+#### `getchar()`读取串口信息
+
+在`user_shell`进程中：
+
+``` c
+int main()
+{
+    printf("Timer os user shell\n");
+    printf(">> ");
+    char line[BUFFER_SIZE];
+    line[0] = '\0';
+    while (1)
+    {
+        char c = getchar();
+        /*...*/
+    }
+    return 0;
+}
+```
+
+而`getchar()`本质是通过`sys_read()`从`stdin`标准输入获取一个字节，起始也是调用`syscall_read()`，然后调用`fs_read`（依据 fd 来区分不同的读取源，`stdin`对应调用`uart0_getchar`）:
+
+``` c
+efs_ssize fs_read(ProcessControlBlock *p, int fd, void *dst, efs_size len)
+{
+    if (!p || fd < 0 || fd >= MAX_FD || !p->fds[fd])
+        return -1;
+    OpenFile *file = p->fds[fd];
+    if (file->kind == FILE_STDIN) {
+        if (!len)	// 读取的字节长度为 0 则返回
+            return 0;
+        ((unsigned char *)dst)[0] = uart0_getchar();
+        return 1;
+    }
+    if (file->kind != FILE_DISK || (file->flags & 3U) == FS_WRONLY)
+        return -1;
+    efs_ssize n = efs_read_at(&root_fs, file->inode, file->offset, dst, len);
+    if (n > 0) file->offset += n;
+    return n;
+}
+```
+
+实现`uart0_getchar()`：
+
+``` c
+int uart0_getchar(void)
+{
+    reg_t old_status = r_sstatus();
+    intr_off();
+    while (rx_count == 0) {
+        /* Yield to another runnable thread, then sleep if still empty. */
+        schedule();
+        if (rx_count == 0) {
+            intr_on();
+            asm volatile("wfi" ::: "memory");
+            intr_off();
+        }
+    }
+    int ch = rx_buffer[rx_read];
+    rx_read = (rx_read + 1) % UART_RX_CAPACITY;
+    --rx_count;
+    w_sstatus(old_status);
+    return ch;
+}
+```
+
+## `virt_blk`磁盘驱动
+
+> VirtIO 不是一块磁盘，而是一套虚拟设备通信规范。 内核通过这套规范向 QEMU 提交磁盘读写请求，QEMU 再把请求转换为对宿主机磁盘镜像 `fs.img` 的读写操作。
+
+<img src="./assets/virtIO模型.png" alt="virtIO模型" style="zoom:67%;" />
+
+这四者的关系是：**VirtIO 规定通信规则，VirtIO-MMIO 提供控制接口，VirtIO-blk 规定磁盘操作，`fs.img` 则存放实际数据。**
+
+### QEMU 创建 `virt_IO`设备
+
+#### 分配中断号与地址
+
+分配连接在 PLIC 中的中断号，以及通过 MMIO 映射在地址总线上的地址：
+
+``` c
+enum {
+    QUARD_STAR_VIRTIO0_IRQ = 1,
+    
+    QUARD_STAR_UART0_IRQ = 10,  //定义了串口中断号为10
+    QUARD_STAR_UART1_IRQ = 11,
+    QUARD_STAR_UART2_IRQ = 12,
+    QUARD_STAR_RTC_IRQ   = 13,
+};
+
+static const MemMapEntry quard_star_memmap[] = {
+    [QUARD_STAR_MROM]  = {        0x0,        0x8000 },   
+    [QUARD_STAR_SRAM]  = {     0x8000,        0x8000 },
+    [QUARD_STAR_CLINT] = { 0x02000000,       0x10000 },
+    [QUARD_STAR_PLIC]  = { 0x0c000000,      0x210000 },
+    [QUARD_STAR_UART0] = { 0x10000000,        0x1000 },
+    [QUARD_STAR_UART1] = { 0x10001000,        0x1000 },
+    [QUARD_STAR_UART2] = { 0x10002000,        0x1000 },
+    [QUARD_STAR_RTC]   = { 0x10003000,        0x1000 },
+    
+    // 在 0x10100000 创建一块 4kb 的 virtIO MMIO 寄存器
+    [QUARD_STAR_VIRTIO0] = { 0x10100000,      0x1000 },
+    
+    [QUARD_STAR_FLASH] = { 0x20000000,     0x2000000 },   
+    [QUARD_STAR_DRAM]  = { 0x80000000,    0x40000000 },   
+};
+```
+
+#### 初始化并连接 PLIC
+
+``` c
+/* 创建 virtio-mmio: 挂到 PLIC 的 QUARD_STAR_VIRTIO0_IRQ, 供 -device virtio-blk-device 使用 */
+static void quard_star_virtio_mmio_create(MachineState *machine)
+{
+    QuardStarState *s = RISCV_VIRT_MACHINE(machine);
+    sysbus_create_simple("virtio-mmio",
+        quard_star_memmap[QUARD_STAR_VIRTIO0].base,
+        qdev_get_gpio_in(DEVICE(s->plic[0]), QUARD_STAR_VIRTIO0_IRQ));
+}
+
+```
+
+### 把`fs.img`挂载到虚拟块设备
+
+在启动脚本中把`fs.img`挂载到虚拟块设备：
+
+``` shell
+-drive file=$SHELL_FOLDER/output/disk/fs.img,if=none,format=raw,id=x0 \
+-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+```
+
+`x0`是磁盘后端标识，`virtio-blk-device`把这个后端接到刚才的 MMIO 总线上，最终内核读写的扇区对应宿主机`fs.img`中的数据。这段配置可以分成两部分理解：
+
+- `virtio-mmio`：为设备提供 MMIO 寄存器和中断接口。
+- `virtio-blk-device`：把一个块设备连接到该接口，并将 `x0` 对应的磁盘后端关联到 `fs.img`。
+
+因此，`0x10100000` 并不是磁盘数据存放的地址，而是驱动控制虚拟磁盘的入口。 你的内核通过这里配置设备、提交请求；磁盘数据则主要通过内存中的缓冲区传输。
+
+### 内核地址空间映射寄存器
+
+`os_main`中的顺序是：
+
+``` c
+void os_main()
+{
+	/*...*/
+    
+    
+   device_init();
+    
+   // 设备中断就绪后再执行磁盘 I/O。
+   fs_init();
+    
+   load_initproc();
+   app_init();
+
+   run_first_task();
+
+}
+```
+
+各步骤的依赖关系是：
+
+1. `fs_init()` 挂载文件系统，此时才真正读取磁盘。
+
+2. 从磁盘读取 `initproc`进程，建立第一个用户线程。 `fs_init()` 放在 `device_init()` 之后，是因为它读取超级块时会同步等待磁盘中断。
+
+开启分页后，设备寄存器仍需可访问，所以 `kvmmake()` 添加了： 
+
+``` c
+// quard_star的virtio起始地址
+#define VIRTIO0 0x10100000
+
+// easy-fs accesses virtio after paging is enabled (exec and file syscalls).
+PageTable_map(&pt, virt_addr_from_size_t(VIRTIO0), phys_addr_from_size_t(VIRTIO0),
+                PAGE_SIZE, PTE_R | PTE_W);
+```
+
+PLIC 和 UART0 也采用相同方式映射。这里虚拟地址与物理地址相同；内核 RAM 也有直接映射，因此驱动可以把内核缓冲区地址直接填入设备描述符。
+
+### MMIO 控制，内存传数据
+
+<img src="./assets/磁盘控制通道.png" alt="磁盘控制通道" style="zoom:80%;" />
+
+例如，内核要读取磁盘的第 20 个扇区，并不是把一个“读取第 20 个扇区”的命令和 512 字节数据全部写进 MMIO 寄存器。实际过程是：
+
+1. 内核在内存中准备好请求头、数据缓冲区和状态字节。
+2. 内核把这些内存区域的地址填进描述符。
+3. 内核将请求发布到可用环（Available Ring）。
+4. 内核向 `QUEUE_NOTIFY` 寄存器写入队列编号，通知设备有新请求。
+5. QEMU 读取共享内存中的请求并执行操作。
+
+这里的 `QUEUE_NOTIFY` 可以理解为门铃：它只负责提醒设备，不负责携带整个请求的数据。不过，这里还有一个重要的前提：设备描述符中的地址必须是设备能够访问的地址，通常是设备可见的物理地址，而不是任意虚拟地址。 你的 C 驱动之所以可以直接将某些内核缓冲区地址转换为整数填入描述符，是因为当前实现依赖特定的地址映射假设；换到不同的页表或 DMA 环境，就不能直接照搬。
+
+### 虚拟队列
+
+Virtqueue（虚拟队列）是 VirtIO 驱动和设备之间交换请求与完成信息的核心机制。它主要由三个部分构成：
+
+<img src="./assets/虚拟队列组成.png" alt="虚拟队列组成" style="zoom:67%;" />
+
+通过描述符链组织一个完整的磁盘请求。
+
+> **描述符表存放任务说明书，可用环是待办列表，已用环是完成列表**。
+
+#### 描述符：告诉设备去哪里读写内存
+
+##### `virtq_desc`
+
+``` c
+// a single descriptor, from the spec.
+struct virtq_desc {
+	u64 addr;	// 设备访问的内存地址
+	u32 len;	// 这段内存的字节数
+	u16 flags;	// 是否连接下一段、是读取还是写入
+	u16 next;	// 下一条描述符在描述符表中的索引
+};
+```
+
+其中，`next` 让多个描述符组成一条链。比如一次磁盘读请求涉及请求头、512 字节数据区和状态字节，就可以使用三条描述符串起来。两个`flag`为：
+
+``` c
+#define VRING_DESC_F_NEXT 1  // chained with another descriptor
+#define VRING_DESC_F_WRITE 2 // device writes (vs read)
+```
+
+这里`VRING_DESC_F_WRITE`**以设备为主体**，置位表示磁盘设备向内存写数据（读取磁盘数据）；不置位标识磁盘向内存读数据（内存向磁盘设备写数据）；因此，读取磁盘时，数据描述符反而需要设置 `VRING_DESC_F_WRITE`。
+
+##### 一次磁盘请求为什么需要三个描述符？
+
+当前的驱动将一次块设备请求组织为三个部分：
+
+<img src="./assets/三次描述符.png" alt="三次描述符" style="zoom: 80%;" />
+
+对应的请求头是：
+
+``` c
+struct virtio_blk_req {
+    u32 type;		// 置位磁盘设备向内存写数据（读取磁盘数据）；不置位标识磁盘向内存读数据（内存向磁盘设备写数据）。
+    u32 reserved;
+    u64 sector;		// 起始扇区号。当前文件系统块大小、块缓存大小和 VirtIO 扇区大小均为 512 字节，因此磁盘块号可以直接作为扇区号使用。
+};
+```
+
+#### 可用环：只传递描述符索引
+
+可用环：
+
+``` c
+// the (entire) avail ring, from the spec.
+struct virtq_avail {
+	u16 flags; 		// always zero
+	u16 idx; 		// idx 是持续递增的计数器
+	u16 ring[NUM];  // 存放的是描述符索引，不是描述符本身。
+	u16 unused;
+};
+```
+
+假设描述符表中有一条请求链，链头的索引为 `3`。驱动会把 `3` 放入可用环：
+
+``` c
+disk.avail->ring[disk.avail->idx % NUM] = 3;
+disk.avail->idx++;
+```
+
+这里有两个容易混淆的概念：
+
+- `ring[]` 中存放的是描述符索引，不是磁盘数据，也不是描述符本身。
+- `idx` 是持续递增的计数器，而不是简单地在 `0` 到 `NUM-1` 之间循环。例如，队列大小 `NUM = 8` 时，第 9 次发布请求对应的环形数组位置是 `8 % 8 = 0`，但计数器仍然继续递增。
+
+设备处理完请求后，也会在已用环中写入对应的描述符链头索引，并更新 `used.idx`。驱动据此知道有哪些请求已经完成。
+
+#### 已用环：只传递描述符索引
+
+已用环：
+
+``` c
+struct virtq_used {
+	u16 flags; 	// always zero
+	u16 idx; 	// device increments when it adds a ring[] entry
+	struct virtq_used_elem ring[NUM];
+};
+```
+
+### `struct disk`：磁盘对象
+
+#### 静态磁盘对象
+
+``` c
+// the format of the first descriptor in a disk request.
+// to be followed by two more descriptors containing
+// the block, and a one-byte status.
+struct virtio_blk_req {
+	u32 type; // VIRTIO_BLK_T_IN or ..._OUT
+	u32 reserved;
+	u64 sector;
+};
+
+
+static struct disk
+{
+    // 这两页内存用于存放 (descriptors, avail,used） 这三个队列
+    // 没有像xv6使用kalloc来分配两页连续内存
+    // 这两页内存被分成了三个部分即：(descriptors, avail,used）
+	// 连续两页，用于存放描述符表和两个环
+    char pages[2 * PAGE_SIZE];	
+
+    // 指针，指向虚拟队列各部分
+    struct virtq_desc  *desc;
+    struct virtq_avail *avail;
+    struct virtq_used  *used;
+	
+    // 标记哪些描述符可以分配
+    char free[NUM];
+	
+    // 驱动已经消费到的完成位置
+    u16 used_idx; 
+
+    struct {
+		struct buf *b;	// 从描述符链头找到上层块缓存
+		char status;	// 设备回写的单字节执行状态
+	} info[NUM]; 
+
+    struct virtio_blk_req ops[NUM];	// 保存块请求头，直到请求完成
+}__attribute__((aligned(PAGE_SIZE))) disk;
+```
+
+当前`NUM = 8`，每个描述符 16 字节，所以布局是：
+
+``` c
+// this many virtio descriptors.
+// must be a power of two.
+#define NUM 8
+
+
+disk.pages
+│
+├── +0x0000  描述符表
+│             8 × 16 = 128 字节
+│
+├── +0x0080  Available Ring
+│
+└── +0x1000  Used Ring
+```
+
+> 为什么 `Used Ring` 放在 `+0x1000`？
+
+因为当前使用的 legacy VirtIO-MMIO 队列布局**要求已用环按照页大小对齐**。驱动通过 `QUEUE_ALIGN` 和 `QUEUE_PFN` 等寄存器向设备提供队列信息。
+
+#### `virtio_disk_init()`：初始化磁盘对象
+
+``` c
+void virtio_disk_init(){
+
+    u32 status = 0;
+
+    // 做一些检查操作，判断MMIO相关寄存器没有问题
+    if(*VTMO_REG(VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 || 
+       *VTMO_REG(VIRTIO_MMIO_VERSION) != 1 ||
+       *VTMO_REG(VIRTIO_MMIO_DEVICE_ID) != 2 ||
+       *VTMO_REG(VIRTIO_MMIO_VENDOR_ID) != 0x554d4551){
+        panic("could not find virtio disk");
+    }
+
+    // 第1步 重置设备
+    *VTMO_REG(VIRTIO_MMIO_STATUS) = status;
+
+    // 第2步 设置 Satus 寄存器第0位 os识别到设备
+    status |= VIRTIO_CONFIG_S_ACKNOWLEDGE;
+	*VTMO_REG(VIRTIO_MMIO_STATUS) = status;
+
+    // 第3步 设置 Satus 寄存器第1位 os知道如何驱动设备
+	status |= VIRTIO_CONFIG_S_DRIVER;
+	*VTMO_REG(VIRTIO_MMIO_STATUS) = status;
+
+    // 第4步 协商 feature
+    u64 features = *VTMO_REG(VIRTIO_MMIO_DEVICE_FEATURES);
+    features &= ~(1 << VIRTIO_BLK_F_RO);         
+	features &= ~(1 << VIRTIO_BLK_F_SCSI);      
+	features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
+	features &= ~(1 << VIRTIO_BLK_F_MQ);
+	features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
+	features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
+	features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    *VTMO_REG(VIRTIO_MMIO_DRIVER_FEATURES) = features;
+
+    // 第5步 协商完成
+    status |= VIRTIO_CONFIG_S_FEATURES_OK;
+    *VTMO_REG(VIRTIO_MMIO_STATUS) = status;
+
+    *VTMO_REG(VIRTIO_MMIO_GUEST_PAGE_SIZE) = PAGE_SIZE;
+
+    // 第6步 确保FEATURES_OK
+    status = *VTMO_REG(VIRTIO_MMIO_STATUS);
+    if(!(status & VIRTIO_CONFIG_S_FEATURES_OK))
+        panic("virtio disk FEATURES_OK unset");
+    
+    // 第7步 initialize queue 0.
+	*VTMO_REG(VIRTIO_MMIO_QUEUE_SEL) = 0;
+
+    // check maximum queue size.
+    u32 max = *VTMO_REG(VIRTIO_MMIO_QUEUE_NUM_MAX);
+    if (max == 0)
+        panic("virtio disk has no queue 0");
+    if (max < NUM)
+        panic("virtio disk max queue too short");
+    *VTMO_REG(VIRTIO_MMIO_QUEUE_NUM) = NUM;
+    *VTMO_REG(VIRTIO_MMIO_QUEUE_ALIGN) = PAGE_SIZE;
+
+    // desc = pages -- num * virtq_desc
+	// avail = pages + 0x40 -- 2 * uint16, then num * uint16
+	// used = pages + 4096 -- 2 * uint16, then num * vRingUsedElem
+
+	disk.desc = (struct virtq_desc *)disk.pages;
+	disk.avail = (struct virtq_avail *)(disk.pages +
+					    NUM * sizeof(struct virtq_desc));
+	disk.used = (struct virtq_used *)(disk.pages + PAGE_SIZE);
+	*VTMO_REG(VIRTIO_MMIO_QUEUE_PFN) = (u32)((u64)disk.pages / PAGE_SIZE);
+
+	// all NUM descriptors start out unused.
+	for (int i = 0; i < NUM; i++)
+		disk.free[i] = 1;
+    
+
+    // Set the DRIVER status bit: the guest OS knows how to drive the device.
+    status |= VIRTIO_CONFIG_S_DRIVER_OK;
+    *VTMO_REG(VIRTIO_MMIO_STATUS) = status;
+
+    printk("virtio_disk_init success !!! \n");
+}
+```
+
+### 一次读取磁盘如何发生？
+
+> 假设 EasyFS 要读取磁盘第 20 块，缓冲区对象为 `b`。
+
+#### 构造请求头
+
+上层调用`virtio_disk_read(b)`：(`b`中已经包含：1.`blockno`：磁盘块号；2.`data`：512 字节数据；3.`disk`：请求是否完成)
+
+``` c
+void virtio_disk_read(struct buf *b)
+{
+    u64 sector = b->blockno;
+
+    int idx[3];
+    reg_t old_status = r_sstatus();
+    intr_off();
+```
+
+由于`EasyFS`块大小 == 块缓存大小 == VirtIO 请求的 512 字节扇区，因此不需要换算，如果以后把文件系统块改成 4096 字节，这里就需要把块号转换为 512 字节扇区号。随后分配三个空闲描述符：
+
+``` c
+// 分配三个空闲的descriptor
+static int alloc3_desc(int *idx)
+{
+	for (int i = 0; i < 3; i++) {
+		idx[i] = alloc_desc();
+		if (idx[i] < 0) {
+			for (int j = 0; j < i; j++)
+				free_desc(idx[j]);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+// 找到一个空闲的descriptor，将其置为被使用状态，返回其索引
+static int alloc_desc()
+{
+	for (int i = 0; i < NUM; i++) {
+		if (disk.free[i]) {
+			disk.free[i] = 0;
+			return i;
+		}
+	}
+	return -1;
+}
+
+
+if (alloc3_desc(idx) < 0)
+    panic("virtio disk: no descriptors");
+```
+
+构造请求头：
+
+``` c
+#define VIRTIO_BLK_T_IN 0  // read the disk   读磁盘
+#define VIRTIO_BLK_T_OUT 1 // write the disk  写磁盘
+
+
+//初始化请求头，使用disk的ops域存储，ops存储位置和第一个描述符的位置一致
+struct virtio_blk_req *buf0 = &disk.ops[idx[0]];
+
+buf0->type = VIRTIO_BLK_T_IN; // 读磁盘
+
+buf0->reserved = 0;
+buf0->sector = sector;
+
+// 用请求头初始化第一个descriptor
+disk.desc[idx[0]].addr  = (u64)buf0;
+disk.desc[idx[0]].len   = sizeof(struct virtio_blk_req);
+disk.desc[idx[0]].flags = VRING_DESC_F_NEXT;
+disk.desc[idx[0]].next  = idx[1];
+disk.desc[idx[0]].next  = idx[1];
+```
+
+#### 构造数据区描述符
+
+``` c
+//用实际数据初始化第二个descriptor
+disk.desc[idx[1]].addr = (u64) b->data;
+disk.desc[idx[1]].len = BSIZE;
+// 读磁盘时，设备向内存缓冲区写入数据。
+disk.desc[idx[1]].flags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
+disk.desc[idx[1]].next = idx[2];
+
+disk.info[idx[0]].status = 0xff; // device writes 0 on success
+```
+
+#### 构造状态区描述符
+
+```c
+//第三个描述符的特殊操作，待设备写入的status放在disk.info域
+disk.desc[idx[2]].addr = (u64) &disk.info[idx[0]].status;
+disk.desc[idx[2]].len = 1;
+disk.desc[idx[2]].flags = VRING_DESC_F_WRITE; // device writes the status
+disk.desc[idx[2]].next = 0;
+```
+
+#### 更新`disk`中的信息
+
+`__sync_synchronize()` 用于提供内存顺序保证，避免设备观察到请求已发布，但请求内容还没有按预期准备好的情况。`volatile` 与内存屏障解决的问题并不完全相同：前者主要约束编译器对相关访问的优化，后者用于约束内存访问的顺序。
+
+``` c
+    // 记录struct buf信息，方便中断处理程序处理
+    b->disk = 1;
+    disk.info[idx[0]].b = b;
+
+    // 把有效index写入avail ring中
+    disk.avail->ring[disk.avail->idx % NUM] = idx[0];
+
+    __sync_synchronize();
+
+    disk.avail->idx += 1; // not % NUM ...
+
+    __sync_synchronize();
+
+    *VTMO_REG(VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
+
+    /* The IRQ handler consumes the used ring and clears b->disk. Keep this
+       request serialized while permitting device and timer interrupts. */
+    intr_on();
+    while (b->disk) {
+        __sync_synchronize();
+        asm volatile("wfi" ::: "memory");
+    }
+    intr_off();
+    __sync_synchronize();
+    if (disk.info[idx[0]].status != 0)
+        panic("virtio disk request failed");
+    disk.info[idx[0]].b = 0;
+    free_chain(idx[0]);
+    w_sstatus(old_status);
+}
+```
+
+### 一次写入磁盘如何发生？
+
+> 假设 EasyFS 要读取磁盘第 20 块，缓冲区对象为 `b`。
+
+#### 构造请求头
+
+上层调用`virtio_disk_write(b)`：(`b`中已经包含：1.`blockno`：磁盘块号；2.`data`：512 字节数据；3.`disk`：请求是否完成)
+
+``` c
+void virtio_disk_read(struct buf *b)
+{
+    u64 sector = b->blockno;
+
+    int idx[3];
+    reg_t old_status = r_sstatus();
+    intr_off();
+```
+
+由于`EasyFS`块大小 == 块缓存大小 == VirtIO 请求的 512 字节扇区，因此不需要换算，如果以后把文件系统块改成 4096 字节，这里就需要把块号转换为 512 字节扇区号。随后分配三个空闲描述符：
+
+``` c
+// 分配三个空闲的descriptor
+static int alloc3_desc(int *idx)
+{
+	for (int i = 0; i < 3; i++) {
+		idx[i] = alloc_desc();
+		if (idx[i] < 0) {
+			for (int j = 0; j < i; j++)
+				free_desc(idx[j]);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+// 找到一个空闲的descriptor，将其置为被使用状态，返回其索引
+static int alloc_desc()
+{
+	for (int i = 0; i < NUM; i++) {
+		if (disk.free[i]) {
+			disk.free[i] = 0;
+			return i;
+		}
+	}
+	return -1;
+}
+
+
+if (alloc3_desc(idx) < 0)
+    panic("virtio disk: no descriptors");
+```
+
+构造请求头：
+
+``` c
+#define VIRTIO_BLK_T_IN 0  // read the disk   读磁盘
+
+
+//初始化请求头，使用disk的ops域存储，ops存储位置和第一个描述符的位置一致
+struct virtio_blk_req *buf0 = &disk.ops[idx[0]];
+
+buf0->type = VIRTIO_BLK_T_IN; // 读磁盘
+
+buf0->reserved = 0;
+buf0->sector = sector;
+
+// 用请求头初始化第一个descriptor
+disk.desc[idx[0]].addr  = (u64)buf0;
+disk.desc[idx[0]].len   = sizeof(struct virtio_blk_req);
+disk.desc[idx[0]].flags = VRING_DESC_F_NEXT;
+disk.desc[idx[0]].next  = idx[1];
+```
+
+#### 构造数据区描述符
+
+``` c
+//用实际数据初始化第二个descriptor
+disk.desc[idx[1]].addr = (u64) b->data;
+disk.desc[idx[1]].len = BSIZE;
+// 读磁盘时，设备向内存缓冲区写入数据。
+disk.desc[idx[1]].flags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
+disk.desc[idx[1]].next = idx[2];
+
+disk.info[idx[0]].status = 0xff; // device writes 0 on success
+```
+
+#### 构造状态区描述符
+
+```c
+//第三个描述符的特殊操作，待设备写入的status放在disk.info域
+disk.desc[idx[2]].addr 	= (u64) &disk.info[idx[0]].status;
+disk.desc[idx[2]].len 	= 1;
+disk.desc[idx[2]].flags = VRING_DESC_F_WRITE; // device writes the status
+disk.desc[idx[2]].next 	= 0;
+```
+
+#### 更新`disk`中的信息
+
+`__sync_synchronize()` 用于提供内存顺序保证，避免设备观察到请求已发布，但请求内容还没有按预期准备好的情况。`volatile` 与内存屏障解决的问题并不完全相同：前者主要约束编译器对相关访问的优化，后者用于约束内存访问的顺序。
+
+``` c
+    // 记录struct buf信息，方便中断处理程序处理
+    b->disk = 1;
+    disk.info[idx[0]].b = b;
+
+    // 把有效index写入avail ring中
+    disk.avail->ring[disk.avail->idx % NUM] = idx[0];
+
+    __sync_synchronize();
+
+    disk.avail->idx += 1; // not % NUM ...
+
+    __sync_synchronize();
+
+    *VTMO_REG(VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
+
+    /* The IRQ handler consumes the used ring and clears b->disk. Keep this
+       request serialized while permitting device and timer interrupts. */
+    intr_on();
+    while (b->disk) {
+        __sync_synchronize();
+        asm volatile("wfi" ::: "memory");
+    }
+    intr_off();
+    __sync_synchronize();
+    if (disk.info[idx[0]].status != 0)
+        panic("virtio disk request failed");
+    disk.info[idx[0]].b = 0;
+    free_chain(idx[0]);
+    w_sstatus(old_status);
+}
+```
+
+
+
 # 封装printk函数
 
 ## x86架构实现可变参数
@@ -8163,7 +10745,7 @@ void printStrings(int count, ...){
 }
 ```
 
-## 6.2 riscv架构中的可变参数
+## Risc-V 架构中的可变参数
 
 在RISC-V架构中，函数参数的传递方式取决于参数的数量和类型：
 
@@ -8403,6 +10985,460 @@ SRCS_C = \
 		main.c \
 		printf.c
 ```
+
+# 文件系统
+
+文件最早来自于计算机用户需要把数据持久保存在 **持久存储设备** 上的需求。由于放在内存中的数据在计算机关机或掉电后就会消失，所以应用程序要把内存中需要保存的数据放到 持久存储设备的数据块（比如磁盘的扇区等）中存起来。随着操作系统功能的增强，在操作系统的管理下，应用程序不用理解持久存储设备的硬件细节，而只需对 **文件** 这种持久存储数据的抽象进行读写就可以了，由操作系统中的文件系统和存储设备驱动程序一起来完成繁琐的持久存储设备的管理与读写。所以本章要完成的操作系统的第一个核心目标是： **让应用能够方便地把数据持久保存起来** 。
+
+大家不要被 **持久存储设备** 这个词给吓住了，这就是指计算机远古时代的卡片、纸带、磁芯、磁鼓、汞延迟线存储器等，以及到现在还在用的磁带、磁盘、硬盘、光盘、闪存、固态硬盘 (SSD, Solid-State Drive)等存储设备。我们可以把这些设备叫做 **外存** 。在本章之前，我们仅使用一种存储，就是内存（或称 RAM），内存是一种易失性存储。相比内存，外存的读写速度较慢，容量较大。但内存掉电后信息会丢失，而外存在掉电之后并不会丢失数据。因此，将需要持久保存的数据从内存写入到外存，或是从外存读入到内存是应用的一种重要需求。
+
+## 有什么用
+
+磁盘只提供“读取第 100 个块”“写入第 101 个块”这样的操作。它不知道什么是 `filea`，也不知道文件有多长。文件系统在磁盘块之上建立三种关系：
+
+1. **文件名 → 文件编号`inode`**：在目录里找到 `filea` 对应哪个 `inode`。
+2. **文件编号`inode` → 磁盘数据块**：`inode` 记录文件长度，以及内容放在哪些磁盘块。
+3. **磁盘数据块 → 内容**：通过块设备驱动读取实际字节。
+
+``` mermaid
+flowchart LR
+    A["用户程序<br/>open / read / write"] --> B["系统调用<br/>检查用户地址"]
+    B --> C["进程文件描述符表<br/>fd → inode、偏移、权限"]
+    C --> D["easy-fs<br/>目录、inode、位图"]
+    D --> E["块缓存<br/>512 字节块"]
+    E --> F["virtio 磁盘驱动"]
+    F --> G["fs.img"]
+```
+![文件系统](./assets/文件系统.png)
+
+## `sys_open()`系统调用
+
+假设程序执行：
+
+``` c
+int fd = sys_open("filea", FS_RDONLY);
+char buf[14];
+sys_read(fd, buf, 14);
+```
+
+这里涉及五种不同的编号或对象：
+
+| 名称         | 例子        | 它表示什么                           |
+| ------------ | ----------- | ------------------------------------ |
+| 文件名       | `filea`     | 人使用的名字                         |
+| `inode` 编号 | 假设为 12   | 文件系统内部标识一个文件             |
+| 文件内块序号 | 0、1、2…    | 内容在这个文件中的第几个 512 字节块  |
+| 磁盘块号     | 假设为 1080 | 内容实际位于磁盘的哪个块             |
+| `fd`         | 假设为 3    | **当前进程**用来访问已打开文件的编号 |
+
+它们不能互换。尤其是 **`fd` 不是 `inode` 编号**：两个进程都可能有 `fd 3`，却指向不同文件；同一个文件也可以被打开多次，得到不同 fd。
+
+## `EasyFs`：文件系统对象
+
+``` c
+typedef struct {
+    void *ctx;		// read / write 的上下文
+    
+    // 系统调用的函数指针
+    int (*read)(void *ctx, efs_u32 block, unsigned char *dst);
+    int (*write)(void *ctx, efs_u32 block, const unsigned char *src);
+    
+    EfsSuper super;	// 超级块
+    efs_u32 inode_start, data_bitmap_start, data_start;
+} EasyFs;
+```
+
+为什么要使用函数指针？为了让同一份 easy-fs 核心代码运行在两个环境：
+
+- 在宿主机制作镜像时，回调通过 `fseeko`、`fread`、`fwrite` 操作 `fs.img`。
+- 在 quard-star 内核中，回调通过 `bread`、`bwrite` 操作 virtio 磁盘。
+
+这样，镜像工具和内核不会各自维护一套可能不一致的磁盘格式算法。
+
+在`os_main`中调用：
+
+``` c
+// quard-star/os/src/fs.c
+static EasyFs root_fs;
+
+void fs_init(void)
+{
+    root_fs.ctx = 0;
+    root_fs.read  = disk_read;
+    root_fs.write = disk_write;
+    if (efs_mount(&root_fs) < 0) panic("invalid easy-fs image");
+    printk("easy-fs mounted: %d blocks\n", root_fs.super.total_blocks);
+}
+```
+
+## `disk_read`
+
+``` c
+static int disk_read(void *ctx, efs_u32 block, unsigned char *dst)
+{
+    (void)ctx;
+    struct buf *b = bread(1, (int)block);
+    memcpy(dst, b->data, EFS_BLOCK_SIZE);
+    brelse(b);
+    return 0;
+}
+```
+
+
+
+## 创建磁盘镜像
+
+``` c
+int main(int argc, char **argv)
+{
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s IMAGE PROGRAM_DIR [--reset]\n", argv[0]);
+        return 2;
+    }
+    int reset = argc == 4 && strcmp(argv[3], "--reset") == 0;
+    if (argc == 4 && !reset) return 2;
+    FILE *file = reset ? fopen(argv[1], "w+b") : fopen(argv[1], "r+b");
+    int fresh = reset;
+    if (!file && !reset && errno == ENOENT) {
+        file = fopen(argv[1], "w+b");
+        fresh = 1;
+    }
+    if (!file) { perror(argv[1]); return 1; }
+    EasyFs fs = {.ctx = file, .read = image_read, .write = image_write};
+    if (fresh) {
+        if (ftruncate(fileno(file), (off_t)IMAGE_BLOCKS * EFS_BLOCK_SIZE) < 0 ||
+            efs_format(&fs, IMAGE_BLOCKS) < 0) {
+            fprintf(stderr, "failed to format %s\n", argv[1]);
+            fclose(file);
+            return 1;
+        }
+    } else if (efs_mount(&fs) < 0) {
+        fprintf(stderr, "%s is not an easy-fs image; use --reset explicitly\n", argv[1]);
+        fclose(file);
+        return 1;
+    }
+    DIR *dir = opendir(argv[2]);
+    if (!dir) { perror(argv[2]); fclose(file); return 1; }
+    struct dirent *entry;
+    int failed = 0;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.') continue;
+        if (copy_program(&fs, argv[2], entry->d_name) < 0) {
+            fprintf(stderr, "failed to import %s\n", entry->d_name);
+            failed = 1;
+            break;
+        }
+    }
+    closedir(dir);
+    if (fflush(file) < 0) failed = 1;
+    fclose(file);
+    return failed;
+}
+```
+
+### 格式化磁盘
+
+``` c
+int efs_format(EasyFs *fs, efs_u32 blocks)
+{
+    if (!fs || !fs->read || !fs->write || blocks < 2048) return -1;
+    efs_u32 inode_bitmap = 1, inode_area = 1024;
+    efs_u32 data_total = blocks - 1 - inode_bitmap - inode_area;
+    efs_u32 data_bitmap = (data_total + 4096) / 4097;
+    fs->super = (EfsSuper){EFS_MAGIC, blocks, inode_bitmap, inode_area,
+                           data_bitmap, data_total - data_bitmap};
+    layout(fs);
+    unsigned char zero[EFS_BLOCK_SIZE];
+    bytes_zero(zero, sizeof(zero));
+    for (efs_u32 b = 0; b < fs->data_start; ++b)
+        if (fs->write(fs->ctx, b, zero) < 0) return -1;
+    bytes_copy(zero, &fs->super, sizeof(fs->super));
+    if (fs->write(fs->ctx, 0, zero) < 0 ||
+        bitmap_set(fs, 1, 0, 1) < 0) return -1;
+    EfsDiskInode root;
+    bytes_zero(&root, sizeof(root));
+    root.type = EFS_DIRECTORY;
+    return write_inode(fs, 0, &root);
+}
+```
+
+
+
+## 如何读取磁盘
+
+`fs.img` 是宿主机上的一个文件；QEMU 把它模拟成 quard-star 的磁盘。这次镜像大小为 **32 MiB，共 65,536 个 512 字节块**。布局：
+
+<img src="./assets/磁盘布局.png" alt="磁盘布局" style="zoom:80%;" />
+
+### 超级块
+
+#### `EfsSuper`：整块磁盘的“地图”
+
+``` c
+// os/include/timeros/easyfs.h 
+typedef struct {
+    efs_u32 magic;					// 格式标识
+    efs_u32 total_blocks;			// 文件系统总块数
+    efs_u32 inode_bitmap_blocks;	// inode 位图 占据的块数
+    inode_area_blocks;				// inode 区	 占据的块数
+    efs_u32 data_bitmap_blocks;		// 数据位图	   占据的块数
+    data_area_blocks;				// 数据区		占据的块数
+} EfsSuper;
+```
+
+它占 **24 字节**，放在磁盘的第 0 块开头。
+
+- `magic` 是格式标识。挂载时看到预期值 `0x3b800001`，才认为它可能是 easy-fs。
+- `total_blocks` 是文件系统总块数。
+- 其余四项说明 inode 位图、inode 区、数据位图、数据区各占多少块。
+
+内核启动时看到的只是一长串磁盘块。没有超级块，内核不知道“inode 从哪一块开始”“数据区从哪一块开始”。先读取超级块，再做基本的格式和范围检查。
+
+#### 读取超级块中的信息，保存进`EasyFS`
+
+``` c
+#define EFS_BLOCK_SIZE 512
+
+static void bytes_copy(void *d, const void *s, efs_size n)
+{
+    unsigned char *dst = d;
+    const unsigned char *src = s;
+    for (efs_size i = 0; i < n; ++i) dst[i] = src[i];
+}
+
+static void layout(EasyFs *fs)
+{
+    fs->inode_start		  = 1 + fs->super.inode_bitmap_blocks;
+    fs->data_bitmap_start = fs->inode_start + fs->super.inode_area_blocks;
+    fs->data_start 		  = fs->data_bitmap_start + fs->super.data_bitmap_blocks;
+}
+
+
+// 传入文件系统结构体，读取超级块相关信息
+int efs_mount(EasyFs *fs)
+{
+    // 在栈上创建一个大小为 EFS_BLOCK_SIZE 的字节数组 buf，用来暂存从磁盘读取的一个块。
+    unsigned char buf[EFS_BLOCK_SIZE];
+    // 调用 read 函数 读取超级块到内存中
+    if (!fs || !fs->read || !fs->write || fs->read(fs->ctx, 0, buf) < 0)
+        return -1;
+    // 把超级块的信息复制到文件系统对象中
+    bytes_copy(&fs->super, buf, sizeof(fs->super));
+    
+    // 通过文件系统内存对象的超级块信息
+    EfsSuper *s = &fs->super;
+    // 计算数据区的起始块号：超级块+inode位图块+inode块+数据位图块
+    unsigned long long data_start = 1ULL + s->inode_bitmap_blocks +
+        							s->inode_area_blocks + s->data_bitmap_blocks;
+    if (data_start > 0xffffffffU)
+        return -1;
+    // 计算 inode块、数据位图块、数据块的起始块号（inode位图块号固定为 1）
+    layout(fs);
+    
+    if (s->magic != EFS_MAGIC || s->total_blocks < 8 || !s->inode_bitmap_blocks ||
+        !s->inode_area_blocks || !s->data_bitmap_blocks || !s->data_area_blocks ||
+        fs->data_start >= s->total_blocks ||
+        s->data_area_blocks != s->total_blocks - fs->data_start ||
+        s->inode_area_blocks < (unsigned long long)s->inode_bitmap_blocks * 1024U ||
+        s->data_area_blocks > (unsigned long long)s->data_bitmap_blocks * 4096U)
+        return -1;
+    
+    EfsDiskInode root;
+    if (read_inode(fs, 0, &root) < 0 || root.type != EFS_DIRECTORY) return -1;
+    return 0;
+}
+```
+
+### `EfsDiskInode`：单个文件的“档案卡”
+
+``` c
+// typedef unsigned int efs_u32;
+
+typedef struct {
+    efs_u32 size;
+    efs_u32 direct[28];
+    efs_u32 indirect1, indirect2, type;
+} EfsDiskInode;
+```
+
+它恰好占 **128 字节**，因此一个 512 字节磁盘块可以容纳 4 个 inode。
+
+- `size`：文件当前有多少字节。读取是否到达文件末尾，要看它。
+- `type`：值为 `EFS_FILE` 或 `EFS_DIRECTORY`。
+- `direct[28]`：直接存前 28 个数据块的磁盘块号。
+- `indirect1`：指向一个“装有更多块号”的块。
+- `indirect2`：指向两层块号索引的第一层。
+
+为什么 inode 不存文件名？因为**名字属于目录中的查找关系，内容和长度属于文件本身**。目录负责从名字找到 inode；找到后，读取文件无需再处理名字。
+
+代码还用编译期检查保证它确实是 128 字节。[尺寸检查 (line 3)](/home/c1y308/quard-star/quard-star/os/src/easyfs.c:3) 很重要：磁盘格式按字节固定，若 C 编译器把结构体排成另一个大小，就会读错后续 inode。
+
+### `inode`位图
+
+**位图**可以理解为一排开关：某一位是 0，表示对应位置空闲；变成 1，表示已分配。创建文件要从 inode 位图找空位；文件变大时，要从数据位图找空块。负责查找和修改这些位。
+
+``` c
+static int bitmap_set(EasyFs *fs, efs_u32 start, efs_u32 bit, int value)
+{
+    unsigned char buf[EFS_BLOCK_SIZE];
+    efs_u32 block = start + bit / 4096;
+    if (fs->read(fs->ctx, block, buf) < 0) return -1;
+    unsigned char mask = (unsigned char)(1U << (bit % 8));
+    if (value) buf[(bit % 4096) / 8] |= mask;
+    else buf[(bit % 4096) / 8] &= (unsigned char)~mask;
+    return fs->write(fs->ctx, block, buf);
+}
+```
+
+### `inode`
+
+**inode** 是文件的“档案卡”。它**记录文件大小、类型，以及内容块的位置，但不存文件名**。一个 inode 占 128 字节，因此一个 512 字节块可以放 4 个 inode。根目录固定使用 inode 0。
+
+``` c
+```
+
+
+
+目录负责把名字连到 inode：每个目录项占 32 字节，其中 28 字节放名字（最多 27 字节，留一个结尾字节），另 4 字节放 inode 编号。例如 `filea → inode 12`。当前实现只有一个**扁平的根目录**；路径中不能包含 `/`。
+
+代码定义：
+
+``` c
+/* The layout is the on-disk layout of rCore Tutorial v3 easy-fs. */
+#define EFS_BLOCK_SIZE 512
+#define EFS_MAGIC 0x3b800001U
+#define EFS_DIRECT 28
+#define EFS_INDIRECT (EFS_BLOCK_SIZE / 4)
+#define EFS_MAX_DATA_BLOCKS (EFS_DIRECT + EFS_INDIRECT + EFS_INDIRECT * EFS_INDIRECT)
+#define EFS_NAME_MAX 27
+#define EFS_FILE 0
+#define EFS_DIRECTORY 1
+```
+
+### 数据位图
+
+## 文件长度增加时，怎样找到更多磁盘块?
+
+inode 放不下一个大文件的所有块号，所以使用三层寻址方式：
+
+| 文件中的块序号 | 查找方式                         | 可覆盖的内容  |
+| -------------- | -------------------------------- | ------------- |
+| 0～27          | inode 内直接存块号               | 14 KiB        |
+| 28～155        | 通过一个一级间接块查块号         | 再增加 64 KiB |
+| 156 以后       | 通过二级间接块，再找到一级间接块 | 再增加 8 MiB  |
+
+一个间接块有 512 字节，每个块号占 4 字节，所以能存 **128 个块号**。`block_for()` 根据“文件中的第几个块”走相应路径；写入时若对应块尚不存在，就从位图分配。
+
+``` c
+static int block_for(EasyFs *fs, EfsDiskInode *inode, efs_u32 index,
+                     int create, efs_u32 *block)
+{
+    if (index >= EFS_MAX_DATA_BLOCKS) return -1;
+    if (index < EFS_DIRECT) {
+        efs_u32 *slot = &inode->direct[index];
+        if (create && !*slot && alloc_data(fs, slot) < 0) return -1;
+        *block = *slot;
+        return *block ? 0 : -1;
+    }
+    index -= EFS_DIRECT;
+    efs_u32 *top = index < EFS_INDIRECT ? &inode->indirect1 : &inode->indirect2;
+    if (index >= EFS_INDIRECT) index -= EFS_INDIRECT;
+    if (create && !*top && alloc_data(fs, top) < 0) return -1;
+    if (!*top) return -1;
+    efs_u32 leaf = *top;
+    if (top == &inode->indirect2) {
+        efs_u32 pos = index / EFS_INDIRECT, child;
+        if (indirect_get(fs, leaf, pos, &child) < 0) return -1;
+        if (create && !child) {
+            if (alloc_data(fs, &child) < 0 || indirect_set(fs, leaf, pos, child) < 0) return -1;
+        }
+        leaf = child;
+        index %= EFS_INDIRECT;
+    }
+    if (!leaf || indirect_get(fs, leaf, index, block) < 0) return -1;
+    if (create && !*block) {
+        if (alloc_data(fs, block) < 0 || indirect_set(fs, leaf, index, *block) < 0) return -1;
+    }
+    return *block ? 0 : -1;
+}
+```
+
+例如一个 14 字节的 `filea` 只需要一个数据块，inode 的 `direct[0]` 指向它。读取时，文件系统根据偏移找到这个块，再只取其中需要的字节。读取到文件末尾返回 0；截断文件时释放其数据块和间接索引块。
+
+``` c
+efs_ssize efs_read_at(EasyFs *fs, efs_u32 id, efs_u32 offset, void *dst, efs_size len)
+{
+    EfsDiskInode inode;
+    if (read_inode(fs, id, &inode) < 0) return -1;
+    if (offset >= inode.size) return 0;
+    if (len > inode.size - offset) len = inode.size - offset;
+    unsigned char buf[EFS_BLOCK_SIZE];
+    efs_size done = 0;
+    while (done < len) {
+        efs_u32 pos = offset + done, block;
+        efs_size n = EFS_BLOCK_SIZE - pos % EFS_BLOCK_SIZE;
+        if (n > len - done) n = len - done;
+        if (block_for(fs, &inode, pos / EFS_BLOCK_SIZE, 0, &block) < 0 ||
+            fs->read(fs->ctx, block, buf) < 0) return -1;
+        bytes_copy((unsigned char *)dst + done, buf + pos % EFS_BLOCK_SIZE, n);
+        done += n;
+    }
+    return (efs_ssize)done;
+}
+```
+
+## `open` 返回的 fd 是什么
+
+fd（文件描述符）只是**某个进程手里的编号**，例如 3；它不是磁盘块号，也不是 inode 编号。每个进程有一张 fd 表。0、1、2 预先分别用于标准输入、标准输出、标准错误；打开磁盘文件后，内核找一个空位，并保存一个 `OpenFile` 对象。该对象记录 inode 编号、当前读写偏移、打开权限和引用次数。
+
+``` c
+struct OpenFile {
+    int refs;
+    int kind;
+    efs_u32 inode;
+    efs_u32 offset;
+    unsigned flags;
+};
+```
+
+例如：
+
+``` c
+int main(void)
+{
+    const char message[] = "Hello, world!";
+    char buffer[sizeof(message)] = {0};
+    int fd = sys_open("filea", FS_CREATE | FS_WRONLY);
+    if (fd < 3 || sys_write(fd, message, sizeof(message)) != sizeof(message) ||
+        sys_close(fd) < 0) sys_exit(1);
+    fd = sys_open("filea", FS_RDONLY);
+    if (fd < 3 || sys_read(fd, buffer, sizeof(buffer)) != sizeof(buffer) ||
+        sys_read(fd, buffer, 1) != 0 || sys_close(fd) < 0) sys_exit(2);
+    if (strcmp(buffer, message) != 0) sys_exit(3);
+    printf("file_test passed!\n");
+    sys_exit(0);
+    return 0;
+}
+```
+
+流程是：
+
+1. `sys_open("filea", FS_CREATE | FS_WRONLY)` 进入内核。内核在根目录查找 `filea`；若不存在，就分配 inode 并添加目录项，然后返回 fd。
+2. `sys_write(fd, ...)` 根据 fd 找到 `OpenFile`，再根据 inode 和当前偏移写入数据块。写了多少字节，偏移就前进多少。
+3. `sys_close(fd)` 释放这个进程持有的描述符。**关闭不删除磁盘上的文件。**
+4. 再次以只读方式打开，从偏移 0 读回内容；读到末尾返回 0。
+
+用户程序有自己的地址空间，内核不能把用户传来的指针直接当成内核指针使用。因此系统调用先检查用户地址和读写权限，再**逐页复制**数据；即使缓冲区跨越两个内存页也能处理。
+
+`fork` 后，父子进程的 fd 指向同一个 `OpenFile`，因此共享读写偏移；引用次数保证一方关闭时，另一方仍可使用。进程退出时会关闭剩余描述符。
+
+## 为什么可以保存文件？
+
+以前用户程序被打包进内核，`exec` 按内核里的名字表找程序。这样程序并不是磁盘文件，文件系统也无法承担“保存程序”的工作。现在构建过程先编译用户程序，再由宿主机上的 C 工具把它们写入 `fs.img`。镜像工具 与内核共用 easy-fs 核心代码，只是前者通过宿主机文件读写块，后者通过 virtio 读写块。
+
+启动时内核先初始化磁盘、块缓存和文件系统，再从根目录找到 `initproc`。`exec` 也按名字找文件，检查它是否为有效的 RISC-V ELF，读取程序头，把需要的代码和数据逐页放入进程地址空间，最后切换到新程序入口。
+
+构建时只更新与用户程序同名的文件，其余文件保留，所以运行时写入的 `filea` 在重启后仍可读。`make fs-reset` 才会显式重建并清空镜像；原来的 `disk.img` 没有被覆盖。
 
 # 物理内存管理
 
@@ -9530,9 +12566,7 @@ apps[0] = name_with_ext;
 
 **遍历完目录项后，为什么要调用`qsort`对数组中的元素排序**
 
-因为 `readdir` 并不保证目录项返回顺序。
-
-如果不排序，不同构建过程中：
+因为 `readdir` 并不保证目录项返回顺序。如果不排序，不同构建过程中：
 
 ```c
 app_0 = hello
@@ -9884,6 +12918,20 @@ size_t get_num_app()
 
 ##### `get_app_data()`：找到 `.elf` 文件
 
+不是直接访问 Flash。当前应用程序在构建时由 `.incbin` **嵌入内核镜像的 `.data` 段**；内核链接脚本把该段放在从 `0x80200000` 开始的 RAM 地址范围内。
+
+`_num_app` 是链接器生成的地址表。`get_app_data()` 读取 `_num_app[app_id]` 作为应用 ELF 数据的起始地址，并用相邻两个地址算出大小。这个地址已经是**内核可以解引用的地址**。
+
+启用分页后，CPU 在执行 `_num_app[app_id]` 这样的内存读取时会查当前**内核页表**。这里的内核页表把内核 RAM 区域做了恒等映射，即虚拟地址和物理地址数值相同，所以代码里看不到显式转换。可以记成：
+
+```
+get_app_data() 拿到内核地址
+    → CPU 按内核页表自动翻译
+    → 读到 RAM 中嵌入的应用 ELF
+```
+
+**因此所有加载程序都是发生在内核态。**
+
 ``` c
 //加载ELF文件
 AppMetadata metadata = get_app_data(app_id + 1);	// 注意这里的 +1
@@ -10205,7 +13253,11 @@ int load_segment(elf64_ehdr_t *ehdr, ProcessControlBlock* proc)
 }
 ```
 
+### **进程的用户态虚拟地址空间分布**
 
+`ustack_base` 在加载 ELF 时确定：`load_segment () `找出所有 `PT_LOAD `段的最高结束地址 `max_end_va`，将它向上按页对齐，然后赋给 `proc->ustack_base`。
+
+![用户态地址空间分布](./assets/用户态地址空间分布.png)
 
 ### 进程
 
@@ -10246,11 +13298,43 @@ u64 current_thread_user_token(void) {
 }
 ```
 
-#### **进程的用户态虚拟地址空间分布**
+#### 删除进程
 
-`ustack_base` 在加载 ELF 时确定：`load_segment () `找出所有 `PT_LOAD `段的最高结束地址 `max_end_va`，将它向上按页对齐，然后赋给 `proc->ustack_base`。
+``` c
+void freeproc(ProcessControlBlock *p)
+{
+    // 不能删除自己
+    if (!p || !p->used || p == current_proc())
+        panic("freeproc: active");
+    // 删除这个进程下的所有线程
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (tasks[i].process == p) reap_thread(&tasks[i]);
+    proc_freepagetable(&p->pagetable, p->base_size);
+    memset(p, 0, sizeof(*p));
+}
 
-![用户态地址空间分布](./assets/用户态地址空间分布.png)
+
+/* 线程私有映射由线程资源回收负责；这里只回收共享 ELF 页和页表。 */
+void proc_freepagetable(PageTable* pagetable, u64 sz)
+{
+  uvmunmap(pagetable, floor_virts(virt_addr_from_size_t(TRAMPOLINE)), 1, 0);
+  uvmfree(pagetable, sz);
+}
+
+
+static void reap_thread(TaskControlBlock *t)
+{
+    ProcessControlBlock *p = t->process;
+    if (!p || t == current_thread()) panic("reap running thread");
+    u64 stack_bottom = t->ustack - PAGE_SIZE;
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom)), 1, 1);
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va)), 1, 1);
+    uvmunmap(&kernel_pagetable, floor_virts(virt_addr_from_size_t(t->kstack - PAGE_SIZE)), 1, 1);
+    sfence_vma();
+    p->tid_used[t->tid] = false;
+    memset(t, 0, sizeof(*t));
+}
+```
 
 ### 线程
 
@@ -10547,6 +13631,50 @@ static TaskContext tcx_init(u64 kstack_top)
     cx.ra = (reg_t)trap_return;
     cx.sp = kstack_top;
     return cx;
+}
+```
+
+#### 删除线程
+
+主要是**解除用户栈、内核栈、Trap 上下文的映射**：
+
+``` c
+static void reap_thread(TaskControlBlock *t)
+{
+    ProcessControlBlock *p = t->process;
+    if (!p || t == current_thread()) panic("reap running thread");
+    u64 stack_bottom = t->ustack - PAGE_SIZE;
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(stack_bottom)), 1, 1);
+    uvmunmap(&p->pagetable, floor_virts(virt_addr_from_size_t(t->trap_cx_va)), 1, 1);
+    uvmunmap(&kernel_pagetable, floor_virts(virt_addr_from_size_t(t->kstack - PAGE_SIZE)), 1, 1);
+    sfence_vma();
+    p->tid_used[t->tid] = false;
+    memset(t, 0, sizeof(*t));
+}
+```
+
+解除映射：
+
+``` c
+/* 取消映射 [vpn, vpn+npages); do_free 为真时一并释放物理页 */
+void uvmunmap(PageTable* pt, VirtPageNum vpn, u64 npages, int do_free)
+{
+    PageTableEntry* pte;
+    u64 a;
+    for (a = vpn.value; a < vpn.value + npages; a++)
+    {
+        pte = find_pte(pt,virt_page_num_from_size_t(a));
+        if(pte !=0 )
+        {
+            if(do_free)
+            {
+                u64 phyaddr = PTE2PA(pte->bits);
+                PhysPageNum ppn = floor_phys(phys_addr_from_size_t(phyaddr));
+                kfree(ppn);
+            }
+            *pte = PageTableEntry_empty();
+        }
+    }
 }
 ```
 
@@ -11542,479 +14670,7 @@ void trap_return()
 }
 ```
 
-# 实现系统调用
 
-以应用程序调用`sys_write()`函数为例：传入`fd`, `buf`, `len`等相关信息与系统调用号`__NR_write`，`sys_write()`本质上是`syscall()`系统调用的封装，将系统调用号传入`a7`寄存器，参数传入`a0,a1,a2`寄存器：
-
-``` c
-size_t sys_wirte(size_t fd, const char* buf, size_t len)
-{
-    syscall(__NR_write, fd, buf, len);  // 传入__NR_write系统调用号，在trap_handler中对此调用号进行处理
-}
-```
-
-然后触发`trap`也就是调用`__alltrap`：
-
-- 首先从`sscratch`寄存器获取保存`trapcontext`的地址，将应用程序的寄存器值保存进内核栈；
-
-- 其次将`a0`寄存器指向内核栈中保存用户态寄存器结构体的地址（使`__SYSCALL()`可以进行处理）；
-
-- 最后调用`trap_handler(TrapContext* cx)`；如果`scause`为 8 则调用`__SYSCALL()`依据内核栈中保存的用户态寄存器结构体值对不同系统调用号调用相关处理函数，如`__sys_write(arg1, arg2, arg3)`进行处理。
-
-## 系统调用号分发
-
-将系统调用号传入到`a7`寄存器，然后将传入的三个参数分别传入到`a0,a1,a2`寄存器，然后调用`ecall`指令进入内核的异常处理程序，调用完成后内核会将返回值放在`a0`寄存器中。
-
-``` c
-uint64_t syscall(size_t id, reg_t arg1, reg_t arg2, reg_t arg3) {
-
-    register uintptr_t a0 asm ("a0") = (uintptr_t)(arg1);
-    register uintptr_t a1 asm ("a1") = (uintptr_t)(arg2);
-    register uintptr_t a2 asm ("a2") = (uintptr_t)(arg3);
-    register uintptr_t a7 asm ("a7") = (uintptr_t)(id);
-
-    asm volatile ("ecall"
-		      : "+r" (a0)
-		      : "r" (a1), "r" (a2), "r" (a7)
-		      : "memory");
-    return a0;
-}
-
-
-void trap_handler()
-{
-    set_kernel_trap_entry();
-    TrapContext* cx = (TrapContext*)get_current_trap_cx();
-    reg_t scause = r_scause();
-    reg_t cause_code = scause & 0xfff;
-
-    if (scause & 0x8000000000000000ULL) {
-        switch (cause_code) {
-        case 5:
-            set_next_trigger();
-            schedule();
-            break;
-        default:
-            printk("undefined interrupt scause:%lx\n", scause);
-            panic("unexpected user interrupt");
-        }
-    } else {
-        switch (cause_code) {
-        case 8: {
-            /* exec 会覆写 sepc，必须先跳过 4 字节的 ecall 指令。 */
-            cx->sepc += 4;
-            uint64_t result = __SYSCALL(cx->a7, cx->a0, cx->a1, cx->a2);
-            /* 调度可能切换当前进程，返回值写入当前 trap 上下文。 */
-            cx = (TrapContext*)get_current_trap_cx();
-            cx->a0 = result;
-            break;
-        }
-        default:
-            printk("undefined exception scause:%lx sepc:%lx stval:%lx\n",
-                   scause, cx->sepc, r_stval());
-            panic("unexpected user exception");
-        }
-    }
-    trap_return();
-}
-
-
-uint64_t __SYSCALL(size_t syscall_id, reg_t arg1, reg_t arg2, reg_t arg3) {
-        switch (syscall_id)
-        {
-        
-        case __NR_write:
-            __sys_write(arg1, (const char*)arg2, arg3);
-            return arg3;
-        case __NR_read:
-            __sys_read(arg1, (const char*)arg2, arg3);
-            return arg3;
-        case __NR_sched_yield:
-            __sys_yield();
-            return 0;
-        case __NR_gettimeofday:
-            return __sys_gettime();
-        case __NR_exit:
-            __sys_exit(arg1);
-            return 0;
-        case __NR_clone:
-            return __sys_fork();
-        case __NR_execve:
-            return __sys_exec((const char*)arg2);
-        case __NR_waitid:
-            return __sys_wait();
-        default:
-            printk("Unsupported syscall id:%d\n",syscall_id);
-            return (uint64_t)-1;
-        }
-}
-```
-
-## `sys_write()`系统调用
-
-本质是应用层调用 `syscall()`，将 `fd`、`buf`、`len` 分别放入 `a0`、`a1`、`a2`，将系统调用号 `64` 放入 `a7`，然后执行 `ecall`。
-
-``` c
-uint64_t sys_write(size_t fd, const char* buf, size_t len)
-{
-    return syscall(__NR_write,fd,(reg_t)buf, len);
-}
-```
-
-陷入入口保存寄存器，切换 `satp` 到内核页表，再跳转到 `trap_handler()`。`trap_handler()`识别用户态 `ecall`，将保存的寄存器参数交给 `__SYSCALL()`。分发器找到 `__NR_write` 后调用 `__sys_write(fd, buf, len)`。
-
-``` c
-void __sys_write(size_t fd, const char* data, size_t len)
-{
-
-    if(fd == stdout || fd == stderr)
-    {
-
-       char* str =  translated_byte_buffer(data,len);
-       printk("%s",str);
-    }
-    else
-    {
-        panic("Unsupported fd in sys_write!");
-    }
-}
-```
-
-假设一个应用程序在应用地址空间调用了`sys_write()`函数，其中有个参数是`char *buf`，这里字符串存储的地址是在应用虚拟地址空间中，而执行`sys_write`函数时已经进入了内核虚拟地址空间，这需要我们手动查页表去访问，因此在`syscall.c`中定义了一个辅助函数：
-
-``` c
-/* 返回当前执行的应用程序的satp token*/
-u64 current_thread_user_token(void) {
-    return MAKE_SATP(current_proc()->pagetable.root_ppn.value);
-}
-
-char * translated_byte_buffer(const char* data , size_t len)
-{
-    u64  user_satp = current_thread_user_token();
-    PageTable  pt ;
-    pt.root_ppn.value = MAKE_PAGETABLE(user_satp);
-
-    u64 start_va = (u64)data;
-    u64 end_va = start_va + len;
-    VirtPageNum vpn = floor_virts(virt_addr_from_size_t(start_va));
-    PageTableEntry* pte = find_pte(&pt , vpn);
-    
-    //拿到物理页地址
-    int mask = ~( (1 << 10) -1 );
-    u64 phyaddr = ( pte->bits & mask) << 2 ;
-    //拿到偏移地址
-    u64 page_offset = start_va & 0xFFF;
-    u64 data_d = phyaddr + page_offset;
-    return (char*) data_d;
-}
-```
-
-## `sys_read()`系统调用
-
-使用OpenSBI提供的 API 封装为可调用的函数：
-
-``` c
-int sbi_console_getchar(void)
-{
-	struct sbiret ret;
-
-	ret = sbi_ecall(SBI_EXT_0_1_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
-
-	return ret.error;
-}
-```
-
-依据此函数来实现`sys_read`，应用程序就是调用这个函数来获取一个字符，内核在接受到用户态的系统调用时会进行分发，然后去调用`int sbi_console_getchar(void)`：
-
-``` c
-/* 获取一个字符 */
-char getchar()
-{
-    char data[1];
-    sys_read(stdin, data, 1);
-    return data[0];
-}
-
-int sys_read(size_t fd ,const char* buf , size_t len)
-{
-    return syscall(__NR_read,fd, buf, len);
-}
-
-void __sys_read(size_t fd, const char* data, size_t len)
-{
-    if(fd == stdin)
-    {
-        int c ;
-        assert( len == 1);
-        while (1)
-        {
-            c = sbi_console_getchar();
-            if(c != -1)
-                break;
-        }
-        char* str = translated_byte_buffer(data , len);
-        str[0]  = c;
-    }
-}
-```
-
-## `sys_fork()`系统调用
-
-`sys_fork()` 是一次**复制父进程地址空间并创建子进程主线程，并让父子进程从同一个位置继续执行**的操作。
-
-用户态 `sys_fork()` 发出编号为 `__NR_clone` 的 `ecall`，内核将它分派给 `__sys_fork()`。
-
-
-
-``` c
-/* fork: 复制当前进程, 子进程返回 0, 父进程返回子进程 pid */
-int sys_fork()
-{
-    return syscall(__NR_clone,0,0,0);
-}
-
-
-#define __NR_clone 220
-case __NR_clone:
-    return __sys_fork();
-```
-
-`_sys_fork()` **只支持由进程中唯一存活的 TID 0 线程调用**；如果还有其他线程（包括尚未回收的线程），返回 `-1`。
-
-``` c
-static int sole_main_thread(ProcessControlBlock *p)
-{
-    if (current_thread()->tid != 0 || p->live_threads != 1) return 0;
-    for (int i = 0; i < MAX_THREADS; i++)
-        if (tasks[i].process == p && &tasks[i] != current_thread()) return 0;
-    return 1;
-}
-
-
-int __sys_fork(void)
-{
-    // 通过当前线程获取所属的进程的 PID
-    ProcessControlBlock *parent = current_proc();
-    // 获取当前运行的线程的 TID
-    TaskControlBlock *old = current_thread();
-    // 如果当前进程中还有其他线程则失败
-    if (!sole_main_thread(parent))
-        return -1;
-    
-    /*.....*/
-}
-```
-
-### `allocproc`：子进程分配`PID`
-
-调用 `allocproc()`，为**子进程分配新 `PID`、新 PCB 和新用户页表**：
-
-``` c
-// 为新进程分配 PID、页表
-ProcessControlBlock *child = allocproc();
-if (!child) return -1;
-```
-
-### 复制`PID`中记录的信息
-
-然后复制父进程记录的**ELF 映射区结束范围、栈基址和入口地址**，并设置父子关系：
-
-``` c
-// 子进程继承父进程的 ELF 映射区结束地址（页对齐）
-child->base_size = parent->base_size;
-// 用户栈起始地址
-child->ustack_base = parent->ustack_base;
-// 入口函数地址
-child->entry = parent->entry;
-// 设置父子关系
-child->parent = parent;
-```
-
-### 按页复制可加载段
-
-把父进程的可加载的段进行复制和映射：
-
-- 首先**逐页**遍历父进程用户地址空间 [0, base_size]；
-- 通过`PTE`和页表**找到每页对应的物理地址**和页属性；
-- 分配一页新的内存，通过`memcpy`函数**把父进程页的内容复制到子进程当前分配的页中**； 
-- 在子进程的页表下，映射一页的虚拟地址和分配的物理地址；
-
-``` c
-/* 将父进程用户地址空间 [0, sz] 逐页复制到子进程新页表 */
-int uvmcopy(PageTable* old, PageTable* new, u64 sz)
-{
-    PageTableEntry* pte;
-    u64 i;
-    u8 flags;
-
-    for (i = 0; i < sz; i+=PAGE_SIZE)
-    {
-        // 找到父进程的 base_size 之前所有页对应的物理地址
-        VirtPageNum vpn = floor_virts(virt_addr_from_size_t(i));
-        pte = find_pte(old, vpn);
-
-        if (pte != 0)
-        {
-            /* 通过 PTE 找到对应的物理地址*/
-            u64 phyaddr = PTE2PA(pte->bits);
-            /* 通过 PTE 找到映射物理页的 flags */
-            flags = PTE_FLAGS(pte->bits);
-            
-            /* 分配一页新的物理内存 */
-            PhysPageNum ppn = kalloc();
-            if (!ppn.value) return -1;
-            u64 paddr = phys_addr_from_phys_page_num(ppn).value;
-            
-            /* 把父进程当前物理地址的内容拷贝到新分配的物理页 */
-            memcpy((void*)paddr,(void*)phyaddr,PAGE_SIZE);
-
-            /* 映射内存 */
-            if (PageTable_try_map(new, i, paddr, flags & ~PTE_V) < 0) {
-                kfree(ppn);
-                return -1;
-            }
-        }
-    }
-    return 0;
-}
-
-
-// uvmcopy() 遍历 ELF 映射范围 [0, base_size)：对父进程每个已映射页分配新的物理页、复制页内容，再以相同权限映射到子进程页表。这是逐页复制，父子之后修改这些页不会互相影响。用户栈和 TrapContext 不在这一范围内，下面单独处理。
-if (uvmcopy(&parent->pagetable, &child->pagetable, child->base_size) < 0) {
-    freeproc(child);
-    return -1;
-}
-```
-
-### **给子进程创建线程**
-
-分配子进程的 0 号线程的用户栈、内核栈和 TrapContext。
-
-``` c
-// make_thread() 给子进程创建 TID 0，
-TaskControlBlock *newt = make_thread(child, child->entry, 0, 0);
-if (!newt) {
-    freeproc(child);
-    return -1;
-}
-```
-
-### 复制父线程的用户栈和`TrapContext`
-
-随后**把父线程整页用户栈及 `TrapContext` 的内容复制过去，并将子 `TrapContext` 的 `sepc` 改成子线程的内核栈顶**： 
-
-``` c
-// 找到父进程的 0 号线程的用户栈的起始地址
-PageTableEntry *src = find_pte(&parent->pagetable, floor_virts(virt_addr_from_size_t(old->ustack - PAGE_SIZE)));
-// 找到子进程的 0 号线程的用户栈的起始地址
-PageTableEntry *dst = find_pte(&child->pagetable,  floor_virts(virt_addr_from_size_t(newt->ustack - PAGE_SIZE)));
-// 复制父进程的 0 号线程的用户栈的内容
-memcpy((void *)PTE2PA(dst->bits), (void *)PTE2PA(src->bits), PAGE_SIZE);
-// 复制父进程的 0 号线程的TRAPFRAME 的内容
-memcpy((void *)newt->trap_cx_paddr, (void *)old->trap_cx_paddr, sizeof(TrapContext));
-
-((TrapContext *)newt->trap_cx_paddr)->a0 = 0;
-((TrapContext *)newt->trap_cx_paddr)->kernel_sp = newt->kstack;
-
-return child->pid;
-} 
-```
-
-### 为什么父子返回值不同，却从同一位置继续？
-
-> 父线程走完当前这次内核调用，子线程跳过父线程的内核调用过程，直接从复制好的用户态现场开始。
-
-复制 `TrapContext` 时，父线程的 `sepc` 已指向 `ecall` **之后**；因此子线程恢复用户态后也从 `sys_fork()` 后面继续。内核显式把**子线程** `TrapContext` 的 `a0` 设为 `0`，而 `__sys_fork()` 向**父线程**返回子 PID，由 Trap 处理器写入父线程的 `a0`。
-
-```text
-同一条 ecall 之后
-├─ 父进程：sys_fork() 返回子 PID
-└─ 子进程：sys_fork() 返回 0
-```
-
-子线程的**内核 `TaskContext` 没有从父线程复制**：`make_thread()` 已将其初始化为“首次调度时进入 `trap_return`”。调度器选中子线程后，它会用子进程的用户页表和刚复制的用户 TrapContext 恢复现场。
-
-## 用户态 printf 实现
-
-因为之前的`printf()`函数是调用 OpenSBI 的指令来输出的，因此现在将之前的`printf()`修改名称为`printk()`作为内核输出函数。
-
-之前的应用程序是调用的`uint64_t sys_write(size_t fd, const char* buf, size_t len)`函数进行输出，因此把`sys_write()`封装为为`printf()`函数，用户态程序调用`printf()`先调用`sys_write()`再调用`printk()`函数进行输出。
-
-``` c
-int printf(const char* s, ...)
-{
-	int res = 0;
-	va_list vl;
-	va_start(vl, s);
-	res = vprintf(s, vl);
-	va_end(vl);
-	return res;
-}
-
-static char out_buf[1000];
-static int vprintf(const char* s, va_list vl)
-{
-	int res = _vsnprintf(NULL, -1, s, vl);
-	_vsnprintf(out_buf, res + 1, s, vl);
-	sys_write(stdout,out_buf,res + 1);  // 将 uart_puts 改成 sys_write就可以
-	return res;
-}
-```
-
-``` c
-int printk(const char* s, ...)
-{
-	int res = 0;
-	va_list vl;
-	va_start(vl, s);
-	res = _vprintf(s, vl);
-	va_end(vl);
-	return res;
-}
-
-static char out_buf[1000]; // buffer for _vprintf()
-static int _vprintf(const char* s, va_list vl)
-{
-	int res = _vsnprintf(NULL, -1, s, vl);
-	if (res+1 >= sizeof(out_buf)) {
-		uart_puts("error: output string size overflow\n");
-		while(1) {}
-	}
-	_vsnprintf(out_buf, res + 1, s, vl);
-	uart_puts(out_buf);
-	return res;
-}
-```
-
-## 重写 strlen/memcpy
-
-创建`string.c`：
-
-``` c
-#include "os.h"
-//计算字符串的长度 
-size_t strlen(const char *str)
-{
-    char *ptr = (char *)str;
-    while (*ptr != EOS)  // `\0`
-    {
-        ptr++;
-    }
-    return ptr - str;
-}
-
-
-// 从存储区 src 复制 n 个字节到存储区 dest。
-void* memcpy(void* dest, const void* src, size_t count)
-{
-    char *ptr = dest;
-    while (count--)
-    {
-        *ptr++ = *( (char*) (src++) );
-    }
-    return dest;
-}
-```
 # 实现分时抢占式任务调度
 
 分时多任务系统中任务的切换不是应用程序主动调用函数放弃CPU的使用权，而是**内核决定**何时切换任务。因此内核要有一个定时器，这个**定时器是通过硬件**提供的时钟中断来实现的。
@@ -12154,5 +14810,107 @@ void trap_handler()
 }
 ```
 
+# 实现`user_shell`
+
+## 启动 shell
+
+内核启动时装载`initproc`并运行它：
+
+``` c
+//加载 initproc 进程(app_0)
+load_app(0);
+app_init(0);
+```
+
+`initproc`调用`sys_exec("user_shell")`，因此 0 号进程中的主线程程序替换为 shell 程序。
+
+``` c
+int main()
+{
+    /* 0 号进程(initproc)直接 exec 成用户 shell */
+    sys_exec("user_shell");
+    return 0;
+}
+```
+
+## shell 程序
+
+辅助函数：`getchar()`每次通过`sys_read()`系统调用**读取一个字符**，内核从 SBI 控制台读取，暂时没有字符时调用调度器等待。
+
+``` c
+/* 获取一个字符 */
+char getchar()
+{
+    char data[1];
+    sys_read(stdin,data,1);
+    return data[0];
+}
+
+int sys_read(size_t fd ,const char* buf , size_t len)
+{
+    return syscall(__NR_read,fd,(reg_t)buf, len);
+}
+```
+
+普通字符会追加到`line`；退格键`0x08`会删掉末尾字符；回车`0x0d`且命令非空时，开始执行。
 
 
+
+``` c
+#include <timeros/types.h>
+#include <timeros/syscall.h>
+#include <timeros/string.h>
+
+#define LF 0x0a
+#define CR 0x0d   //enter
+#define DL 0x7f
+#define BS 0x08   // backspace
+#define BUFFER_SIZE 1024
+int main()
+{
+    printf("Timer os user shell\n");
+    printf(">> ");
+    char line[BUFFER_SIZE];
+    line[0] = '\0';
+    while (1)
+    {
+        char c = getchar();
+        switch (c)
+        {
+        case CR:
+            printf("\n");
+            if(strlen(line) > 0)
+            {
+                line[strlen(line)] = '\0';
+                int pid = sys_fork();
+                printf("pid:%d\n",pid);
+                if(pid==0)
+                {
+                    sys_exec(line);
+                } else if(pid > 0){
+                    /* sys_waitpid 声明为无参(内核 wait() 忽略 pid),
+                       GCC16 默认 C23 下 `()` 即 (void), 不能传参 */
+                    int status = sys_waitpid();
+                    printf("child proc exit:%d\n", status);
+                }
+                line[0] = '\0';
+                printf(">> ");
+            }
+            break;
+        case BS:
+            if (strlen(line) > 0)
+            {
+                printf("\b \b");
+                line[strlen(line) - 1] = '\0';
+            }
+            break;
+        default:
+            printf("%c",c);
+            strncat(line,(char*)&c,1);
+            break;
+        }
+    }
+
+    return 0;
+}
+```
