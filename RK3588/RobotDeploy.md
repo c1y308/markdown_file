@@ -1,10 +1,15 @@
+``` json
 {
-  "http.proxy": "http://127.0.0.1:7900",
+  "http.proxy": "http://127.0.0.1:7897",
   "http.proxySupport": "override",
-  "http.proxyStrictSSL": false,
-  "http.noProxy": ["127.0.0.1", "localhost", "::1"]
+  "http.proxyStrictSSL": true,
+  "http.noProxy": [
+    "127.0.0.1",
+    "localhost",
+    "::1"
+  ]
 }
-
+```
 # 重构内核
 
 ## 卸载原内核
@@ -214,6 +219,1009 @@ make modules ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- -C /home/dev/Luban
 sudo dpkg -i linux-image-6.1.99-rt36-rk3588_*_arm64.deb
 sudo dpkg -i linux-headers-6.1.99-rt36-rk3588_*_arm64.deb
 ```
+
+# 从`yaml`文件加载配置
+
+## 语法规则
+
+YAML（YAML Ain't Markup Language）是一种用**文本**表示结构化数据的格式。可以把它理解为：把 C++ 结构体里面的数据，按照一种人类容易阅读的方式，写到文本文件中。例如：
+
+``` yaml
+robot_name: go2
+num_dofs: 3
+model_path: models/policy.onnx
+enable_logging: true
+
+stiffness: [20.0, 25.0, 30.0]
+damping: [0.5, 0.6, 0.7]
+```
+
+这个文件表达了六个配置项。
+
+| YAML 中的内容          | 含义           | 对应的 C++ 类型       |
+| ---------------------- | -------------- | --------------------- |
+| `robot_name: go2`      | 机器人名字     | `std::string`         |
+| `num_dofs: 3`          | 关节自由度数量 | `int`                 |
+| `model_path: ...`      | 模型路径       | `std::string`         |
+| `enable_logging: true` | 是否记录日志   | `bool`                |
+| `stiffness: [...]`     | 关节刚度       | `std::vector<double>` |
+| `damping: [...]`       | 关节阻尼       | `std::vector<double>` |
+
+### 无变量类型
+
+YAML **不需要声明变量类型**。例如`num_dofs: 3`，它只是描述了一个键值对（Key-Value Pair）：
+
+- Key：`num_dofs`
+- Value：`3`
+
+**程序读取时再根据要求把 `3` 转换为 `int`**。
+
+### 三种基本节点类型
+
+**三种基本结点类型：标量（Scalar）、映射（Mapping）、序列（Sequence）**。
+
+- 标量（Scalar）：单个值：
+
+  ``` yaml
+  num_dofs: 12
+  robot_name: go2
+  ```
+
+- 映射（Mapping）：多个键值对：
+
+  ``` yaml
+  policy:
+    model_path: models/policy.onnx
+    action_scale: 0.25
+  ```
+
+- 序列（Sequence）：有顺序的一组值：
+
+  ``` yaml
+  joint_ids_map: [2, 0, 1]
+  ```
+
+  也可以写成：
+
+  ``` c++
+  joint_ids_map:
+    - 2
+    - 0
+    - 1
+  ```
+
+### 缩进非常重要
+
+例如：
+
+```yaml
+policy:
+  model_path: models/policy.onnx
+  action_scale: 0.25
+
+recorder:
+  directory: logs
+```
+
+`model_path` 和 `action_scale` 属于 `policy`；`directory` 属于 `recorder`。这和 C++ 中的嵌套结构体很相似：
+
+```c++
+struct PolicyConfig {
+    std::string model_path;
+    double action_scale;
+};
+
+struct RecorderConfig {
+    std::string directory;
+};
+
+struct RobotConfig {
+    PolicyConfig policy;
+    RecorderConfig recorder;
+};
+```
+
+一个值得注意的区别是，YAML 的**映射并不承诺元素顺序，但序列会保留顺序**。因此，在机器人控制中，关节列表应该使用 Sequence，而不是依赖 Mapping 中键的排列顺序。
+
+## `yaml-cpp`库
+
+C++ 标准库本身没有 YAML 解析器，因此一般使用第三方库。这里使用 yaml-cpp，它支持读取 YAML 文件、访问节点、转换类型等功能。
+
+### 安装库
+
+``` shell
+sudo apt update
+sudo apt install libyaml-cpp-dev
+```
+
+### 读取文件
+
+``` c++
+#include <yaml-cpp/yaml.h>
+
+YAML::Node config = YAML::LoadFile("deploy.yaml");
+```
+
+`YAML::LoadFile()` 将文件内容解析为 YAML 节点树。
+
+这里的 `YAML::Node` 是 yaml-cpp 提供的数据结构，可以**将整个 YAML 文件读取成一棵节点树 或 表示 YAML 文件中的标量、序列或者映射**。
+
+### 定位节点
+
+``` c++
+config["robot"]["name"]
+```
+
+它相当于从 YAML 文件中按照层级查找：
+
+``` text
+config
+  └── robot
+        └── name
+```
+
+###转换类型
+
+``` c++
+.as<std::string>()
+```
+
+表示将这个 YAML 节点转换为 C++ 的 `std::string`。类似地：
+
+``` c++
+.as<int>()
+.as<double>()
+.as<bool>()
+.as<std::vector<double>>()
+```
+
+### 解析节点
+
+``` c++
+config.robot.num_dofs = root["robot"]["num_dofs"].as<int>();
+```
+
+## 编写配置加载器
+
+> `src/inference/src/config/deploy_config.cpp`
+
+ `DeployConfigLoader` 把 YAML 解析、参数合法性检查和机器人特有的参数转换集中在一个类中完成。
+
+``` c
+deploy.yaml
+    │
+    ▼
+YAML::LoadFile()
+    │
+    ▼
+YAML::Node root
+    │
+    ▼
+DeployConfigLoader
+    │
+    ├── check_known_keys()       // 检查未知字段
+    ├── load_joint_topology()    // 加载关节映射
+    ├── load_motor_gains()       // 加载并重排 Kp/Kd
+    ├── load_default_joint_pos() // 加载默认关节位置
+    ├── load_commands()          // 检查速度指令配置
+    ├── load_action()            // 加载神经网络动作配置
+    └── load_observations()      // 加载观测参数
+    │
+    ▼
+RobotInterfaceConfig
+```
+
+### 调用示例
+
+> `src/inference/examples/policy_test.cpp`
+
+``` c++
+const std::string config_path = argc > 1 ? argv[1] : std::string(ROBOT_DEPLOY_CONFIG_PATH);
+
+inference::RobotInterfaceConfig cfg;
+std::string config_error;
+
+// 加载 yaml 配置文件，覆盖默认值
+if (!inference::load_deploy_config(config_path, cfg, config_error)) {
+    std::cerr << "[ERROR] Failed to load deploy config: "
+              << config_error << "\n";
+    return 1;
+}
+```
+
+
+
+### `DeployConfigLoader`
+
+#### 成员变量
+
+``` c++
+std::string root_dir_;								// 保存项目根目录，用来处理模型文件等相对路径。
+RobotInterfaceConfig& config_;						// 一个引用，直接指向调用者提供的 RobotInterfaceConfig。
+std::array<int, kDof> model_to_motor_index_{};		// 保存所有映射
+```
+
+### 核心调用函数
+
+#### `load_deploy_config()`：外部调用入口
+
+``` c++
+bool load_deploy_config(
+    const std::string& yaml_path,
+    RobotInterfaceConfig& config,
+    std::string& error)
+{
+    DeployConfigLoader loader(
+        ROBOT_INFERENCE_ROOT_DIR, config
+    );
+
+    return loader.load(yaml_path, error);
+}
+```
+
+它只是创建一个 `DeployConfigLoader` 对象，然后调用 `load()`，真正的 YAML 解析逻辑不在这里。
+
+#### `load()`：组织所有解析步骤
+
+将整个 YAML 文件读取成一棵节点树：
+
+``` c++
+bool load(const std::string& yaml_path, std::string& error)
+{
+    // 将整个 YAML 文件读取成一棵节点树
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(yaml_path);
+    } catch (const YAML::Exception& exception) {
+        error = "failed to parse deploy config " + yaml_path + ": " +
+                exception.what();
+        return false;
+    }
+```
+
+---
+
+**检查文件最外层是不是 Mapping（映射）**：
+
+``` c++
+    if (!root.IsMap()) {
+        error = "deploy config root must be a map: " + yaml_path;
+        return false;
+    }
+```
+
+例如：
+
+```yaml
+step_dt: 0.02
+stiffness: [20, 20, 20]
+damping: [0.5, 0.5, 0.5]
+```
+
+最外层是键值对集合，满足 `IsMap()`。而如果整个文件是：
+
+```yaml
+- robot
+- policy
+- control
+```
+
+最外层就是 Sequence（序列），不满足 `IsMap()`。
+
+---
+
+创建`config_`，**给模型路径添加绝对路径：**
+
+``` c++
+config_ = RobotInterfaceConfig{};
+
+config_.policy.model_path  = resolve_path(config_.policy.model_path).string();
+config_.recorder.directory = resolve_path(config_.recorder.directory.string());
+```
+
+---
+
+**检查必须存在的节点是否存在：**
+
+``` c++
+if (!check_known_keys(root,
+                      {"joint_ids_map", "step_dt", "stiffness",
+                       "damping", "default_joint_pos", "commands",
+                       "actions", "observations"},
+                      "root",
+                      error)) {
+    return false;
+}
+```
+
+---
+
+**加载节点：**
+
+``` c++
+    return load_joint_topology(root, error) &&
+           require_finite_positive(root, "step_dt", config_.policy.step_dt,
+                                   "root", error) &&
+           load_motor_gains(root, error) &&
+           load_default_joint_pos(root, error) &&
+           load_commands(root, error) &&
+           load_action(root, error) &&
+           load_observations(root, error);
+}
+```
+
+#### `load_joint_topology()`：读取 ID 映射
+
+读取配置：
+
+``` c++
+bool load_joint_topology(const YAML::Node& root, std::string& error)
+{
+    std::vector<int> joint_ids_map;
+    if (!read_int_vector(root, "joint_ids_map", "root",
+                         joint_ids_map, error)) {
+        return false;
+    }
+    if (joint_ids_map.size() != kDof) {
+        return fail("joint_ids_map must have " + std::to_string(kDof) +
+                    " elements, got " + std::to_string(joint_ids_map.size()),
+                    error);
+    }
+```
+
+检查索引是否重复：
+
+``` c++
+	// seen 来检查索引是否重复
+    std::vector<unsigned char> seen(kMotorCount, 0U);
+    for (std::size_t i = 0; i < joint_ids_map.size(); ++i) {
+        // 遍历获取模型顺序对应的电机索引
+        const int motor_index = joint_ids_map[i];
+        if (!index_in_range(motor_index, static_cast<int>(kMotorCount))) {
+            return fail("joint_ids_map element " + std::to_string(i) +
+                        " is out of motor range [0, " +
+                        std::to_string(kMotorCount) + "): " +
+                        std::to_string(motor_index), error);
+        }
+        auto& slot = seen[static_cast<std::size_t>(motor_index)];
+        if (slot != 0U) {
+            return fail("joint_ids_map must be a permutation; duplicate motor " +
+                        std::to_string(motor_index), error);
+        }
+        slot = 1U;
+    }
+
+```
+
+写入脚踝电机物理 ID：
+
+``` c++
+    // 模型末四轴依次为左 pitch、右 pitch、左 roll、右 roll；
+    // 对应的物理电机依次为左上、右上、左下、右下，由 YAML 指定。
+    auto& left = config_.joint_mapping.left_ankle_parallel;
+    auto& right = config_.joint_mapping.right_ankle_parallel;
+    left.upper_motor_index = joint_ids_map[left.model_pitch_dof];
+    left.lower_motor_index = joint_ids_map[left.model_roll_dof];
+    right.upper_motor_index = joint_ids_map[right.model_pitch_dof];
+    right.lower_motor_index = joint_ids_map[right.model_roll_dof];
+```
+
+写入其他电机物理 ID：
+
+``` c++
+    std::copy(joint_ids_map.begin(), joint_ids_map.end(),
+              model_to_motor_index_.begin());
+
+    config_.joint_mapping.model_to_motor_index.assign(
+        joint_ids_map.begin(),
+        joint_ids_map.begin() + kDirectDriveDofCount);
+
+    return true;
+}
+```
+
+#### `read_value()`：读取推理频率
+
+直接调用`read_value()`来读取单个节点的值：
+
+``` c++
+read_value(root, "step_dt", "root", config_.policy.step_dt, error)
+```
+
+#### `load_motor_gains()`：读取电机增益
+
+首先调用`read_double_array()`从节点读取`double`元素类型的数组：
+
+``` c++
+bool load_motor_gains(const YAML::Node& root, std::string& error)
+{
+    std::array<double, kDof> model_kp{};
+    std::array<double, kDof> model_kd{};
+    if (!read_double_array(root, "stiffness", "root",
+                           model_kp, error) ||
+        !read_double_array(root, "damping", "root",
+                           model_kd, error)) {
+        return false;
+    }
+    if (!finite_array(model_kp) || !finite_array(model_kd)) {
+        return fail("stiffness/damping values must be finite", error);
+    }
+```
+
+然后依据模型顺序遍历，将 KP 和 KD 写入 `config_`中：
+
+``` c++
+    for (std::size_t model_index = 0; model_index < kDof; ++model_index) {
+        
+        if (model_kp[model_index] < 0.0 || model_kd[model_index] < 0.0) {
+            return fail("stiffness/damping values must be non-negative",
+                        error);
+        }
+		// 找到模型 ID 对应的物理 ID
+        const auto motor_index = static_cast<std::size_t>(model_to_motor_index_[model_index]);
+        // 写入到依据 物理 ID 顺序存储的 config_
+        config_.motor.mit_kp[motor_index] = model_kp[model_index];
+        config_.motor.mit_kd[motor_index] = model_kd[model_index];
+    }
+```
+
+针对脚踝电机，检查模型顺序中最后 4 项的刚度 `kp` 必须相同，阻尼 `kd` 也必须相同：
+
+``` c++
+// constexpr std::size_t kDirectDriveDofCount = kDof - 4;  也就是从 8 开始
+
+	// 以第一个为基准
+	const double ankle_kp = model_kp[kDirectDriveDofCount];
+    const double ankle_kd = model_kd[kDirectDriveDofCount];
+	
+	// 将 9、10、11 和 8 号的进行比较
+    for (std::size_t model_index = kDirectDriveDofCount + 1; model_index < kDof; ++model_index) {
+        if (std::abs(model_kp[model_index] - ankle_kp) > kValueTolerance ||
+            std::abs(model_kd[model_index] - ankle_kd) > kValueTolerance) {
+            return fail("stiffness/damping for ankle motors must be identical", error);
+        }
+    }
+	
+	// 写入脚踝电机
+    config_.ankle_torque.virtual_kp = {ankle_kp, ankle_kp};
+    config_.ankle_torque.virtual_kd = {ankle_kd, ankle_kd};
+    return true;
+}
+```
+
+#### `load_default_joint_pos()`：读取电机初始角度
+
+``` c++
+bool load_default_joint_pos(const YAML::Node& root, std::string& error)
+{	
+    // 调用 read_double_array() 从 root/default_joint_pos 节点读取 double 类型的数组
+    if (!read_double_array(root, "default_joint_pos",
+                           "root", root_default_joint_pos_, error)) {
+        return false;
+    }
+    if (!finite_array(root_default_joint_pos_)) {
+        return fail("default_joint_pos values must be finite", error);
+    }
+    // 写入 config_ (模型顺序)
+    config_.action.default_joint_pos_rad = root_default_joint_pos_;
+    return true;
+}
+```
+
+#### `load_commands()`：读取速度范围
+
+``` yaml
+commands:
+  base_velocity:
+    ranges:
+      lin_vel_x: [-0.6, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.57, 1.57]
+      heading: null
+```
+
+首先读取`commands`节点，然后检查`commands`节点下只有`base_velocity`节点，并读取`base_velocity`节点：
+
+``` c++
+bool load_commands(const YAML::Node& root, std::string& error)
+{
+    YAML::Node commands;
+    if (!read_map(root, "commands", "root", commands, error)) {
+        return false;
+    }
+    // commands 节点下只允许有 base_velocity 子节点
+    if (!check_known_keys(commands, {"base_velocity"},
+                          "commands", error)) {
+        return false;
+    }
+
+    YAML::Node base_velocity;
+    if (!read_map(commands, "base_velocity", "commands",
+                  base_velocity, error)) {
+        return false;
+    }
+    
+```
+
+然后然后检查`base_velocity`节点下只有`ranges`节点，并读取`ranges`节点：
+
+``` c++
+    // 检查子节点
+	if (!check_known_keys(base_velocity, {"ranges"},
+                          "commands.base_velocity", error)) {
+        return false;
+    }
+	// 读取子节点
+    YAML::Node ranges;
+    if (!read_map(base_velocity, "ranges", "commands.base_velocity",
+                  ranges, error)) {
+        return false;
+    }
+```
+
+最后从`ranges`节点下读取子节点`lin_vel_x`d等：
+
+``` c++
+    // 检查子节点
+	if (!check_known_keys(ranges, {"lin_vel_x", "lin_vel_y",
+                                   "ang_vel_z", "heading"},
+                          "commands.base_velocity.ranges", error)) {
+        return false;
+    }
+	
+	// 读取子节点
+    const auto read_range = [&](const char* key, std::optional<std::array<double, 2>>& output) {
+        std::array<double, 2> range;
+        if (!read_double_pair(ranges, key, "commands.base_velocity.ranges", range, error)) {
+            return false;
+        }
+        output = range;
+        return true;
+    };
+
+    return read_range("lin_vel_x", config_.command_ranges.lin_vel_x) &&
+           read_range("lin_vel_y", config_.command_ranges.lin_vel_y) &&
+           read_range("ang_vel_z", config_.command_ranges.ang_vel_z) &&
+           check_null(ranges, "heading", "commands.base_velocity.ranges", error);
+}
+```
+
+#### `load_action()`：读取电机处理参数
+
+``` yaml
+actions:
+  JointPositionAction:
+    clip:
+    - [-0.22, 0.22]
+    - [-0.22, 0.22]
+    - [-0.28, 0.35]
+    - [-0.28, 0.35]
+    - [-0.16, 0.16]
+    - [-0.16, 0.16]
+    - [-0.22, 0.55]
+    - [-0.22, 0.55]
+    - [-0.14, 0.2]
+    - [-0.14, 0.2]
+    - [-0.12, 0.12]
+    - [-0.12, 0.12]
+    joint_names: [.*]
+    scale: [0.16, 0.16, 0.32, 0.32, 0.1, 0.1, 0.55, 0.55, 0.18, 0.18, 0.1, 0.1]
+    offset: [0.0, 0.0, -0.2, -0.2, 0.0, 0.0, 0.2, 0.2, -0.05, -0.05, 0.0, 0.0]
+    raw_action_clip: 1.0
+    min_inference_delay: 0
+    max_inference_delay: 0
+    min_communication_delay: 0
+    max_communication_delay: 0
+    joint_ids: null
+```
+
+首先读取`action`节点，然后检查是否只存在`JointPositionAction`节点：
+
+``` c++
+bool load_action(const YAML::Node& root, std::string& error)
+{
+    YAML::Node actions;
+    if (!read_map(root, "actions", "root", actions, error)) {
+        return false;
+    }
+    if (!check_known_keys(actions, {"JointPositionAction"},
+                          "actions", error)) {
+        return false;
+    }
+
+    YAML::Node action;
+    if (!read_map(actions, "JointPositionAction", "actions",
+                  action, error)) {
+        return false;
+    }
+```
+
+然后检查`JointPositionAction`下的节点：
+
+``` c++
+    // delay 字段保留为兼容键，不读取或校验其值。
+    if (!check_known_keys(action, {"clip", "joint_names", "scale",
+                                   "offset", "raw_action_clip",
+                                   "min_inference_delay",
+                                   "max_inference_delay",
+                                   "min_communication_delay",
+                                   "max_communication_delay",
+                                   "joint_ids"},
+                          "actions.JointPositionAction", error)) {
+        return false;
+    }
+```
+
+然后从`JointPositionAction`节点下的`clip`节点加载`action_clip`以及`scale`：
+
+``` c++
+	// 加载 `action_clip`以及`scale` 节点
+	if (!load_action_clip(action, error) || !read_double_array(action, "scale",
+                           "actions.JointPositionAction",
+                           config_.action.action_scale, error)) {
+        return false;
+    }
+	// 检查数组是否都是有限值
+    if (!finite_array(config_.action.action_scale)) {
+        return fail("actions.JointPositionAction scale values must be finite",
+                    error);
+    }
+    for (double scale : config_.action.action_scale) {
+        if (scale <= 0.0) {
+            return fail("actions.JointPositionAction scale must be > 0 "
+                        "for every model DOF", error);
+        }
+	}
+```
+
+``` c++
+bool load_action_clip(const YAML::Node& action, std::string& error)
+{
+    // 读取 clip 节点
+    const YAML::Node clip = action["clip"];
+    if (!clip.IsDefined() || !clip.IsSequence()) {
+        return fail("actions.JointPositionAction missing required "
+                    "sequence key: clip", error);
+    }
+    if (clip.size() != kDof) {
+        return fail("actions.JointPositionAction.clip must have " +
+                    std::to_string(kDof) + " ranges, got " +
+                    std::to_string(clip.size()), error);
+    }
+	// 遍历 clip 节点下的序列
+    for (std::size_t i = 0; i < kDof; ++i) {
+        const YAML::Node range = clip[i];
+        if (!range.IsSequence() || range.size() != 2) {
+            return fail("actions.JointPositionAction.clip[" +
+                        std::to_string(i) + "] must be [lower, upper]",
+                        error);
+        }
+        // 将值写入到 config_
+        try {
+            config_.action.action_clip[i][0] = range[0].as<double>();
+            config_.action.action_clip[i][1] = range[1].as<double>();
+        } catch (const YAML::BadConversion&) {
+            return fail("actions.JointPositionAction.clip[" +
+                        std::to_string(i) + "] must be two numbers",
+                        error);
+        }
+    }
+    return true;
+}
+```
+
+读取`raw_action_clip`：
+
+``` c++
+    const YAML::Node raw_action_clip = action["raw_action_clip"];
+    if (!raw_action_clip.IsDefined()) {
+        return fail("actions.JointPositionAction missing required key: "
+                    "raw_action_clip", error);
+    }
+    if (raw_action_clip.IsNull()) {
+        config_.action.raw_action_clip.reset();
+    } else {
+        double clip = 0.0;
+        if (!read_value(action, "raw_action_clip", "actions.JointPositionAction",
+                        clip, error)) {
+            return false;
+        }
+        config_.action.raw_action_clip = clip;
+    }
+}
+```
+
+#### `load_observations()`：读取观测帧处理参数
+
+``` c++
+observations:
+  base_ang_vel:
+    params: {}
+    clip: null
+    scale: [0.2, 0.2, 0.2]
+    history_length: 15
+  projected_gravity:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0]
+    history_length: 15
+  velocity_commands:
+    params: {command_name: base_velocity}
+    clip: null
+    scale: [1.0, 1.0, 1.0]
+    history_length: 15
+  /*...*/
+
+
+```
+
+首先读取`observations`节点，然后检查`observations`节点下的子节点：
+
+``` c++
+bool load_observations(const YAML::Node& root, std::string& error)
+{
+    YAML::Node observations;
+    if (!read_map(root, "observations", "root", observations, error)) {
+        return false;
+    }
+    if (!check_known_keys(observations, {"base_ang_vel",
+                                         "projected_gravity",
+                                         "velocity_commands",
+                                         "gait_phase",
+                                         "joint_pos_rel",
+                                         "joint_vel_rel",
+                                         "last_action"},
+                          "observations", error)) {
+        return false;
+    }
+```
+
+判断是否启用步态相位，如果启用读取`gait_phase`：
+
+``` c++
+    const YAML::Node gait_phase = observations["gait_phase"];
+    config_.policy.gait.enabled = gait_phase.IsDefined();
+    if (config_.policy.gait.enabled) {
+        if (!load_observation_item(observations, "gait_phase",
+                                   config_.observation_scales.gait_phase_scale, error)) {
+            return false;
+        }
+        YAML::Node params;
+        if (!read_map(gait_phase, "params", "observations.gait_phase", params, error) ||
+            !read_value(params, "period", "observations.gait_phase.params",
+                        config_.policy.gait.period, error)) {
+            return false;
+        }
+    }
+```
+
+读取`base_ang_vel`、`projected_gravity`、`velocity_commands`、`joint_pos_rel`、`joint_vel_rel`、`last_action`的缩放参数：
+
+``` c++
+    if (!load_observation_item(observations, "base_ang_vel",
+                               config_.observation_scales.body_ang_vel_scale, error) ||
+        !load_observation_item(observations, "projected_gravity",
+                               config_.observation_scales.projected_gravity_scale, error) ||
+        !load_observation_item(observations, "velocity_commands",
+                               config_.observation_scales.command_scale, error) ||
+        !load_observation_item(observations, "joint_pos_rel",
+                               config_.observation_scales.dof_pos_scale, error) ||
+        !load_observation_item(observations, "joint_vel_rel",
+                               config_.observation_scales.dof_vel_scale, error) ||
+        !load_observation_item(observations, "last_action",
+                               config_.observation_scales.last_action_scale, error)) {
+        return false;
+    }
+    return true;
+}
+```
+
+##### `load_observation_item()`：读取子节点
+
+首先检查子节点：
+
+``` c++
+template <std::size_t N>
+bool load_observation_item(const YAML::Node& observations,
+                           const char* name,
+                           std::array<double, N>& output,
+                           std::string& error)
+{
+    const std::string node_path = std::string("observations.") + name;
+    YAML::Node item;
+    if (!read_map(observations, name, "observations", item, error)) {
+        return false;
+    }
+    // params 由对应观测分支按需读取；clip 仅保留为兼容键。
+    if (!check_known_keys(item, {"params", "clip", "scale",
+                                 "history_length"},
+                          node_path, error)) {
+        return false;
+    }
+```
+
+读取`name`下的`scale`子节点：
+
+``` c++
+    if (!read_double_array(item, "scale", node_path, output, error)) {
+        return false;
+    }
+    if (!finite_array(output)) {
+        return fail(node_path + " scale values must be finite", error);
+    }
+```
+
+读取`history_length`的值：
+
+``` c++
+    int history_length = 0;
+    if (!read_value(item, "history_length", node_path, history_length, error)) {
+        return false;
+    }
+    if (history_length != static_cast<int>(policy_observation::kFrameStack)) {
+        return fail(node_path + " history_length must equal the compiled "
+                    "frame stack (" +
+                    std::to_string(policy_observation::kFrameStack) +
+                    "), got " + std::to_string(history_length), error);
+    }
+    return true;
+}
+```
+
+
+
+### 辅助函数
+
+#### `resolve_path()`
+
+把字符串转换为`std::filesystem::path`，并和`root_dir_`完成拼接：
+
+``` c++
+std::filesystem::path resolve_path(const std::string& raw) const
+{
+    std::filesystem::path path(raw);
+    if (path.is_absolute() || root_dir_.empty()) {
+        return path;
+    }
+    return std::filesystem::path(root_dir_) / path;
+}
+```
+
+#### `read_map()`：读取`map`类型子节点
+
+``` c++
+static bool read_map(const YAML::Node& parent_node,
+                     const char* key,
+                     const std::string& node_path,
+                     YAML::Node& output,
+                     std::string& error)
+{
+    const YAML::Node node = parent_node[key];
+    if (!node.IsDefined() || !node.IsMap()) {
+        return fail(node_path + " missing required map key: " + key, error);
+    }
+    output = node;
+    return true;
+}
+```
+
+#### `check_known_keys()`：检查有无错误节点名
+
+``` c++
+// node 已由根节点检查或 require_map() 确认为 Map。
+static bool check_known_keys(const YAML::Node& node,
+                             const std::set<std::string>& allowed,
+                             const std::string& node_path,
+                             std::string& error)
+{
+    for (const auto& kv : node) {
+        std::string key;
+        try {
+            key = kv.first.as<std::string>();
+        } catch (const YAML::BadConversion&) {
+            return fail(node_path + " contains a non-string key", error);
+        }
+        if (allowed.find(key) == allowed.end()) {
+            return fail(node_path + " contains unknown key: " + key, error);
+        }
+    }
+    return true;
+}
+```
+
+#### `read_value()`：读取到基本类型
+
+为一个函数模板：
+
+``` c++
+template <typename T>
+static bool read_value(const YAML::Node& parent_node,	// 父节点
+                       const char* key,					// 要读取的子节点名
+                       const std::string& node_path,	// 父节点的 string，用于生成错误信息
+                       T& output,						// 读取到哪里
+                       std::string& error)
+{
+    // 从父节点获取当前节点
+    const YAML::Node node = parent_node[key];
+    if (!node.IsDefined() || !node.IsScalar()) {
+        return fail(node_path + " missing required scalar key: " + key, error);
+    }
+    // 从节点读取值
+    try {
+        output = node.as<T>();
+    } catch (const YAML::BadConversion&) {
+        return fail(node_path + " key " + key + " has the wrong type", error);
+    }
+    return true;
+}
+```
+
+#### `read_double_array()`：读取`double`类型的数组
+
+``` c++
+template <std::size_t N>
+static bool read_double_array(const YAML::Node& parent_node,	// 父节点
+                              const char* key,					// 要读取的子节点名
+                              const std::string& node_path,
+                              std::array<double, N>& output,
+                              std::string& error)
+{
+    const YAML::Node node = parent_node[key];
+    if (!node.IsDefined() || !node.IsSequence()) {
+        return fail(node_path + " missing required sequence key: " + key, error);
+    }
+    if (node.size() != N) {
+        return fail(node_path + " key " + key + " must have " +
+                    std::to_string(N) + " elements, got " +
+                    std::to_string(node.size()), error);
+    }
+    // 遍历读取
+    for (std::size_t i = 0; i < N; ++i) {
+        try {
+            output[i] = node[i].as<double>();
+        } catch (const YAML::BadConversion&) {
+            return fail(node_path + " key " + key + " element " +
+                        std::to_string(i) + " is not a number", error);
+        }
+    }
+    return true;
+}
+```
+
+#### `read_double_pair()`：读取到`double`类型的 pair（`array<double, 2>`）
+
+``` c++
+static bool read_double_pair(const YAML::Node& parent_node,	// 父节点
+                             const char* key,				// 要读取的子节点名
+                             const std::string& node_path,	
+                             std::array<double, 2>& output,
+                             std::string& error)
+{
+    const YAML::Node node = parent_node[key];
+    if (!node.IsDefined() || !node.IsSequence()) {
+        return fail(node_path + " missing required sequence key: " + key, error);
+    }
+    if (node.size() != 2) {
+        return fail(node_path + " key " + key + " must be [min, max]", error);
+    }
+    try {
+        output[0] = node[0].as<double>();
+        output[1] = node[1].as<double>();
+    } catch (const YAML::BadConversion&) {
+        return fail(node_path + " key " + key + " must be two numbers", error);
+    }
+    
+    if (!std::isfinite(output[0]) || !std::isfinite(output[1])) {
+        return fail(node_path + " key " + key + " values must be finite", error);
+    }
+    if (output[0] > output[1]) {
+        return fail(node_path + " key " + key + " min must be <= max", error);
+    }
+    return true;
+}
+```
+
+
 
 # 线程
 
@@ -1138,9 +2146,43 @@ Logger            SCHED_OTHER
 | `infer_log`                 | CPU0–1，SCHED_OTHER                    | CSV 写入，默认每 1 s 或退出时 flush                      |
 | `motor_status` / `rt_event` | CPU0–1，SCHED_OTHER                    | 公共状态发布和实时事件转发；电机 controller.start 中启动 |
 
-## 配置实时线程
+## 程序调用
 
-### `ThreadRuntimeOptions`
+> src/inference/examples/policy_test.cpp
+
+``` c++
+// 配置各个线程参数
+cfg.runtime = inference::make_rk3588_runtime_profile();
+
+// 检查 RK3588 部署环境是否满足要求
+if (cfg.runtime.require_host_preflight && !robot_base::environment_check(config_error)) {
+    std::cerr << "[ERROR] RK3588 RT host preflight failed: " << config_error << "\n";
+    return 1;
+}
+
+// 配置主线程
+const robot_base::ThreadSetupResult main_setup =
+      robot_base::configure_current_thread("policy_main",
+                                         cfg.runtime.policy_main);
+if (!main_setup.success) {
+    std::cerr << "[ERROR] Failed to configure policy_main: "
+              << main_setup.error << "\n";
+    return 1;
+}
+
+// 在inference::RobotInterface robot.initialize() 中配置其他线程
+if (!robot.initialize()) {
+    safe_shutdown(robot);
+    std::cerr << "[ERROR] robot.initialize() failed.\n";
+    return 1;
+}
+```
+
+## 设置配置参数
+
+### `ThreadRuntimeOptions`：保存线程属性
+
+`src/inference/include/thread/thread_runtime.hpp`
 
 `ThreadRuntimeOptions`存储每个线程的**实时性配置参数**：
 
@@ -1161,6 +2203,8 @@ struct ThreadRuntimeOptions {
 };
 ```
 
+### `make_thread_options()`：配置线程属性
+
 通过`make_thread_options()`将传入的配置参数配置为`ThreadRuntimeOptions`结构体：
 
 ``` c++
@@ -1179,10 +2223,13 @@ inline robot_base::ThreadRuntimeOptions make_thread_options(
 }
 ```
 
-### `RuntimeThreadingConfig`
+### 封装使用
+
+#### `RuntimeThreadingConfig`：保存所有线程配置
+
+> `src/inference/include/robot/robot_config.hpp`
 
 ``` c
-// src/inference/include/robot/robot_config.hpp
 struct RuntimeThreadingConfig {
     bool require_host_preflight{false};			// 是否需要硬件环境检查
     bool require_process_memory_lock{false};	// 是否需要锁内存
@@ -1207,6 +2254,10 @@ struct RobotInterfaceConfig {
     RuntimeThreadingConfig runtime;
 };
 ```
+
+#### `make_rk3588_runtime_profile()`：构造配置所有线程属性
+
+> `src/inference/include/robot/robot_config.hpp`
 
 最终向外暴露`make_rk3588_runtime_profile`，**通过此函数得到配置完毕的`RuntimeThreadingConfig`**：
 
@@ -1244,66 +2295,9 @@ inline RuntimeThreadingConfig make_rk3588_runtime_profile()
 cfg.runtime = inference::make_rk3588_runtime_profile();
 ```
 
-### 硬件环境检查
+## 依据参数配置线程
 
-#### `environment_check()`
-
-``` c
-// src/inference/examples/policy_test.cpp 中调用
-if (cfg.runtime.require_host_preflight && !robot_base::environment_check(config_error)) {
-    std::cerr << "[ERROR] RK3588 RT host preflight failed: "
-              << config_error << "\n";
-    return 1;
-}
-```
-
-`environment_check`中调用`deploy/rk3588/robot-rt-setup.sh`进行硬件环境检查：
-
-``` c
-// 调用固定 RK3588 部署脚本检查当前环境；检查规则由 robot-rt-setup 维护。
-inline bool environment_check(std::string& error)
-{
-    error.clear();
-    char executable[] = "/usr/local/sbin/robot-rt-setup";
-    char check[] = "check";
-    char* arguments[] = {executable, check, nullptr};
-    pid_t child;
-    const int spawn_error = ::posix_spawn(
-        &child, executable, nullptr, nullptr, arguments, environ);
-    if (spawn_error != 0) {
-        error = std::string("cannot execute /usr/local/sbin/robot-rt-setup check: ") +
-            std::strerror(spawn_error);
-        return false;
-    }
-
-    int status;
-    pid_t waited;
-    do {
-        waited = ::waitpid(child, &status, 0);
-    } while (waited == -1 && errno == EINTR);
-    if (waited == -1) {
-        error = std::string("cannot wait for robot-rt-setup check: ") + std::strerror(errno);
-        return false;
-    }
-    if (WIFEXITED(status)) {
-        if (WEXITSTATUS(status) == 0) {
-            return true;
-        }
-        error = "robot-rt-setup check failed: exit_status=" + std::to_string(WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-        error = "robot-rt-setup check terminated: signal=" + std::to_string(WTERMSIG(status));
-    } else {
-        error = "robot-rt-setup check did not exit normally";
-    }
-    return false;
-}
-```
-
-#### `robot-rt-setup.sh`
-
-### 线程配置函数
-
-#### `ThreadSetupResult`：存储配置结果
+### `ThreadSetupResult`：存储配置结果
 
 ``` c
 // src/base/include/rt_thread_config/thread_runtime.hpp
@@ -1313,90 +2307,40 @@ struct ThreadSetupResult {
     std::string error;
 };
 ```
+### `prefault_current_thread_stack()`：建立栈页映射
 
-#### `start_configured_thread()`：启动并配置线程
-
-```c
-// 启动配置好的线程（用启动握手消除竞态）
-template <typename Callable>
-bool start_configured_thread(std::thread& output,   // 线程对象
-                             const char*  name,     // 线程名称
-                             const ThreadRuntimeOptions& options,   // 线程运行时选项
-                             Callable&& callable,   // 线程执行函数
-                             std::string& error)
+``` c++
+[[gnu::noinline]] int prefault_current_thread_stack(
+    std::size_t bytes) noexcept
 {
-    if (output.joinable()) {
-        error = "thread is already joinable";
-        return false;
+    if (bytes == 0U) {
+        return 0;
+    }
+    if (bytes > kMaxStackPrefaultBytes) {
+        return E2BIG;
     }
 
-    // 一次性结果发送端（producer）
-    std::promise<ThreadSetupResult> setup_promise;
-    // 一次性结果接收端（consumer）
-    std::future<ThreadSetupResult>  setup_future = setup_promise.get_future();
-
-    try {
-        output = std::thread(
-            [name_string = std::string(name ? name : ""),
-             options,
-             setup_promise = std::move(setup_promise),
-             function      = std::forward<Callable>(callable)
-            ] () mutable {
-
-                ThreadSetupResult setup;
-
-                // 配置子线程
-                try {
-                    setup = configure_current_thread(name_string.c_str(), options);
-                } catch (const std::exception& exception) {
-                    setup.error = std::string("thread setup exception: ") +
-                                  exception.what();
-                } catch (...) {
-                    setup.error = "thread setup exception";
-                }
-
-                // 传递配置结果给主线程
-                setup_promise.set_value(setup);
-
-                // 配置成功才执行线程函数（保证业务函数绝不会在配置成功前执行）
-                if (setup.success) {
-                    function();
-                }
-            });
-    } catch (const std::exception& exception) {
-        error = std::string("failed to create thread: ") + exception.what();
-        return false;
-    } catch (...) {
-        error = "failed to create thread";
-        return false;
+    errno = 0;
+    const long page_size_value = ::sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0) {
+        return errno != 0 ? errno : EINVAL;
     }
 
-    // 父线程等待子线程配置完成（阻塞等待，直到子线程调用 set_value() 或者异常退出）
-    ThreadSetupResult setup;
-    try {
-        setup = setup_future.get();  // 阻塞行为（休眠-唤醒）
-    } catch (const std::exception& exception) {
-        error = std::string("thread setup handshake failed: ") +
-                exception.what();
-        if (output.joinable()) {
-            output.join();
-        }
-        return false;
+    const std::size_t page_size = static_cast<std::size_t>(page_size_value);
+    const std::size_t rounded_bytes =
+        ((bytes + page_size - 1U) / page_size) * page_size;
+    volatile unsigned char* const stack_pages =
+        static_cast<volatile unsigned char*>(::alloca(rounded_bytes));
+    for (std::size_t offset = 0; offset < rounded_bytes; offset += page_size) {
+        stack_pages[offset] = 0U;
     }
-    if (!setup.success) {
-        error = setup.error;
-        if (output.joinable()) {
-            output.join();
-        }
-        return false;
-    }
+    stack_pages[rounded_bytes - 1U] = 0U;
 
-    error.clear();
-    return true;
+    return 0;
 }
 ```
 
-#### `configure_current_thread()`：依据参数配置线程
+### `configure_current_thread()`：依据参数配置线程
 
 首先**检测线程名称的合法性**，如果合法则通过`pthread_setname_np`设置线程名称：
 
@@ -1508,315 +2452,357 @@ inline ThreadSetupResult configure_current_thread(
     return success;
 }
 ```
-#### `initialize()`：编排线程初始化
+
+### `start_configured_thread()`：启动并配置线程
+
+> `src/inference/include/thread/thread_runtime.hpp`：函数模板必须定义在头文件。
+
+```c
+// 启动配置好的线程（用启动握手消除竞态）
+template <typename Callable>
+bool start_configured_thread(std::thread& output,   // 线程句柄对象
+                             const char*  name,     // 线程名称
+                             const ThreadRuntimeOptions& options,   // 线程运行时选项
+                             Callable&& callable,   				// 线程执行函数
+                             std::string& error)
+{
+    if (output.joinable()) {
+        error = "thread is already joinable";
+        return false;
+    }
+
+    // 一次性结果发送端（producer）
+    std::promise<ThreadSetupResult> setup_promise;
+    // 一次性结果接收端（consumer）
+    std::future<ThreadSetupResult>  setup_future = setup_promise.get_future();
+
+    try {
+        output = std::thread(
+            [name_string = std::string(name ? name : ""),
+             options,
+             setup_promise = std::move(setup_promise),
+             function      = std::forward<Callable>(callable)
+            ] () mutable {
+
+                ThreadSetupResult setup;
+
+                // 配置子线程
+                try {
+                    setup = configure_current_thread(name_string.c_str(), options);
+                } catch (const std::exception& exception) {
+                    setup.error = std::string("thread setup exception: ") +
+                                  exception.what();
+                } catch (...) {
+                    setup.error = "thread setup exception";
+                }
+
+                // 传递配置结果给主线程
+                setup_promise.set_value(setup);
+
+                // 配置成功才执行线程函数（保证业务函数绝不会在配置成功前执行）
+                if (setup.success) {
+                    function();
+                }
+            });
+    } catch (const std::exception& exception) {
+        error = std::string("failed to create thread: ") + exception.what();
+        return false;
+    } catch (...) {
+        error = "failed to create thread";
+        return false;
+    }
+
+    // 父线程等待子线程配置完成（阻塞等待，直到子线程调用 set_value() 或者异常退出）
+    ThreadSetupResult setup;
+    try {
+        setup = setup_future.get();  // 阻塞行为（休眠-唤醒）
+    } catch (const std::exception& exception) {
+        error = std::string("thread setup handshake failed: ") +
+                exception.what();
+        if (output.joinable()) {
+            output.join();
+        }
+        return false;
+    }
+    if (!setup.success) {
+        error = setup.error;
+        if (output.joinable()) {
+            output.join();
+        }
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+```
+
+## 硬件环境检查
+
+### `environment_check()`
 
 ``` c
-/* 编排机器人完整运行态：电机、策略、IMU 和站立姿态复位。 */
-bool RobotInterface::initialize() {
+// src/inference/examples/policy_test.cpp 中调用
+if (cfg.runtime.require_host_preflight && !robot_base::environment_check(config_error)) {
+    std::cerr << "[ERROR] RK3588 RT host preflight failed: "
+              << config_error << "\n";
+    return 1;
+}
+```
 
-    if (!initialize_model_processors()) {
+`environment_check`中调用`deploy/rk3588/robot-rt-setup.sh`进行硬件环境检查：
+
+``` c
+// 调用固定 RK3588 部署脚本检查当前环境；检查规则由 robot-rt-setup 维护。
+inline bool environment_check(std::string& error)
+{
+    error.clear();
+    char executable[] = "/usr/local/sbin/robot-rt-setup";
+    char check[] = "check";
+    char* arguments[] = {executable, check, nullptr};
+    pid_t child;
+    const int spawn_error = ::posix_spawn(
+        &child, executable, nullptr, nullptr, arguments, environ);
+    if (spawn_error != 0) {
+        error = std::string("cannot execute /usr/local/sbin/robot-rt-setup check: ") +
+            std::strerror(spawn_error);
+        return false;
+    }
+
+    int status;
+    pid_t waited;
+    do {
+        waited = ::waitpid(child, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    if (waited == -1) {
+        error = std::string("cannot wait for robot-rt-setup check: ") + std::strerror(errno);
+        return false;
+    }
+    if (WIFEXITED(status)) {
+        if (WEXITSTATUS(status) == 0) {
+            return true;
+        }
+        error = "robot-rt-setup check failed: exit_status=" + std::to_string(WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        error = "robot-rt-setup check terminated: signal=" + std::to_string(WTERMSIG(status));
+    } else {
+        error = "robot-rt-setup check did not exit normally";
+    }
+    return false;
+}
+```
+
+### `robot-rt-setup.sh`
+
+# 初始化流程
+
+## 信号注册与配置加载
+
+### 注册信号
+
+先注册 `SIGINT`、`SIGTERM`，信号处理函数只设置退出标志 `g_stop_requested`。
+
+``` c++
+#include <csignal>   
+std::signal(SIGINT, signal_handler);
+std::signal(SIGTERM, signal_handler);
+
+void signal_handler(int)
+{
+    g_stop_requested.store(true);
+}
+```
+
+### 加载`yaml`配置文件
+
+配置路径优先使用 `argv[1]`，否则使用编译时的 `ROBOT_DEPLOY_CONFIG_PATH`。CMake 将默认路径设置为 `src/inference/config/deploy.yaml`。
+
+`load_deploy_config()` 先恢复 `RobotInterfaceConfig` 默认值，再解析、校验 YAML，填入关节映射、增益、初始姿态、动作处理和观测参数等。当前 YAML 的 `step_dt = 0.02`，对应 **50 Hz 策略循环**。
+
+模型路径采用默认的 `model/policy.onnx`，由加载器相对于编译时的 `src/inference` 根目录解析。
+
+``` c++
+const std::string config_path =
+    argc > 1 ? argv[1] : std::string(ROBOT_DEPLOY_CONFIG_PATH);
+
+// 加载 yaml 配置文件，覆盖默认值
+if (!inference::load_deploy_config(config_path, cfg, config_error)) {
+    std::cerr << "[ERROR] Failed to load deploy config: "
+              << config_error << "\n";
+    return 1;
+}
+```
+
+## `initialize()`：编排机器人完整运行态
+
+### `initialize_processors()`：初始化处理器
+
+``` c++
+├─ RobotInterface::initialize()
+│  │
+│  ├─ initialize_model_processors()               // 装配模型输入、输出处理对象
+│  │  │
+│  │  ├─ JointMapping::create(kDof, joint_mapping, error)
+│  │  │  └─ JointMapping::configure()
+│  │  │     ├─ // 校验电机方向、索引、映射数量及重复项
+│  │  │     └─ // 建立直驱关节与并联脚踝的内部映射数据   
+│  │  │
+│  │  ├─ 构造 ActionProcessor
+│  │  │  ├─ 保存共享 mapping、动作配置、限位、电机增益和力矩配置
+│  │  │  ├─ compute_low_pass_coefficients()       // 计算力矩滤波系数
+│  │  │  └─ reset_runtime_state()                 // 初始化脚踝 IK、FK 和滤波状态
+│  │  │
+│  │  ├─ 构造 ObservationBuilder
+│  │  │  ├─ 保存共享 mapping、观测缩放、默认关节位置和策略配置
+│  │  │  └─ reset_runtime_state()                 // 初始化脚踝状态、历史观测及帧计数
+│  │  │
+│  │  └─ 保存 action_processor_、observation_builder_
+```
+
+#### `JointMapping::create()`：构建电机映射
+
+对应代码：
+
+``` c++
+std::shared_ptr<const JointMapping> JointMapping::create(
+    int dof_count,
+    const inference::JointMappingConfig& config,
+    std::string& error)
+{
+    std::shared_ptr<JointMapping> mapping(new JointMapping());
+    mapping->config_ = config;
+    if (!mapping->configure(dof_count, error)) {
+        return {};
+    }
+    error.clear();
+    return mapping;
+}
+```
+
+#### 构建`ActionProcessor`
+
+``` c++
+auto action_processor = std::make_unique<robot_detail::ActionProcessor>(
+    mapping,
+    config_.action,
+    config_.ankle_motor_limits,
+    config_.motor.mit_kp,
+    config_.motor.mit_kd,
+    config_.ankle_torque);
+
+action_processor_   = std::move(action_processor);
+```
+
+#### 构建`ObservationBuilder`
+
+``` c++
+auto observation_builder = std::make_unique<robot_detail::ObservationBuilder>(
+    mapping,
+    config_.observation_scales,
+    config_.action.default_joint_pos_rad,
+    config_.policy);
+
+observation_builder_ = std::move(observation_builder);
+```
+
+### 配置 ORT
+
+``` c++
+│  ├─ 创建局部 PolicyExecutionSetup execution
+│  │
+│  ├─ execution.prepare(config_.runtime, error)    // 准备 ORT 执行选项
+│  │  ├─ 清空旧准备状态
+│  │  ├─ 检查 ONNX 线程数及双线程 CPU 配置
+│  │  ├─ cpu_mask()                              // 配置了主 CPU 集合时构造预期掩码
+│  │  ├─ list_task_ids()                         // [双线程] 记录已有线程基线
+│  │  │  └─ 枚举 /proc/self/task
+│  │  ├─ 构造 Ort::SessionOptions
+│  │  ├─ SetIntraOpNumThreads()
+│  │  ├─ SetExecutionMode(ORT_SEQUENTIAL)
+│  │  ├─ SetGraphOptimizationLevel(ORT_ENABLE_ALL)
+│  │  ├─ AddConfigEntry()                        // 关闭 intra/inter-op spinning
+│  │  └─ AddConfigEntry()                        // [双线程] 配置 worker affinity
+│  │
+│  ├─ execution.session_options()                // 取得已准备的会话选项
+```
+
+对应代码：
+
+``` c++
+// 模型 load/warmup、ORT worker 校验和内存锁定发生在电机、IMU 或
+// recorder 线程启动之前，保证新增 TID 可归因且失败时不会触碰电机。
+{
+    PolicyExecutionSetup execution;
+    std::string error;
+    if (!execution.prepare(config_.runtime, error)) {
+        std::cerr << "[RobotInterface] prepare_policy_execution failed: " << error << "\n";
         shutdown();
         return false;
     }
-    // 模型 load/warmup、ORT worker 校验和内存锁定发生在电机、IMU 或 recorder 线程启动之前，保证新增 TID 可归因且失败时不会触碰电机。
-    if (!policy_runtime_.load(config_.policy, config_.runtime)) {
+    if (!policy_runtime_.load(config_.policy, execution.session_options())) {
         std::cerr << "[RobotInterface] load_policy failed: "
                   << policy_runtime_.last_error() << "\n";
         shutdown();
         return false;
     }
-
-    // 进程/主线程运行环境：模型就绪后、其他线程和硬件启动前完成。
-    if (config_.runtime.require_process_memory_lock) {
-        // 解决 MCL_FUTURE 在创建线程时一次性填充并锁定整个默认栈，
-        // 拉长 EtherCAT 启动收发交接空档并导致失同步的问题。
-        // 按需锁页，时序敏感线程仍在进入业务循环前预触碰所需栈页。
-        if (::mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0) {
-            const int saved_errno = errno;
-            std::cerr << "[RobotInterface] mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) "
-                      << "failed: errno=" << saved_errno << " ("
-                      << std::strerror(saved_errno)
-                      << "). Check RLIMIT_MEMLOCK and CAP_IPC_LOCK.\n";
-            policy_runtime_.shutdown();
-            shutdown();
-            return false;
-        }
-
-        const int prefault_error =
-            robot_base::prefault_current_thread_stack(
-                config_.runtime.policy_main.stack_prefault_bytes);
-        if (prefault_error != 0) {
-            std::cerr << "[RobotInterface] policy_main stack prefault after "
-                      << "mlockall failed: errno=" << prefault_error << " ("
-                      << std::strerror(prefault_error)
-                      << "); maximum 1 MiB and valid page size required\n";
-            policy_runtime_.shutdown();
-            shutdown();
-            return false;
-        }
-    }
-
-    // 日志生命周期：按已校验的观测维度启动独立记录器。
-    if (config_.recorder.enabled) {
-        config_.recorder.policy_observation_size =
-            policy_observation::observation_size(config_.policy.gait.enabled);
-        if (!inference_recorder_.start(config_.recorder, config_.runtime.background)) {
-            std::cerr << "[RobotInterface] failed to open inference log: "
-                      << inference_recorder_.last_error() << "\n";
-            inference_recorder_failed_ = true;
-            shutdown();
-            return false;
-        }
-        std::cout << "[RobotInterface] inference log: "
-                  << inference_recorder_.log_path() << "\n";
-    }
-
-    // 初始化电机
-    if (!motor_session_.initialize(/*defer_communication_protection=*/true)) {
+    if (!execution.verify_workers(error)) {
+        std::cerr << "[RobotInterface] verify_policy_workers failed: " << error << "\n";
         shutdown();
         return false;
     }
-    if (!motor_session_.restart(-1)) {
-        shutdown();
-        return false;
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-    // 初始化 IMU
-    if (!imu_session_.initialize()) {
-        shutdown();
-        return false;
-    }
-
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // 恢复到初始位置
-    std::array<double, motor_base::kMaxMotors> startup_hold_target_motor_rad{};
-    if (!reset_joints(startup_hold_target_motor_rad)) {
-        shutdown();
-        return false;
-    }
-
-    // 初始化完成
-    initialized_ = true;
-
-    // 开启策略命令线程
-    if (!worker_.start(*action_processor_, std::move(startup_hold_target_motor_rad))) {
-        initialized_ = false;
-        shutdown();
-        return false;
-    }
-
-    return true;
 }
 ```
 
-### 配置具体线程
-
-#### `PolicyRuntime`
-
-##### `class PolicyRuntime`
+### 加载模型
 
 ``` c++
-// src/inference/include/policy/policy_runtime.hpp
-class PolicyRuntime {
-public:
-    static constexpr std::size_t kDof = policy_observation::kDof;
-
-    PolicyRuntime();
-    ~PolicyRuntime();
-
-    PolicyRuntime(const PolicyRuntime&) = delete;
-    PolicyRuntime& operator=(const PolicyRuntime&) = delete;
-
-    // 由所有者线程串行调用；load 完成校验和预热，infer 复用固定缓冲区。
-    bool load(const PolicyRuntimeConfig& config,
-              const RuntimeThreadingConfig& runtime);
-    void shutdown();
-
-    bool is_loaded() const;
-    bool infer(const PolicyObservation& observation, PolicyRuntimeStepResult& result);
-
-    const std::string& last_error() const noexcept { return last_error_; }
-
-private:
-    struct Impl;
-
-    bool warm_up();
-
-    std::unique_ptr<Impl> impl_;
-    std::string last_error_;
-};
-
+│  ├─ policy_runtime_.load(config_.policy, options)
+│  │  ├─ PolicyRuntime::shutdown()               // 清理旧模型会话
+│  │  ├─ observation_size()                      // 根据 gait_phase 选择输入维度
+│  │  ├─ 检查模型扩展名、会话选项准备状态
+│  │  ├─ 构造 PolicyRuntime::Impl
+│  │  │  └─ 创建 Ort::Env、RunOptions 等对象
+│  │  ├─ Ort::Session(...)                       // 加载模型，ORT 按配置创建内部线程
+│  │  ├─ GetInputCount() / GetOutputCount()      // 要求单输入、单输出
+│  │  ├─ validate_port()                         // 分别校验输入和输出
+│  │  │  └─ 检查 Tensor 类型、float32 和形状
+│  │  ├─ GetInputNameAllocated()
+│  │  ├─ GetOutputNameAllocated()
+│  │  ├─ 检查并保存输入输出名称
+│  │  ├─ Ort::MemoryInfo::CreateCpu()
+│  │  ├─ Ort::Value::CreateTensor<float>()        // 输入 Tensor，引用固定输入缓冲区
+│  │  ├─ Ort::Value::CreateTensor<float>()        // 输出 Tensor，引用固定输出缓冲区
+│  │  └─ warm_up()
+│  │     ├─ Ort::Session::Run() × 20             // 执行预热
+│  │     └─ 检查预热输出是否全部为有限值
 ```
 
-##### `load()`
+### 校验
 
-``` c
-bool PolicyRuntime::load(const PolicyRuntimeConfig& config,
-                         const RuntimeThreadingConfig& runtime)
-{
-    shutdown();
-    last_error_.clear();
-    const std::size_t input_size =
-        policy_observation::observation_size(config.gait.enabled);
-    if (std::filesystem::path(config.model_path).extension() != ".onnx") {
-        last_error_ = "policy model path must name an .onnx file";
-        return false;
-    }
-    if (runtime.onnx_intra_op_threads != 1 &&
-        runtime.onnx_intra_op_threads != 2) {
-        last_error_ = "ONNX intra-op threads must be 1 or 2";
-        return false;
-    }
-    const bool dual = runtime.onnx_intra_op_threads == 2;
-    if (dual && (runtime.policy_main.cpu_ids.size() != 1 ||
-                 runtime.onnx_worker_cpu_id < 0 ||
-                 runtime.onnx_worker_cpu_id >= CPU_SETSIZE ||
-                 runtime.policy_main.cpu_ids[0] == runtime.onnx_worker_cpu_id)) {
-        last_error_ = "two-thread ONNX mode requires distinct main and worker CPUs";
-        return false;
-    }
-
-    std::string setup_error;
-    if (!runtime.policy_main.cpu_ids.empty()) {
-        cpu_set_t main_mask;
-        if (!cpu_mask(runtime.policy_main.cpu_ids, main_mask, setup_error) ||
-            !verify_task(::gettid(), main_mask, "policy thread", setup_error)) {
-            last_error_ = setup_error;
-            return false;
-        }
-    }
-    std::set<pid_t> tasks_before;
-    if (dual && !list_task_ids(tasks_before, setup_error)) {
-        last_error_ = setup_error;
-        return false;
-    }
-
-    try {
-        impl_ = std::make_unique<Impl>();
-        Ort::SessionOptions options;
-        options.SetIntraOpNumThreads(runtime.onnx_intra_op_threads);
-        options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
-        options.SetGraphOptimizationLevel(
-            GraphOptimizationLevel::ORT_ENABLE_ALL);
-        options.AddConfigEntry("session.intra_op.allow_spinning", "0");
-        options.AddConfigEntry("session.inter_op.allow_spinning", "0");
-        if (dual) {
-            // ORT's affinity string uses one-based processor numbers; Linux
-            // affinity APIs and RuntimeThreadingConfig use zero-based IDs.
-            // ORT sets this only on the extra intra-op worker.
-            const std::string cpu =
-                std::to_string(runtime.onnx_worker_cpu_id + 1);
-            options.AddConfigEntry(
-                kOrtSessionOptionsConfigIntraOpThreadAffinities, cpu.c_str());
-        }
-        impl_->session = Ort::Session(
-            impl_->env, config.model_path.c_str(), options);
-        if (impl_->session.GetInputCount() != 1 ||
-            impl_->session.GetOutputCount() != 1) {
-            last_error_ = "ONNX policy requires exactly one input and one output";
-            shutdown();
-            return false;
-        }
-        std::string port_error;
-        if (!validate_port(impl_->session.GetInputTypeInfo(0),
-                           {1, static_cast<int64_t>(input_size)},
-                           "input", port_error) ||
-            !validate_port(impl_->session.GetOutputTypeInfo(0),
-                           {1, static_cast<int64_t>(kDof)},
-                           "output", port_error)) {
-            last_error_ = port_error;
-            shutdown();
-            return false;
-        }
-
-        Ort::AllocatorWithDefaultOptions allocator;
-        impl_->input_name =
-            impl_->session.GetInputNameAllocated(0, allocator).get();
-        impl_->output_name =
-            impl_->session.GetOutputNameAllocated(0, allocator).get();
-        if (impl_->input_name.empty() || impl_->output_name.empty()) {
-            last_error_ = "ONNX input or output name is empty";
-            shutdown();
-            return false;
-        }
-        impl_->input_names[0] = impl_->input_name.c_str();
-        impl_->output_names[0] = impl_->output_name.c_str();
-
-        const std::array<int64_t, 2> input_shape{
-            1, static_cast<int64_t>(input_size)};
-        constexpr std::array<int64_t, 2> output_shape{
-            1, static_cast<int64_t>(kDof)};
-        const auto memory =
-            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        impl_->input_tensor = Ort::Value::CreateTensor<float>(
-            memory, impl_->input_buffer.data(), input_size,
-            input_shape.data(), input_shape.size());
-        impl_->output_tensor = Ort::Value::CreateTensor<float>(
-            memory, impl_->output_buffer.data(), impl_->output_buffer.size(),
-            output_shape.data(), output_shape.size());
-        impl_->input_size = input_size;
-        if (!warm_up()) {
-            shutdown();
-            return false;
-        }
-
-        if (dual) {
-            cpu_set_t worker_mask;
-            CPU_ZERO(&worker_mask);
-            CPU_SET(runtime.onnx_worker_cpu_id, &worker_mask);
-            cpu_set_t main_mask;
-            if (!cpu_mask(runtime.policy_main.cpu_ids, main_mask, setup_error)) {
-                last_error_ = setup_error;
-                shutdown();
-                return false;
-            }
-            // ORT 设置 worker affinity 是异步的；短预热不保证 worker 已调度。
-            // 仅在硬件启动前等待有界的就绪窗口，超时仍拒绝加载。
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(100);
-            std::set<pid_t> tasks_after;
-            for (;;) {
-                if (!list_task_ids(tasks_after, setup_error)) {
-                    last_error_ = setup_error;
-                    shutdown();
-                    return false;
-                }
-                std::size_t workers = 0;
-                bool tasks_valid = true;
-                for (pid_t tid : tasks_after) {
-                    if (tasks_before.count(tid)) continue;
-                    if (verify_task(tid, worker_mask, "ONNX worker", setup_error)) {
-                        ++workers;
-                    } else if (!verify_task(tid, main_mask,
-                                            "ONNX auxiliary thread", setup_error)) {
-                        tasks_valid = false;
-                        break;
-                    }
-                }
-                if (tasks_valid && workers == 1) break;
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    last_error_ = tasks_valid
-                        ? "expected exactly one ONNX worker, found " + std::to_string(workers)
-                        : setup_error;
-                    shutdown();
-                    return false;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
-    } catch (const std::exception& e) {
-        last_error_ = "failed to load ONNX policy: " + std::string(e.what());
-        shutdown();
-        return false;
-    }
-    return true;
-}
+``` c++
+│  ├─ execution.verify_workers(error)
+│  │  ├─ 单线程模式：准备状态有效即可返回
+│  │  └─ 双线程模式：最多等待 100 ms，每隔 1 ms 重试
+│  │     ├─ list_task_ids()                      // 读取加载后的线程列表
+│  │     ├─ 与准备阶段基线比较，识别新增线程
+│  │     ├─ verify_task()                        // 检查 worker 或辅助线程
+│  │     │  ├─ sched_getaffinity()               // CPU 集合
+│  │     │  ├─ sched_getscheduler()              // SCHED_OTHER
+│  │     │  └─ sched_getparam()                  // 优先级 0
+│  │     └─ 检查指定 worker CPU 上恰好有一个 worker
+│  │
+│  ├─ 局部 execution 离开作用域                   // 释放准备对象，模型 Session 继续保留
 ```
 
-#### `policy_main`线程
+### 配置线程运行环境
+
+``` c++
+│  ├─ [require_process_memory_lock]
+│  │  ├─ mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)
+│  │  └─ prefault_current_thread_stack()          // 锁页后再次预触碰主线程栈
+```
+
+### `policy_main`线程
 
 因为 **`policy_main` 就是正在执行 `main()` 的主线程，进程启动时已经存在**，只需配置当前线程。这里把主线程命名为 `policy_main`，设置并校验 CPU 亲和性、栈预触碰、调度策略和优先级。成功后，同一个线程继续初始化机器人并运行策略循环。
 
@@ -1831,259 +2817,204 @@ if (!main_setup.success) {
 }
 ```
 
-#### `infer_log`线程
-
-`InferenceRecorder::start()`：
+### 配置模型观测线程
 
 ``` c
-// src/inference/src/recorder/inference_recorder.cpp
-bool InferenceRecorder::start(
-    InferenceRecorderConfig config,
-    robot_base::ThreadRuntimeOptions thread_options)
-{
-	/*infer_log线程的其他配置*/
-
-    std::string thread_error;
-    if (!robot_base::start_configured_thread(
-            worker_, "infer_log", thread_options,
-            [this] { worker_loop(); }, thread_error)) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        running_ = false;
-        stop_requested_ = false;
-        queue_.clear();
-        if (file_.is_open()) {
-            file_.close();
-        }
-        last_error_ = "failed to start inference recorder worker: " + thread_error;
-        return false;
-    }
-
-    return true;
-}
+│  ├─ [config_.recorder.enabled]
+│  │  ├─ observation_size()                      // 设置记录器使用的观测维度
+│  │  ├─ inference_recorder_.start(config, background)
+│  │  │  ├─ stop()                               // 清理可能存在的旧记录器
+│  │  │  ├─ 检查观测维度，整理 flush/队列参数
+│  │  │  ├─ filesystem::create_directories()
+│  │  │  ├─ make_log_filename()
+│  │  │  ├─ 打开日志文件
+│  │  │  ├─ write_header()
+│  │  │  ├─ 清空队列，初始化运行状态和会话时间戳
+│  │  │  └─ start_configured_thread("infer_log", background)
+│  │  │     └─ worker_loop()                    // [子线程入口] 消费队列并写日志
+│  │  └─ log_path()                              // 输出日志路径
 ```
 
-#### `motor_status`线程
+### 配置`motor_session`
 
 ``` c++
-template <typename Snapshot>
-bool LatestStatusChannel<Snapshot>::start()
-{
-    bool expected = false;
-    if (!publisher_running_.compare_exchange_strong(expected, true)) {
-        return true;
-    }
-    if (!robot_base::start_configured_thread(
-            publisher_thread_, thread_name_.c_str(), thread_options_,
-            [this] { thread_func(); }, last_start_error_)) {
-        publisher_running_.store(false);
-        return false;
-    }
-    return true;
-}
+│  ├─ motor_session_.initialize(true)            // 暂缓通信故障保护锁存
+│  │  │
+│  │  ├─ 检查是否已经初始化、是否残留控制器
+│  │  ├─ 构造 EthercatAdapterIGH
+│  │  ├─ 填充控制器线程配置
+│  │  │  ├─ rt_thread_options = runtime.motor_rt
+│  │  │  └─ background_thread_options = runtime.background
+│  │  │
+│  │  ├─ 构造 MyActMotorController
+│  │  │  ├─ 构造 MotorControllerBase
+│  │  │  │  ├─ 检查电机数量、队列容量和周期参数
+│  │  │  │  ├─ status_channel_.configure()
+│  │  │  │  ├─ rt_event_dispatcher_.configure_thread()
+│  │  │  │  └─ 初始化命令队列及反馈通道
+│  │  │  ├─ 创建电机对象
+│  │  │  ├─ 配置事件打印器和状态打印器
+│  │  │  ├─ status_monitor_.configure()
+│  │  │  └─ adapter->set_event_sink()            // 注册 EtherCAT 事件接收入口
+│  │  │
+│  │  ├─ set_communication_protection_enabled(false)
 ```
 
-#### `rt_event`线程
+### 配置电机底层
 
 ``` c++
-bool RtEventDispatcher::start()
-{
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true)) {
-        return true;
-    }
-    if (!robot_base::start_configured_thread(
-            thread_, "rt_event", thread_options_,
-            [this] { thread_func(); }, last_start_error_)) {
-        running_.store(false);
-        return false;
-    }
-    return true;
-}
+│  │  ├─ controller_->connect()
+│  │  │  └─ MyActMotorController::connect_impl()
+│  │  │     └─ EthercatAdapterIGH::init()
+│  │  │        ├─ ecrt_request_master(0)
+│  │  │        ├─ ecrt_master_create_domain()
+│  │  │        ├─ 逐个配置从站
+│  │  │        │  ├─ ecrt_master_slave_config()
+│  │  │        │  ├─ ecrt_slave_config_pdos()
+│  │  │        │  ├─ ecrt_slave_config_watchdog()
+│  │  │        │  ├─ ecrt_slave_config_dc()
+│  │  │        │  └─ ecrt_domain_reg_pdo_entry_list()
+│  │  │        ├─ ecrt_master_activate()
+│  │  │        ├─ ecrt_domain_data()
+│  │  │        └─ 读取诊断开关及诊断周期环境变量
+│  │  │
+│  │  ├─ controller_->wait_all_motors_ready()
+│  │  │  └─ 循环等待从站和过程数据稳定
+│  │  │     ├─ adapter->receive_physical()
+│  │  │     ├─ adapter->send_physical()
+│  │  │     ├─ adapter->is_configured()          // 检查各从站
+│  │  │     ├─ adapter->get_bus_health()         // 检查链路和 WKC
+│  │  │     └─ sleep_for(1 ms)                   // 尚未就绪时继续等待
+│  │  │
+│  │  ├─ controller_->set_print_info()           // 设置打印列表；禁用时传空列表
+│  │  │
+│  │  ├─ controller_->start()
+│  │  │  └─ MotorControllerBase::start()
+│  │  │     ├─ 重置实时命令和反馈状态
+│  │  │     ├─ status_channel_.start()
+│  │  │     │  └─ start_configured_thread("motor_status", background)
+│  │  │     │     └─ thread_func()              // [子线程入口] 更新状态缓存及回调
+│  │  │     ├─ rt_event_dispatcher_.start()
+│  │  │     │  └─ start_configured_thread("rt_event", background)
+│  │  │     │     └─ thread_func()              // [子线程入口] 分发实时事件
+│  │  │     ├─ MyActMotorController::realtime_start_callback()
+│  │  │     │  └─ [打印列表非空] status_monitor_.start()
+│  │  │     │     └─ start_configured_thread("motor_mon", background)
+│  │  │     │        └─ thread_func()           // [子线程入口] 打印电机状态
+│  │  │     ├─ start_configured_thread("ecat_rt", motor_rt)
+│  │  │     │  └─ thread_func()                 // [子线程入口] 实时命令处理与周期收发
+│  │  │     └─ 标记实时调度已经就绪
+│  │  │
+│  │  ├─ rt_started_ = true
+│  │  ├─ stop()                                 // 先让全部电机进入确认停止状态
+│  │  │  ├─ request_stop()
+│  │  │  │  └─ controller_->send_discrete_command(STOP)
+│  │  │  └─ wait_for_stop()
+│  │  │     ├─ get_discrete_command_result()     // 等待 STOP 执行成功
+│  │  │     └─ sleep_for(1 ms)                  // 未完成时继续等待
+│  │  ├─ 逐个电机 submit_command(SET_MODE)
+│  │  │  └─ controller_->send_discrete_command() // 提交控制模式设置命令
+│  │  ├─ initialized_ = true
+│  │  └─ motion_enabled_ = false
+│  ├─ motor_session_.restart(-1)                 // 恢复全部电机运行
+│  │  ├─ 检查初始化状态和实时调度状态
+│  │  ├─ controller_->send_discrete_command(RESTART)
+│  │  ├─ 循环 get_discrete_command_result()      // 等待执行成功或超时
+│  │  └─ 成功后 motion_enabled_ = true
+│  │
+│  ├─ sleep_for(500 ms)
 ```
 
-#### `ecat_rt`线程
+### 配置 IMU 模块
 
 ``` c++
-bool MotorControllerBase::start()
-{
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (running_.load(std::memory_order_acquire)) {
-        return rt_scheduling_ready_.load(std::memory_order_acquire);
-    }
-
-    rt_scheduling_ready_.store(false, std::memory_order_release);
-    setpoint_channel_policy_.reset_empty();
-    active_setpoint_timing_ = CommandTiming{};
-    command_feedback_channel_.reset_empty();
-    policy_feedback_channel_.reset_empty();
-    if (!status_channel_.start()) {
-        std::cerr << "[MotorControllerBase] motor_status setup failed: "
-                  << status_channel_.last_start_error() << std::endl;
-        return false;
-    }
-    if (!rt_event_dispatcher_.start()) {
-        std::cerr << "[MotorControllerBase] rt_event setup failed: "
-                  << rt_event_dispatcher_.last_start_error() << std::endl;
-        status_channel_.stop();
-        return false;
-    }
-
-    if (!realtime_start_callback()) {
-        realtime_stop_callback();
-        rt_event_dispatcher_.stop();
-        status_channel_.stop();
-        return false;
-    }
-
-    running_.store(true, std::memory_order_release);
-
-    std::string thread_error;
-    if (!robot_base::start_configured_thread(
-            rt_thread_, "ecat_rt", rt_options_.rt_thread_options,
-            [this] { thread_func(); }, thread_error)) {
-        running_.store(false, std::memory_order_release);
-        
-        rt_scheduling_ready_.store(false, std::memory_order_release);
-        
-        std::cerr << "[MotorControllerBase] ecat_rt setup failed: "
-                  << thread_error << std::endl;
-        
-        realtime_stop_callback();
-        rt_event_dispatcher_.stop();
-        status_channel_.stop();
-        return false;
-    }
-
-    rt_scheduling_ready_.store(true, std::memory_order_release);
-
-    return true;
-}
+│  ├─ imu_session_.initialize()
+│  │  ├─ 填充 ReaderConfig                      // 设备、类型、波特率、CAN 参数等
+│  │  ├─ thread_options = runtime.imu_reader
+│  │  ├─ 重置 AHRS 通道和缓存
+│  │  ├─ 根据类型创建 reader
+│  │  ├─ reader_->set_ahrs_callback()            // 注册姿态数据回调，接收后发布到 AHRS 通道
+│  │  ├─ reader_->start(imu_cfg)                 // 以下二选一
+│  │  │  ├─ XsensMtiCanReader::start()
+│  │  │  │  ├─ print_configuration()
+│  │  │  │  ├─ parser_->reset()
+│  │  │  │  ├─ configure_socket_can_interface()  // [configure_can]
+│  │  │  │  ├─ can_port_->open()
+│  │  │  │  └─ start_configured_thread("imu_can_rx", imu_reader)
+│  │  │  │     └─ read_loop()                   // [子线程入口] 接收 CAN 数据
+│  │  │  └─ IMUReader::start()
+│  │  │     ├─ print_configuration()
+│  │  │     ├─ parser_->reset()
+│  │  │     ├─ serial_port_->open()
+│  │  │     └─ start_configured_thread("imu_serial_rx", imu_reader)
+│  │  │        └─ read_loop()                   // [子线程入口] 接收串口数据
+│  │  └─ initialized_ = true
+│  │
+│  ├─ sleep_for(1 s)
 ```
 
-#### `imu_can_rx`线程
-
-``` c
-bool XsensMtiCanReader::start(const imu_base::ReaderConfig& config)
-{
-    if (running_.load()) {
-        return true;
-    }
-
-    config_ = config;
-    start_time_ = std::chrono::steady_clock::now();
-    print_configuration();
-
-    parser_->reset();
-    if (config_.configure_can &&
-        !configure_socket_can_interface(config_.device, config_.can_bitrate)) {
-        return false;
-    }
-    if (!can_port_->open(config_.device)) {
-        return false;
-    }
-
-    running_.store(true);
-    std::string thread_error;
-    if (!robot_base::start_configured_thread(
-            worker_thread_, "imu_can_rx", config_.thread_options,
-            [this] { read_loop(); }, thread_error)) {
-        running_.store(false);
-        can_port_->close();
-        std::cerr << "[ERROR] Xsens MTi CAN reader thread setup failed: "
-                  << thread_error << std::endl;
-        return false;
-    }
-    std::cout << "[INFO] Xsens MTi CAN reader thread started." << std::endl;
-    return true;
-}
-```
-
-#### `policy_cmd`线程
+### 恢复到初始位置
 
 ``` c++
-bool PolicyCommandWorker::start(
-    ActionProcessor&    action_processor,
-    std::array<double, motor_base::kMaxMotors> startup_hold_target_motor_rad)
-{
-    action_processor_ = &action_processor;
-    startup_hold_target_motor_rad_ = std::move(startup_hold_target_motor_rad);
-    {
-        std::lock_guard<std::mutex> lock(error_mutex_);
-        error_.clear();
-        failed_.store(false);
-    }
-
-    // 在线程接管前刷新一次复位命令，为首次 worker 调度保留完整有效期。
-    if (!motor_session_.apply_targets_rad(startup_hold_target_motor_rad_)) {
-        std::cerr << "[PolicyCommandWorker] start rejected: "
-                     "failed to refresh startup reset pose\n";
-        return false;
-    }
-
-    running_.store(true);
-
-    std::string thread_error;
-    if (!robot_base::start_configured_thread(
-            worker_thread_, "policy_cmd", config_.runtime.policy_command,
-            [this] { loop(); }, thread_error)) {
-        running_.store(false);
-        std::cerr << "[PolicyCommandWorker] failed to start thread: "
-                  << thread_error << "\n";
-        return false;
-    }
-
-    return true;
-}
+│  ├─ reset_joints(startup_hold_target_motor_rad)
+│  │  ├─ motor_session_.motion_enabled()         // 确认电机允许运动
+│  │  ├─ motor_session_.get_motor_snapshot()
+│  │  │  └─ controller_->try_consume_latest_status_policy()
+│  │  ├─ 检查反馈时间戳和位置有效性
+│  │  ├─ action_processor_->build_reset_start_model_pose()
+│  │  │  ├─ 将直驱电机位置转换到模型关节顺序
+│  │  │  └─ ankle_motor_fk::solve()             // 左右脚踝 FK，恢复真实起始姿态
+│  │  ├─ 循环 100 步线性插值至默认姿态
+│  │  │  ├─ 计算当前步 q_cmd_model
+│  │  │  ├─ action_processor_->build_motor_targets()
+│  │  │  │  ├─ 转换直驱关节索引和方向
+│  │  │  │  ├─ apply_ankle_ik()                  // 左右脚踝 IK
+│  │  │  │  │  └─ Solver::solve()
+│  │  │  │  └─ 检查脚踝电机物理行程限位
+│  │  │  ├─ motor_session_.apply_targets_rad()
+│  │  │  │  ├─ 按 IMPEDANCE / POSITION 构造命令
+│  │  │  │  ├─ target_command_timing()          // 设置命令有效期
+│  │  │  │  └─ controller_->send_policy_setpoint()
+│  │  │  └─ sleep_for(dt)                       // 最后一步不等待
+│  │  └─ 保存最终电机目标到 startup_hold_target_motor_rad
+│  │
+│  ├─ initialized_ = true
 ```
 
-#### `xbox_poll`线程
+### 开启运行
 
 ``` c++
-/* 启动后台线程，将设备事件读取从控制主循环中移出。 */
-bool XboxController::start_polling(
-    std::chrono::milliseconds wait_timeout,
-    robot_base::ThreadRuntimeOptions thread_options)
-{
-    if (is_polling()) {
-        return true;
-    }
-    /* 如果后台线程已经存在，退出后台线程 */
-    if (polling_thread_.joinable()) {
-        polling_thread_.join();
-    }
-
-    if (!is_open()) {
-        set_error("controller device is not open");
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> state_lock(state_mutex_);
-        last_error_.clear();
-    }
-
-    /* 关闭退出信号，启动后台线程活跃信号 */
-    stop_polling_requested_.store(false);
-    polling_active_.store(true);
-
-    /* 创建后台线程 */
-    std::string thread_error;
-    if (!robot_base::start_configured_thread(
-            polling_thread_, "xbox_poll", thread_options,
-            [this, wait_timeout] { polling_loop(wait_timeout); }, thread_error)) {
-        polling_active_.store(false);
-        stop_polling_requested_.store(true);
-        set_error("start controller polling thread failed: " + thread_error);
-        return false;
-    }
-
-    return true;
-}
+│  ├─ worker_.start(*action_processor_, startup_hold_target_motor_rad)
+│  │  └─ PolicyCommandWorker::start()
+│  │     ├─ 保存动作处理器引用和启动保持目标
+│  │     ├─ 清空旧错误状态
+│  │     ├─ motor_session_.apply_targets_rad()   // 在线程接管前刷新保持命令及有效期
+│  │     ├─ running_ = true
+│  │     └─ start_configured_thread("policy_cmd", policy_command)
+│  │        └─ loop()                           // [子线程入口] 持续生成并提交电机命令
+│  │
+│  └─ return true                               // initialize() 完成
 ```
 
+### 配置 XBOX
 
+``` c++
+├─ XboxController::start_polling()
+│  └─ start_configured_thread("xbox_poll", background)
+│     └─ polling_loop()                          // [子线程入口] 读取手柄事件
+│
+```
 
+## 进入循环
 
+``` c++
+└─ 主循环
+   └─ RobotInterface::policy_step()
+      ├─ 检查运行状态、读取反馈
+      ├─ ObservationBuilder::build()
+      ├─ PolicyRuntime::infer()
+      └─ 发布策略目标，由 policy_cmd 线程消费
+```
 
 # 脉塔电机
 
