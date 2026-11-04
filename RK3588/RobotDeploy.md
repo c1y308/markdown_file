@@ -2594,6 +2594,267 @@ inline bool environment_check(std::string& error)
 
 ### `robot-rt-setup.sh`
 
+# 推理层
+
+## 电机映射
+
+### `struct AnkleMap`：脚踝 ID 映射
+
+``` c++
+/* 脚踝并联机构：两个模型虚拟轴（pitch/roll）由上下两个物理电机并联驱动。 */
+struct AnkleMap {
+    int model_pitch_dof = -1;
+    int model_roll_dof  = -1;
+
+    int upper_motor_index = -1;
+    int lower_motor_index = -1;
+};
+```
+
+### `struct JointMappingConfig`：模型 ID ->物理 ID 映射表
+
+``` c++
+struct JointMappingConfig {
+    /* 直驱模型 DOF（按模型顺序，跳过脚踝并联轴）→ 物理电机下标 */
+    std::vector<int> model_to_motor_index = {0, 6, 1, 7, 2, 8, 3, 9};
+    /* 物理电机顺序：电机方向与模型方向的关系，1 同向 / -1 反向 */
+    std::array<int, 12> motor_to_model_direction = {
+        -1, -1, 1, 1, -1, -1,
+        -1, 1, 1, -1, -1, -1
+    };
+	/* 脚踝 ID 映射 */
+    AnkleMap left_ankle  = {8, 10, 4, 5};
+    AnkleMap right_ankle = {9, 11, 10, 11};
+};
+```
+
+### `class JointMapping`：电机 ID 转换器
+
+本质只是对`inference::JointMappingConfig config_`的一层封装：
+
+``` c++
+class JointMapping {
+public:
+    static std::shared_ptr<const JointMapping> create(int                       dof_count,
+                                                      const JointMappingConfig& config,
+                                                      std::string&              error);
+
+    int dof_count() const noexcept { return dof_count_; }
+	
+    /* 获取脚踝映射 */
+    const AnkleMap& left_ankle()  const noexcept { return config_.left_ankle; }
+    const AnkleMap& right_ankle() const noexcept { return config_.right_ankle; }
+	/* 模型 id 是否合法 */
+    bool is_model_dof(int model_index) const;
+    /* 通过模型 id 获取物理 id */
+    int  get_motor_id(int model_index) const;
+    /* 通过模型 id 判断电机是否需要反向 */
+    int  get_motor_direction(int motor_index) const;
+
+private:
+    JointMapping() = default;
+    /* 保存 config */
+    inference::JointMappingConfig config_;
+    /* 保存 关节数量 */
+    int dof_count_ = 0;
+    std::vector<int> motor_id_map;
+};
+```
+
+
+
+## 处理模型输出动作
+
+### `class ActionProcessor`：处理动作目标值
+
+``` mermaid
+flowchart TD
+    A[模型关节目标] --> B[复位路径]
+    A --> C[策略控制路径]
+    B --> D[普通关节：索引与方向映射]
+    B --> E[脚踝：IK 转电机位置]
+    C --> F[普通关节：生成阻抗目标]
+    C --> G[脚踝：反馈 FK、虚拟关节 PD、力矩转换]
+    D --> H[物理电机位置数组]
+    E --> H
+    F --> I[物理电机 setpoints]
+    G --> I
+```
+
+#### 三个数据层次
+
+| 数据                           | 含义                   | 顺序     |
+| ------------------------------ | ---------------------- | -------- |
+| `PolicyAction`                 | 模型输出的无量纲动作   | 模型 DOF |
+| `FixedModelTarget`             | 目标关节角，单位 rad   | 模型 DOF |
+| `target_motor_rad / setpoints` | 物理电机位置或控制参数 |          |
+
+具体代码实现：
+
+``` c++
+// src/inference/include/policy/policy_observation_config.hpp
+using PolicyAction      = std::array<float, kModelDof>;
+
+// src/inference/include/robot/action_processor.hpp
+// 模型顺序的关节位置角度
+using ModelJointPositions = std::array<double, kModelDof>;
+```
+
+#### `struct ActionConfig`：处理参数
+
+> src/inference/include/robot/robot_config.hpp
+
+``` c++
+/* 动作后处理：ActionProcessor / RobotInterface::policy_step 消费。
+   全部按模型 DOF 顺序。 */
+struct ActionConfig {
+    std::array<double, policy_observation::kDof> default_joint_pos_rad{};
+    std::array<double, policy_observation::kDof> action_scale{};
+    /* raw_action * action_scale 之后的偏移量限位: [lower, upper] */
+    std::array<std::array<double, 2>, policy_observation::kDof> action_clip{};
+    /* nullopt 表示不对策略原始输出做额外裁剪。 */
+    std::optional<double> raw_action_clip = 1.0;
+};
+```
+
+#### `make_model_target()`：把原始数据转换为模型顺序目标值
+
+``` c++
+ActionProcessor::ModelJointPositions ActionProcessor::make_model_target(
+    const PolicyAction& raw_action, const ActionConfig& config) noexcept
+{
+    ModelJointPositions target;
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        const double action = static_cast<double>(raw_action[i]);
+        /* 进行 raw_action_clip [-1，1]裁剪 */ 
+        const double clipped_raw_action = config.raw_action_clip
+            ? std::max(-*config.raw_action_clip, std::min(*config.raw_action_clip, action))
+            : action;
+        /* 先进行 action_scale 缩放 */
+        const double scaled_action = clipped_raw_action * config.action_scale[i];
+        /* 再进行 action_clip 裁剪 */ 
+        const auto& clip = config.action_clip[i];
+        target[i] = config.default_joint_pos_rad[i] +
+            std::max(clip[0], std::min(clip[1], scaled_action));
+    }
+    return target;
+}
+```
+
+#### `make_motor_target`
+
+首先从`mapping_`中获取
+
+## 脚踝解算与电机命令下发
+
+### `class PolicyCommandWorker`：电机命令下发线程
+
+###`class RobotInterface`
+
+#### `PolicyStepPhase`：策略状态机
+
+推理状态：
+
+``` c++
+private:
+    enum class PolicyStepPhase : std::uint8_t {
+        Idle,
+        Precheck,
+        SensorSnapshot,
+        Observation,
+        Inference,
+        PostInference,
+        Publish,
+    };
+
+	// 阶段诊断仅由控制线程维护和读取。
+    PolicyStepPhase policy_step_phase_{PolicyStepPhase::Idle};	// 当前推理状态
+    std::int64_t 	policy_step_phase_started_ns_{0};			// 本次推理开始时间
+```
+
+设置函数：
+
+``` c++
+void RobotInterface::set_policy_step_phase(PolicyStepPhase phase) noexcept
+{
+    policy_step_phase_started_ns_ = robot_base::monotonic_now_ns();
+    policy_step_phase_ = phase;
+}
+```
+
+#### 对外接口
+
+``` c++
+class RobotInterface {
+public:
+    /* 构造函数只保存配置；配置由 load_deploy_config() 加载并完整校验 */
+    explicit RobotInterface(RobotInterfaceConfig config);
+    ~RobotInterface();
+	
+    /* initialize 完成模型准备、锁页、日志/硬件启动及姿态复位，只调用一次 */
+    bool initialize();
+    bool is_initialized() const {
+        return initialized_ && worker_.is_running();
+    }
+
+    /* 启停、速度缓存及 policy_step 由同一所有者线程串行访问 */
+    bool policy_step();
+	
+    /* 设置速度 */
+    void set_target_velocity(double vx, double vy, double yaw_rate);
+    
+    /* 初始化失败后仍可重复 shutdown，析构也会执行清理 */
+    ShutdownResult shutdown();
+```
+
+#### 构造函数
+
+``` c++
+/* 保存外部传入的接口配置，后续由初始化函数按模块使用。 */
+RobotInterface::RobotInterface(RobotInterfaceConfig config)
+    : config_(std::move(config)),											// move 语义初始配置
+      motor_session_(config_.motor, config_.safety, config_.runtime),		// 配置 motor_session
+      imu_session_(config_.imu, config_.runtime),							// 配置 imu_session
+      worker_(config_, motor_session_, first_policy_inference_started_ns_)	// 配置 worker_
+{
+}
+```
+
+#### `initialize()`：初始化
+
+见初始化流程。
+
+#### `set_target_velocity()`：设置速度
+
+``` c++
+private:
+	std::array<double, 3> target_velocity_{0.0, 0.0, 0.0};  // [vx, vy, yaw_rate]
+
+
+/* 按 YAML 中配置的范围限制并保存目标速度，顺序为 [vx, vy, yaw_rate]。 */
+void RobotInterface::set_target_velocity(double vx, double vy, double yaw_rate) {
+    if (config_.command_ranges.lin_vel_x) {
+        const auto& range = *config_.command_ranges.lin_vel_x;
+        vx = std::clamp(vx, range[0], range[1]);
+    }
+    if (config_.command_ranges.lin_vel_y) {
+        const auto& range = *config_.command_ranges.lin_vel_y;
+        vy = std::clamp(vy, range[0], range[1]);
+    }
+    if (config_.command_ranges.ang_vel_z) {
+        const auto& range = *config_.command_ranges.ang_vel_z;
+        yaw_rate = std::clamp(yaw_rate, range[0], range[1]);
+    }
+    target_velocity_ = {vx, vy, yaw_rate};
+}
+```
+
+
+
+#### `policy_step()`：执行一次策略闭环
+
+
+
 # 初始化流程
 
 ## 信号注册与配置加载
