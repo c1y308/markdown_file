@@ -1,4 +1,3 @@
-``` json
 {
   "http.proxy": "http://127.0.0.1:7897",
   "http.proxySupport": "override",
@@ -9,7 +8,7 @@
     "::1"
   ]
 }
-```
+
 # 重构内核
 
 ## 卸载原内核
@@ -1225,6 +1224,51 @@ static bool read_double_pair(const YAML::Node& parent_node,	// 父节点
 
 # 线程
 
+## 查看线程信息
+
+> `/proc/self/task` 是 Linux `/proc` 文件系统中一个专门用于**透视当前进程内所有线程**的目录。它就像一份“线程花名册”，让你能逐一查看每个线程的详细运行状态。
+
+> 这个目录的本质是一个**容器**，它包含了当前进程中**每一个线程**的一个子目录，子目录的名称就是该线程的数字**线程ID (TID)**，可通过 `gettid(2)` 获取。在一个多线程程序中，`/proc/self/task` 下会有多少个数字目录，就代表当前有多少个活跃线程。
+
+### 调试与性能分析
+
+#### 线程级 CPU 性能分析
+
+这是最经典的用途。如果你想**找出是哪个线程在大量消耗 CPU**，可以遍历 `/proc/self/task/*/stat` 并解析其中的 utime（用户态时间）和 stime（内核态时间）字段。这种方式可以精确地将 CPU 负载归因到具体的线程，而不仅仅是整个进程的模糊汇总。
+
+#### 诊断线程状态与阻塞
+
+`/proc/self/task/<tid>/status` 文件包含了该线程的详细状态（如 `State: S (sleeping)`, `voluntary_ctxt_switches` 等）。`/proc/self/task/<tid>/wchan` 则能告诉你一个睡眠中的线程**正在等待哪个内核函数**，这对于分析死锁或意外阻塞至关重要。
+
+#### 监控线程栈与内存
+
+`/proc/self/task/<tid>/stack`（需要内核支持）可以获取该线程的内核栈回溯，是调试内核相关问题的直接证据。`/proc/self/task/<tid>/maps` 则展示了该线程的内存映射，有助于排查线程级别的内存泄漏或非法访问。
+
+### 查看当前进程中的线程
+
+``` c++
+bool list_task_ids(std::set<pid_t>& ids, std::string& error)
+{
+    ids.clear();
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator("/proc/self/task")) {
+            const std::string name = entry.path().filename().string();
+            std::size_t parsed = 0;
+            const long value   = std::stol(name, &parsed);
+            if (parsed == name.size() && value > 0) {
+                ids.insert(static_cast<pid_t>(value));
+            }
+        }
+    } catch (const std::exception& e) {
+        error = std::string("failed to enumerate process threads: ") + e.what();
+        return false;
+    }
+    return true;
+}
+```
+
+
+
 ## 线程实时化
 
 ### 锁页
@@ -1716,7 +1760,7 @@ cycle 10000  RT → CPU6
 
 而不是到处漂。
 
-#### 本质是 CPU mask
+#### 本质是 `CPU_mask`
 
 Linux 内核里，CPU affinity 通常不是 cpu = 6 这种单个数字概念。而是$\boxed{CPU \ mask}$，比如：
 
@@ -1725,29 +1769,16 @@ CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
  0    0    0    0    0    0    1    0
 ```
 
-意思是：
+代表：
 
 ```c++
 allowed CPUs = {6}
 ```
 
-也可以写：
-
-```c++
-CPU0 CPU1 CPU2 CPU3 CPU4 CPU5 CPU6 CPU7
- 0    0    0    0    1    0    1    0
-```
-
-代表：
-
-```c++
-allowed CPUs = {4, 6}
-```
-
 因此 affinity 并不一定是“绑死一个核”。它真正的含义是：**scheduler 只能从这个 allowed CPU set 中选。**具体代码（**相关操作宏的参数都是先CPU序号，再集合**）：
 
 ``` c++
-#include<pthread.h>			// 哪个线程		// 多少个 cpu			// cpu 集合
+#include<pthread.h>			// 哪个线程		// cpu 集合中的数量			// cpu 集合
 int pthread_setaffinity_np (pthread_t __th, size_t __cpusetsize, const cpu_set_t *__cpuset)
 
 #include<sched.h>
@@ -1766,7 +1797,7 @@ if (result != 0) {
 }
 ```
 
-验证是否绑核成功：
+**验证是否绑核成功：**
 
 ``` c
     // 验证 CPU 绑核是否成功
@@ -1779,6 +1810,83 @@ if (result != 0) {
     if (!CPU_EQUAL(&expected, &actual)) {
         return thread_setup_error("thread affinity verification", 0);
     }
+```
+
+**CPU ID 列表转换为 `cpu_set_t`**：
+
+``` c++
+// 把 CPU ID 列表转换为 cpu_set_t
+bool cpu_mask(const std::vector<int>& cpus, cpu_set_t& mask, std::string& error)
+{
+    CPU_ZERO(&mask);
+    if (cpus.empty()) {
+        error = "expected CPU set is empty";
+        return false;
+    }
+    for (int cpu : cpus) {
+        if (cpu < 0 || cpu >= CPU_SETSIZE) {
+            error = "CPU id is outside cpu_set_t";
+            return false;
+        }
+        CPU_SET(cpu, &mask);
+    }
+    return true;
+}
+```
+
+**把位图转换为 CPU ID：**
+
+``` c++
+std::string format_mask(const cpu_set_t& mask)
+{
+    std::ostringstream out;
+    out << '{';
+    bool first = true;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {   // 扫描全部 1024 个可能的位
+        if (!CPU_ISSET(cpu, &mask)) continue;       // 该位为 0 → 跳过
+        if (!first) out << ',';                     // 不是第一个 → 先补逗号
+        out << cpu;                                 // 输出该 CPU 编号
+        first = false;
+    }
+    out << '}';
+    return out.str();
+}
+```
+
+**校验线程亲和性是否符合预期：**
+
+``` c++
+// 校验线程 affinity 是否符合预期
+bool verify_task(pid_t tid, const cpu_set_t& expected,
+                 const char* role, std::string& error)
+{
+    cpu_set_t actual;
+    CPU_ZERO(&actual);
+    if (::sched_getaffinity(tid, sizeof(actual), &actual) != 0) {
+        error = std::string("sched_getaffinity failed for ") + role +
+                " TID " + std::to_string(tid) + ": " + std::strerror(errno);
+        return false;
+    }
+    if (!CPU_EQUAL(&actual, &expected)) {
+        error = std::string(role) + " TID " + std::to_string(tid) +
+                " affinity=" + format_mask(actual) +
+                " expected=" + format_mask(expected);
+        return false;
+    }
+    sched_param param{};
+    const int policy = ::sched_getscheduler(tid);
+    if (policy < 0 || ::sched_getparam(tid, &param) != 0) {
+        error = std::string("failed to read scheduler for ") + role +
+                " TID " + std::to_string(tid) + ": " + std::strerror(errno);
+        return false;
+    }
+    if (policy != SCHED_OTHER || param.sched_priority != 0) {
+        error = std::string(role) + " TID " + std::to_string(tid) +
+                " expected SCHED_OTHER/0";
+        return false;
+    }
+    return true;
+}
 ```
 
 #### `lscpu`：查看核分布
@@ -2130,52 +2238,6 @@ Policy            FIFO 70
 IMU               FIFO 60 或普通
 Monitor           SCHED_OTHER
 Logger            SCHED_OTHER
-```
-
-## 线程分配
-
-最关键的线程关系：`policy_main` 内同步执行观测和 ORT；`policy_cmd` 消费模型关节目标，结合更新的反馈计算电机命令；`ecat_rt` 消费命令并收发 PDO。三者按各自周期运行，没有每帧互相等待的同步屏障。日志通过命令线程回传，由策略线程入队，最后在后台线程写盘。
-
-| 线程                        | 当前配置                               | 职责                                                     |
-| --------------------------- | -------------------------------------- | -------------------------------------------------------- |
-| `policy_main`               | CPU4，SCHED_OTHER，策略周期 20 ms      | 主程序、观测构建、ORT 推理、结果准入和日志入队           |
-| `imu_can_rx`                | CPU2，SCHED_OTHER，按 CAN 到达事件运行 | 接收/解析 IMU，发布 AHRS 快照                            |
-| `policy_cmd`                | CPU6，FIFO70，1 ms                     | 消费目标、读取反馈、计算脚踝力矩及阻抗命令               |
-| `ecat_rt`                   | CPU7，FIFO80，1 ms                     | 命令/STOP 状态机、EtherCAT PDO 收发、反馈发布            |
-| `xbox_poll`                 | CPU0–1，SCHED_OTHER                    | 设备事件读取和速度缓存；20 ms 参数是 poll 等待超时       |
-| `infer_log`                 | CPU0–1，SCHED_OTHER                    | CSV 写入，默认每 1 s 或退出时 flush                      |
-| `motor_status` / `rt_event` | CPU0–1，SCHED_OTHER                    | 公共状态发布和实时事件转发；电机 controller.start 中启动 |
-
-## 程序调用
-
-> src/inference/examples/policy_test.cpp
-
-``` c++
-// 配置各个线程参数
-cfg.runtime = inference::make_rk3588_runtime_profile();
-
-// 检查 RK3588 部署环境是否满足要求
-if (cfg.runtime.require_host_preflight && !robot_base::environment_check(config_error)) {
-    std::cerr << "[ERROR] RK3588 RT host preflight failed: " << config_error << "\n";
-    return 1;
-}
-
-// 配置主线程
-const robot_base::ThreadSetupResult main_setup =
-      robot_base::configure_current_thread("policy_main",
-                                         cfg.runtime.policy_main);
-if (!main_setup.success) {
-    std::cerr << "[ERROR] Failed to configure policy_main: "
-              << main_setup.error << "\n";
-    return 1;
-}
-
-// 在inference::RobotInterface robot.initialize() 中配置其他线程
-if (!robot.initialize()) {
-    safe_shutdown(robot);
-    std::cerr << "[ERROR] robot.initialize() failed.\n";
-    return 1;
-}
 ```
 
 ## 设置配置参数
@@ -2594,11 +2656,17 @@ inline bool environment_check(std::string& error)
 
 ### `robot-rt-setup.sh`
 
+# 脚踝运动学解算
+
+
+
 # 推理层
 
-## 电机映射
+## `JointMapping`：处理电机映射
 
-### `struct AnkleMap`：脚踝 ID 映射
+### 数据结构
+
+#### `struct AnkleMap`：脚踝 ID 映射
 
 ``` c++
 /* 脚踝并联机构：两个模型虚拟轴（pitch/roll）由上下两个物理电机并联驱动。 */
@@ -2611,7 +2679,7 @@ struct AnkleMap {
 };
 ```
 
-### `struct JointMappingConfig`：模型 ID ->物理 ID 映射表
+#### `struct JointMappingConfig`：模型 ID ->物理 ID 映射配置
 
 ``` c++
 struct JointMappingConfig {
@@ -2622,28 +2690,28 @@ struct JointMappingConfig {
         -1, -1, 1, 1, -1, -1,
         -1, 1, 1, -1, -1, -1
     };
-	/* 脚踝 ID 映射 */
+	/* 脚踝 目标角度索引查询 和对应的电机 ID */
     AnkleMap left_ankle  = {8, 10, 4, 5};
     AnkleMap right_ankle = {9, 11, 10, 11};
 };
 ```
 
-### `class JointMapping`：电机 ID 转换器
+#### `class JointMapping`：电机 ID 转换器
 
 本质只是对`inference::JointMappingConfig config_`的一层封装：
 
 ``` c++
 class JointMapping {
 public:
-    static std::shared_ptr<const JointMapping> create(int                       dof_count,
-                                                      const JointMappingConfig& config,
-                                                      std::string&              error);
+    // 非法配置抛出 std::invalid_argument；映射表在构造时生成。
+    JointMapping(int dof_count, const JointMappingConfig& config);
 
     int dof_count() const noexcept { return dof_count_; }
 	
     /* 获取脚踝映射 */
     const AnkleMap& left_ankle()  const noexcept { return config_.left_ankle; }
     const AnkleMap& right_ankle() const noexcept { return config_.right_ankle; }
+    
 	/* 模型 id 是否合法 */
     bool is_model_dof(int model_index) const;
     /* 通过模型 id 获取物理 id */
@@ -2653,19 +2721,547 @@ public:
 
 private:
     JointMapping() = default;
-    /* 保存 config */
-    inference::JointMappingConfig config_;
+	std::array<int, 12> motor_direction_{};
+    AnkleMap left_ankle_;
+    AnkleMap right_ankle_;
     /* 保存 关节数量 */
     int dof_count_ = 0;
+    /* 映射转换表，依据模型索引下标找到电机的物理 ID */
     std::vector<int> motor_id_map;
 };
 ```
 
+### 构造函数
+
+``` c++
+JointMapping::JointMapping(int dof_count, const JointMappingConfig& config)
+{
+    if (dof_count <= 0) {
+        throw std::invalid_argument("dof_count must be positive");
+    }
+
+    if (static_cast<int>(config.motor_direction.size()) != dof_count) {
+        throw std::invalid_argument("motor_direction must have one value per motor");
+    }
+
+    // 检查 左右脚踝 的索引是否在范围内
+    if (!ankle_map_index_in_range(config.left_ankle,
+                                  dof_count) ||
+        !ankle_map_index_in_range(config.right_ankle,
+                                  dof_count)) {
+        throw std::invalid_argument("ankle parallel maps contain an out-of-range index");
+    }
+	
+    // 脚踝索引查询表
+    std::vector<unsigned char> is_ankle_dof(dof_count, 0U);
+    const auto& left  = config.left_ankle;
+    const auto& right = config.right_ankle;
+    is_ankle_dof[left.model_pitch_dof]  = 1U;
+    is_ankle_dof[left.model_roll_dof]   = 1U;
+    is_ankle_dof[right.model_pitch_dof] = 1U;
+    is_ankle_dof[right.model_roll_dof]  = 1U;
+	
+	// 按照模型顺序遍历，(不映射脚踝电机)
+    motor_id_map.assign(static_cast<std::size_t>(dof_count), -1);
+    int mapping_slot = 0;
+    for (int model_index = 0; model_index < dof_count; ++model_index) {
+        
+        // 不映射脚踝电机
+        if (is_ankle_dof[static_cast<std::size_t>(model_index)] != 0U) {
+            continue;
+        }
+
+        const int motor_index = config.model_to_motor_index[static_cast<std::size_t>(mapping_slot)];
+        ++mapping_slot;
+
+        if (!index_in_range(motor_index, dof_count)) {
+            throw std::invalid_argument("model_to_motor_index contains an out-of-range motor index");
+        }
+        motor_id_map_[static_cast<std::size_t>(model_index)] = motor_index;
+    }
+
+    motor_direction_ = config.motor_direction;
+    left_ankle_  	 = config.left_ankle;
+    right_ankle_ 	 = config.right_ankle;
+    dof_count_ 		 = dof_count;
+}
+```
+
+### 接口函数
+
+#### `is_model_dof()`：判断是否配置
+
+``` c++
+bool JointMapping::is_model_dof(int model_index) const
+{
+    return motor_id_map[static_cast<std::size_t>(model_index)] < 0;
+}
+```
+
+#### `get_motor_id()`：找到对应物理 ID
+
+``` c++
+int JointMapping::get_motor_id(int model_index) const
+{
+    return motor_id_map[static_cast<std::size_t>(model_index)];
+}
+```
+
+#### `get_motor_direction()`：电机是否反向
+
+``` c++
+int JointMapping::get_motor_direction(int motor_index) const
+{
+    return config_.motor_direction[static_cast<std::size_t>(motor_index)];
+}
+```
+
+## `ObservationBuilder`：构建观测帧
+
+`ObservationBuilder` 负责把**电机反馈、机身状态、目标速度和历史动作，转换成策略模型需要的观测历史数组**。
+
+``` mermaid
+flowchart TD
+    A[物理顺序的电机位置和速度] --> B[直驱关节：索引映射和方向转换]
+    A --> C[脚踝：方向转换、FK 和 Jacobian]
+    B --> D[模型顺序的关节位置和速度]
+    C --> D
+    D --> E[位置减默认姿态、各项缩放]
+    F[机身角速度、投影重力、目标速度] --> E
+    G[历史动作、可选步态相位] --> E
+    E --> H[按观测项维护 15 帧历史]
+    H --> I[PolicyObservation]
+```
+
+### 数据结构
+
+#### `ObservationScaleConfig`：配置观测缩放系数
+
+``` c++
+/* 观测缩放：ObservationBuilder 消费。全部按模型 DOF 顺序。 */
+struct ObservationScaleConfig {
+    std::array<double, kDof> dof_pos_scale = {
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+    };
+    std::array<double, kDof> dof_vel_scale = {
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+        0.05, 0.05, 0.05, 0.05, 0.05, 0.05
+    };
+    std::array<double, 3> command_scale      = {1.0, 1.0, 1.0};
+    std::array<double, 3> body_ang_vel_scale = {0.2, 0.2, 0.2};
+    std::array<double, 3> projected_gravity_scale = {1.0, 1.0, 1.0};
+    std::array<double, kDof> last_action_scale = {
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+    };
+    std::array<double, 2> gait_phase_scale = {1.0, 1.0};
+};
+```
+
+#### `struct ObservationTerms`：单帧观测
+
+``` c++
+struct ObservationTerms {
+    std::array<float, policy_observation::kBaseAngVelSize> base_ang_vel{};
+    std::array<float, policy_observation::kProjectedGravitySize> projected_gravity{};
+    std::array<float, policy_observation::kVelocityCommandsSize> velocity_commands{};
+    std::array<float, policy_observation::kJointPosRelSize> joint_pos_rel{};
+    std::array<float, policy_observation::kJointVelRelSize> joint_vel_rel{};
+    std::array<float, kDof> last_action{};
+};
+```
+
+#### `class ObservationBuilder`
+
+``` c++
+class ObservationBuilder {
+public:
+    // config 和已构造的 mapping 在运行期不可变，且必须比本对象存活更久。
+    ObservationBuilder(const RobotInterfaceConfig& config,
+                       const JointMapping& mapping);
+
+    // 保存上一动作，并将各分量裁剪到 [-1, 1]。
+    void set_last_action(const PolicyAction& raw_action) noexcept;
+
+    bool build(const MotorStateSnapshot&    motor_state,
+            const    AhrsStateSnapshot&     ahrs_state,
+            const    std::array<double, 3>& target_velocity,
+            PolicyObservation&              observation,
+            std::string& error);
+
+    void          advance_frame() noexcept;
+    std::uint64_t frame_index() const noexcept { return frame_index_; }
 
 
-## 处理模型输出动作
+private:
+    using MotorStateArray = std::array<double, motor_base::kMotorNum>;
+    using JointTermArray  = std::array<float, kDof>;
 
-### `class ActionProcessor`：处理动作目标值
+    std::array<float, policy_observation::kGaitPhaseSize>
+    build_gait_phase(
+        const std::array<float, policy_observation::kVelocityCommandsSize>& velocity_commands) const;
+
+    template <std::size_t TermSize>
+    void update_stacked_term(std::size_t& offset,
+                             const std::array<float, TermSize>& current_term);
+
+    bool build_joint_terms(const MotorStateArray& q_motor_rad,      // 位置
+                          const MotorStateArray& dq_motor_rad_s,    // 速度
+                          JointTermArray& joint_pos_rel,
+                          JointTermArray& joint_vel_rel,
+                          std::string& error);
+
+    bool build_ankle_joint_terms(const MotorStateArray& q_motor_rad,
+                                  const MotorStateArray&  dq_motor_rad_s,
+                                  const AnkleMap& ankle_map,
+                                  ankle_motor_fk::Solver& state,
+                                  JointTermArray& joint_pos_rel,
+                                  JointTermArray& joint_vel_rel,
+                                  std::string& error) const;
+    
+    // 保存关节映射
+    const RobotInterfaceConfig& config_;
+    const JointMapping&         mapping_;
+
+    // 运动学正解求解器
+    ankle_motor_fk::Solver left_ankle_fk_;
+    ankle_motor_fk::Solver right_ankle_fk_;
+
+    PolicyAction last_action_{};                // 需要裁剪到 [-1, 1] 的无量纲历史动作。
+    PolicyObservation stacked_observation_{};   // 拼接完成的帧
+    bool observation_history_ready_{false};     // 是否是首帧
+    std::uint64_t frame_index_{0};
+};
+```
+
+### 接口函数
+
+#### `build()`：构建当前推理轮次的观测帧
+
+首先对数据进行检查：
+
+``` c++
+// 构建当前推理轮次的观测帧
+bool ObservationBuilder::build(
+    const MotorStateSnapshot&    motor_state,       // 电机快照
+    const AhrsStateSnapshot&     ahrs_state,        // AHRS快照
+    const std::array<double, 3>& target_velocity,   // 目标速度
+    PolicyObservation&           observation,       // 完整策略观测历史
+    std::string& error)
+{
+    if (!ahrs_state.projected_gravity_valid) {
+        error = "projected gravity is invalid";
+        return false;
+    }
+    if (!finite_array(target_velocity)) {
+        error = "velocity command is not finite";
+        return false;
+    }
+    if (!finite_array(motor_state.position_rad) || !finite_array(motor_state.velocity_rad_s) ||
+        !finite_array(ahrs_state.body_ang_vel)  || !finite_array(ahrs_state.projected_gravity)) {
+        error = "observation source value is not finite";
+        return false;
+    }
+```
+
+然后按照每帧中数据的排布，**构建当前轮次的观测帧**：
+
+``` c++
+    // 构建当前推理轮次的观测帧
+    ObservationTerms current_terms;
+    // 构建 机身速度和姿态（project gravity） 项
+    for (int i = 0; i < 3; ++i) {
+        current_terms.base_ang_vel[i] = static_cast<float>(
+            ahrs_state.body_ang_vel[i] * config_.observation_scales.body_ang_vel_scale[i]);
+        current_terms.projected_gravity[i] =
+            static_cast<float>(ahrs_state.projected_gravity[i] *
+                               config_.observation_scales.projected_gravity_scale[i]);
+    }
+    // 构建 控制指令 项
+    current_terms.velocity_commands = {
+        static_cast<float>(target_velocity[0] * config_.observation_scales.command_scale[0]),
+        static_cast<float>(target_velocity[1] * config_.observation_scales.command_scale[1]),
+        static_cast<float>(target_velocity[2] * config_.observation_scales.command_scale[2])
+    };
+    // 构建 关节相对偏移和速度 项
+    if (!build_joint_terms(motor_state.position_rad,
+                           motor_state.velocity_rad_s,
+                           current_terms.joint_pos_rel,
+                           current_terms.joint_vel_rel,
+                           error)) {
+        return false;
+    }
+    // 构建 历史动作 项
+    for (std::size_t i = 0; i < last_action_.size(); ++i) {
+        current_terms.last_action[i] =
+            static_cast<float>(last_action_[i] * config_.observation_scales.last_action_scale[i]);
+    }
+```
+
+按模型要求的观测项顺序**更新整体观测数组**（由多个帧拼接而成）：
+
+``` c++
+    // 按模型要求的观测项顺序更新整体观测数组（由多个帧拼接而成）
+    std::size_t offset = 0;
+    update_stacked_term(offset, current_terms.base_ang_vel);
+    update_stacked_term(offset, current_terms.projected_gravity);
+    update_stacked_term(offset, current_terms.velocity_commands);
+
+    // 如果开启了步态相位，则还需要构建步态相位
+    if (config_.policy.gait.enabled) {
+        auto gait_phase = build_gait_phase(current_terms.velocity_commands);
+        for (std::size_t i = 0; i < gait_phase.size(); ++i) {
+            gait_phase[i] = (gait_phase[i] * config_.observation_scales.gait_phase_scale[i]);
+        }
+        update_stacked_term(offset, gait_phase);
+    }
+
+    update_stacked_term(offset, current_terms.joint_pos_rel);
+    update_stacked_term(offset, current_terms.joint_vel_rel);
+    update_stacked_term(offset, current_terms.last_action);
+    // 首此用首帧填充所有
+    observation_history_ready_ = true;
+
+    observation = stacked_observation_;
+    error.clear();
+    return true;
+}
+```
+
+### 私有辅助函数
+
+#### `build_joint_terms()`：构建关节观测
+
+**按照模型顺序遍历关节**，因为观测是通过模型顺序排布：
+
+``` c++
+bool ObservationBuilder::build_joint_terms(
+    const MotorStateArray& q_motor_rad,
+    const MotorStateArray& dq_motor_rad_s, // 输入物理顺序的电机位置和速度
+    JointTermArray& joint_pos_rel,         
+    JointTermArray& joint_vel_rel,         // 输出模型顺序的关节的相对偏移和速度
+    std::string& error)
+{
+    // 按照模型顺序遍历关节，因为观测是通过模型顺序排布
+    for (int model_index = 0; model_index < kDof; ++model_index) {
+
+        // 如果是脚踝模型的关节，则跳过，脚踝通过 build_ankle_joint_terms 构建
+        if (mapping_.is_model_dof(model_index)) {
+            continue;
+        }
+
+        // 得到模型 id 对应的电机 id
+        const int motor_index = mapping_.get_motor_id(model_index);
+        // 方向转换为模型方向
+        const double direction = static_cast<double>(mapping_.get_motor_direction(motor_index));
+
+        const double q_model   = direction * q_motor_rad[motor_index];
+        const double dq_model  = direction * dq_motor_rad_s[motor_index];
+
+        //  计算模型关节的相对偏移和速度，并进行缩放
+        joint_pos_rel[model_index] =
+            static_cast<float>((q_model - config_.default_joint_pos_rad[model_index]) *
+                                config_.observation_scales.dof_pos_scale[model_index]);
+        joint_vel_rel[model_index] =
+            static_cast<float>(dq_model * config_.observation_scales.dof_vel_scale[model_index]);
+    }
+```
+
+针对脚踝模型的关节，使用FK计算位置，并用解析 Jacobian 把电机速度映射为虚拟关节速度：
+
+``` c++
+    if (!build_ankle_joint_terms(   q_motor_rad,
+                                    dq_motor_rad_s,
+                                    mapping_.left_ankle(),
+                                    left_ankle_fk_,
+                                    joint_pos_rel,
+                                    joint_vel_rel,
+                                    error)) {
+        return false;
+    }
+    if (!build_ankle_joint_terms(   q_motor_rad,
+                                    dq_motor_rad_s,
+                                   mapping_.right_ankle(),
+                                   right_ankle_fk_,
+                                    joint_pos_rel,
+                                    joint_vel_rel,
+                                    error)) {
+        return false;
+    }
+
+    return true;
+}
+```
+
+#### `build_ankle_joint_terms()`：构建脚踝观测
+
+构建脚踝的 pitch 和 roll 的相对偏移和速度，使用 FK 和 Jacobian。首先得到脚踝电机的方向、位置、速度，将电机位置和速度转换为模型方向：
+
+``` c++
+bool ObservationBuilder::build_ankle_joint_terms(
+    const MotorStateArray& q_motor_rad,
+    const MotorStateArray& dq_motor_rad_s,
+    const AnkleMap& ankle_map,              // 选取本次解算的是左脚踝还是右脚踝
+    ankle_motor_fk::Solver& state,
+    JointTermArray& joint_pos_rel,
+    JointTermArray& joint_vel_rel,
+    std::string& error) const
+{
+
+    // 首先得到脚踝电机的方向、位置、速度，将电机位置和速度转换为模型方向
+    const int upper_motor_direction =
+        mapping_.get_motor_direction(ankle_map.upper_motor_index);
+    const int lower_motor_direction =
+        mapping_.get_motor_direction(ankle_map.lower_motor_index);
+
+    const double upper_motor_position = upper_motor_direction *
+        q_motor_rad[static_cast<std::size_t>(ankle_map.upper_motor_index)];
+    const double lower_motor_position = lower_motor_direction *
+        q_motor_rad[static_cast<std::size_t>(ankle_map.lower_motor_index)];
+    const double upper_motor_velocity = upper_motor_direction *
+        dq_motor_rad_s[static_cast<std::size_t>(ankle_map.upper_motor_index)];
+    const double lower_motor_velocity = lower_motor_direction *
+        dq_motor_rad_s[static_cast<std::size_t>(ankle_map.lower_motor_index)];
+```
+
+**正解得到对应的脚踝的 pitch 和 roll 角度**：
+
+``` c++
+    const ankle_motor_fk::FootAngles foot =
+        state.solve(upper_motor_position, lower_motor_position);
+    if (!foot.reachable ||
+        !std::isfinite(foot.pitch) ||
+        !std::isfinite(foot.roll)) {
+        error = "ankle FK failed while building observation";
+        return false;
+    }
+```
+
+计算脚踝关节的相对偏移并缩放，然后写入此帧的观测数组：
+
+``` c++
+    // 获取脚踝 pitch 和 roll 在观测数组中的索引
+    const auto pitch_index = static_cast<std::size_t>(ankle_map.model_pitch_dof);
+    const auto roll_index  = static_cast<std::size_t>(ankle_map.model_roll_dof);
+
+    // 计算脚踝关节的相对偏移并缩放，然后写入观测数组
+    joint_pos_rel[pitch_index] =
+        static_cast<float>((foot.pitch - config_.default_joint_pos_rad[pitch_index]) *
+                           config_.observation_scales.dof_pos_scale[pitch_index]);
+    joint_pos_rel[roll_index] =
+        static_cast<float>((foot.roll - config_.default_joint_pos_rad[roll_index]) *
+                           config_.observation_scales.dof_pos_scale[roll_index]);
+```
+
+使用 q_v_dot = J q_m_dot 计算脚踝虚拟关节速度：
+
+``` c++
+    ankle_jacobian::Result jacobian;
+    std::string jacobian_error;
+    if (!ankle_jacobian::solve(foot.pitch,
+                                     foot.roll,
+                                     upper_motor_position,
+                                     lower_motor_position,
+                                     jacobian,
+                                     jacobian_error)) {
+        error = "failed to build ankle jacobian: " + jacobian_error;
+        return false;
+    }
+
+    const double pitch_velocity =
+        jacobian.virtual_from_motor[0][0] * upper_motor_velocity +
+        jacobian.virtual_from_motor[0][1] * lower_motor_velocity;
+    const double roll_velocity =
+        jacobian.virtual_from_motor[1][0] * upper_motor_velocity +
+        jacobian.virtual_from_motor[1][1] * lower_motor_velocity;
+    if (!std::isfinite(pitch_velocity) || !std::isfinite(roll_velocity)) {
+        error = "ankle jacobian velocity is not finite";
+        return false;
+    }
+    // 缩放脚踝关节的速度，然后写入观测数组
+    joint_vel_rel[pitch_index] =
+        static_cast<float>(pitch_velocity * config_.observation_scales.dof_vel_scale[pitch_index]);
+    joint_vel_rel[roll_index] =
+        static_cast<float>(roll_velocity * config_.observation_scales.dof_vel_scale[roll_index]);
+
+    return true;
+}
+```
+
+#### `build_gait_phase()`：构建步态观测
+
+``` c++
+std::array<float, policy_observation::kGaitPhaseSize>
+ObservationBuilder::build_gait_phase(
+    const std::array<float, policy_observation::kVelocityCommandsSize>& velocity_commands) const
+{
+    const auto& gait_config = config_.policy.gait;
+    const double command_norm = std::sqrt(
+        static_cast<double>(velocity_commands[0]) * velocity_commands[0] +
+        static_cast<double>(velocity_commands[1]) * velocity_commands[1] +
+        static_cast<double>(velocity_commands[2]) * velocity_commands[2]);
+
+    double gate = std::clamp(
+        (command_norm - gait_config.stand_threshold) /
+            (gait_config.move_threshold - gait_config.stand_threshold),
+        0.0,
+        1.0);
+    gate = gate * gate * (3.0 - 2.0 * gate);
+
+    constexpr double kTwoPi = 6.28318530717958647692;
+    const double global_phase = std::fmod(static_cast<double>(frame_index_) * config_.policy.step_dt,
+        gait_config.period) / gait_config.period;
+    
+    const std::array<float, 2> phase{
+        static_cast<float>(std::sin(global_phase * kTwoPi)),
+        static_cast<float>(std::cos(global_phase * kTwoPi))
+    };
+    
+    return {
+        static_cast<float>(phase[0] * gate),
+        static_cast<float>(phase[1] * gate)
+    };
+}
+```
+
+#### `update_stacked_term()`：将此帧中的数据拼接到观测数组对应位置
+
+首先找到当前观测项在历史记录数组中的位置：
+
+``` c++
+template <std::size_t TermSize>
+void ObservationBuilder::update_stacked_term(
+    std::size_t& offset, const std::array<float, TermSize>& current_term)
+{
+    /* 找到当前观测项在历史记录数组中的位置 */
+    const auto begin = stacked_observation_.begin() + offset;
+    const auto end   = begin + policy_observation::kFrameStack * TermSize; // kFrameStack 是拼接帧的数量
+```
+
+然后把当前帧的数据拼接进去，如果是首帧观测则用当前帧数据填充满数组：
+
+``` c++
+    /* 已经有历史数据 */
+    if (observation_history_ready_) {
+        // 左移一次的历史数据
+        std::copy(begin + TermSize, end, begin);
+        // 填充当前历史数据
+        std::copy(current_term.begin(), current_term.end(), end - TermSize);
+    } 
+    /* 需要同时填充历史数据 */
+    else {
+        for (auto frame = begin; frame != end; frame += TermSize) {
+            std::copy(current_term.begin(), current_term.end(), frame);
+        }
+    }
+    offset += policy_observation::kFrameStack * TermSize;
+}
+```
+
+
+
+## `ActionProcessor`：处理模型输出动作
 
 ``` mermaid
 flowchart TD
@@ -2681,28 +3277,48 @@ flowchart TD
     G --> I
 ```
 
-#### 三个数据层次
+### 数据结构
 
-| 数据                           | 含义                   | 顺序     |
-| ------------------------------ | ---------------------- | -------- |
-| `PolicyAction`                 | 模型输出的无量纲动作   | 模型 DOF |
-| `FixedModelTarget`             | 目标关节角，单位 rad   | 模型 DOF |
-| `target_motor_rad / setpoints` | 物理电机位置或控制参数 |          |
-
-具体代码实现：
+#### `AnkleControlConfig`：脚踝解算参数
 
 ``` c++
-// src/inference/include/policy/policy_observation_config.hpp
-using PolicyAction      = std::array<float, kModelDof>;
+// src/inference/include/robot/robot_config.hpp
+struct AnkleControlConfig {
+    // 物理电机位置限位：[左上、左下、右上、右下]。
+    std::array<double, 4> motor_pos_min_rad = {-1.1, -1.1, -1.1, -1.1};
+    std::array<double, 4> motor_pos_max_rad = { 1.1,  1.1,  1.1,  1.1};
 
-// src/inference/include/robot/action_processor.hpp
-// 模型顺序的关节位置角度
-using ModelJointPositions = std::array<double, kModelDof>;
+    // 虚拟关节增益：[pitch, roll]，左右脚共用。
+    std::array<double, 2> virtual_kp = {187.0, 187.0};
+    std::array<double, 2> virtual_kd = {9.07, 9.07};
+
+    // 扭矩低通滤波；filter_dt_s 同时作为命令线程循环周期。
+    double filter_cutoff_rad_s   = 100.0;
+    double filter_dt_s           = 0.001;
+
+    // 电机额定扭矩与输出扭矩限幅。
+    double motor_rated_torque_nm = 10.5;
+    double target_torque_limit_permille = 2000.0;    // 目标扭矩限制，单位为千分比，最大值为 32767
+};
 ```
 
-#### `struct ActionConfig`：处理参数
+#### `LowPass2Coefficients`：保存滤波参数
+
+``` c++
+struct LowPass2Coefficients {
+    double b0 = 0.0;
+    double b1 = 0.0;
+    double b2 = 0.0;
+    double a1 = 0.0;
+    double a2 = 0.0;
+};
+```
+
+#### `struct ActionConfig`：模型输出数据处理参数
 
 > src/inference/include/robot/robot_config.hpp
+
+主要由 `default_joint_pos_rad、action_scale、action_clip、raw_action_clip` 组成：
 
 ``` c++
 /* 动作后处理：ActionProcessor / RobotInterface::policy_step 消费。
@@ -2717,12 +3333,42 @@ struct ActionConfig {
 };
 ```
 
-#### `make_model_target()`：把原始数据转换为模型顺序目标值
+#### `struct PolicyMotorCommand`：电机控制命令数组
+
+### 构造函数
+
+``` c++
+ActionProcessor::ActionProcessor(const RobotInterfaceConfig& config,
+                                 const JointMapping& mapping)
+    : config_(config),
+      mapping_(mapping),
+	  // 计算脚踝滤波参数
+      low_pass_coeffs_(compute_lowpass2_coefficients(config.ankle)),
+      left_ankle_torque_(
+          config.default_joint_pos_rad[
+              static_cast<std::size_t>(mapping.left_ankle().model_roll_dof)],
+          config.default_joint_pos_rad[
+              static_cast<std::size_t>(mapping.left_ankle().model_pitch_dof)]),
+      right_ankle_torque_(
+          config.default_joint_pos_rad[
+              static_cast<std::size_t>(mapping.right_ankle().model_roll_dof)],
+          config.default_joint_pos_rad[
+              static_cast<std::size_t>(mapping.right_ankle().model_pitch_dof)])
+{
+}
+```
+
+### 接口函数
+
+#### `make_model_target()`：处理模型输出的无纲量值
+
+**主要是做`raw_action_clip`-->`action_scale`-->`action_clip`**：
 
 ``` c++
 ActionProcessor::ModelJointPositions ActionProcessor::make_model_target(
-    const PolicyAction& raw_action, const ActionConfig& config) noexcept
+    const PolicyAction& raw_action) const noexcept
 {
+    const auto& config = config_.action;
     ModelJointPositions target;
     for (std::size_t i = 0; i < target.size(); ++i) {
         const double action = static_cast<double>(raw_action[i]);
@@ -2734,24 +3380,2602 @@ ActionProcessor::ModelJointPositions ActionProcessor::make_model_target(
         const double scaled_action = clipped_raw_action * config.action_scale[i];
         /* 再进行 action_clip 裁剪 */ 
         const auto& clip = config.action_clip[i];
-        target[i] = config.default_joint_pos_rad[i] +
+        target[i] = config_.default_joint_pos_rad[i] +
             std::max(clip[0], std::min(clip[1], scaled_action));
     }
     return target;
 }
 ```
 
-#### `make_motor_target`
+#### `build_motor_position_targets()`：生成电机目标关节角度
 
-首先从`mapping_`中获取
+将模型输出的原始目标数据转换为电机可以直接接受的目标位置。**按照`model_index`顺序遍历**`target_model_rad`数组，写入到 `motor index` 的目标关节角度数组中：
 
-## 脚踝解算与电机命令下发
+``` c++
+bool ActionProcessor::build_motor_position_targets()(
+    const ModelJointPositions&                  target_model_rad,  // 模型顺序的关节目标角
+    std::array<double, motor_base::kMaxMotors>& target_motor_rad,  // 电机目标角(引用传递)
+    std::string& error)
+{
+    const int count = mapping_->dof_count();
+	
+    // 按照模型顺序遍历 target_model_rad
+    for (int model_index = 0; model_index < count; ++model_index) {
+        
+        /* 先判断 model index 是否合法 */
+        if (mapping_->is_model_dof(model_index)) {
+            continue;
+        }
+        
+        /* 获取 model index 对应的关节角度 */
+        const int motor_index = mapping_->get_motor_id(model_index);
+        double q = target_model_rad[static_cast<std::size_t>(model_index)];
 
-### `class PolicyCommandWorker`：电机命令下发线程
+        /* 写入到 motor index 的目标关节角度 数组中 */
+        target_motor_rad[static_cast<std::size_t>(motor_index)] =
+            mapping_->get_motor_direction(motor_index) * q;
+    }
+```
 
-###`class RobotInterface`
+然后通过 ik 求解器通过目标 pitch/roll 求解对应电机的目标角度：
 
-#### `PolicyStepPhase`：策略状态机
+``` c++
+    // 依据 pitch/roll 的模型关节角度，计算脚踝电机的目标角度，写入到 target_motor_rad 对应索引
+    if (!apply_ankle_ik(target_model_rad,
+                        target_motor_rad,
+                        left_ankle_ik_,
+                        error)) {
+        return false;
+    }
+    if (!apply_ankle_ik(target_model_rad,
+                        target_motor_rad,
+                        right_ankle_ik_,
+                        error)) {
+        return false;
+    }
+
+    if (!validate_ankle_motor_limits(
+            mapping_, config_.ankle,
+            [&](std::size_t motor_index) { return target_motor_rad[motor_index]; },
+            "target", error)) {
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+```
+
+#### `build_policy_motor_command()`：生成电机下发的指令
+
+根据**模型顺序的关节目标角** `target_model_rad` 和**电机顺序的反馈数据** `motor_feedback`生成所有电机的控制命令，写入 `command`：
+
+- **普通关节电机**：目标位置 + 配置中的 `kp/kd`，由电机侧执行阻抗控制。
+- **脚踝电机**：根据目标与反馈计算电机力矩，设置 `kp = kd = 0`。
+
+正式策略流程中的 `target_model_rad` 已经过 `make_model_target()` 的裁剪、缩放和默认姿态偏移。该函数只生成命令，实际下发由调用方完成。
+
+----
+
+首先遍历电机反馈，检查每个电机是否处于可控状态，然后检查四个脚踝电机的**实际反馈位置**是否越限：
+
+``` c++
+bool ActionProcessor::build_policy_motor_command(
+    const ModelJointPositions& target_model_rad,  // 模型顺序的目标关节角
+    const MotorStateSnapshot&  motor_feedback,    // 电机顺序的反馈数据
+    PolicyMotorCommand&   	   command,           // 输出：电机控制命令
+    std::string& error)
+{
+    const int count = mapping_.dof_count();
+
+    // 检查脚踝电机的反馈位置是否处于物理限位内。
+    if (!validate_ankle_motor_limits(
+            [&](std::size_t motor_index) { return motor_feedback.position_rad[motor_index]; },
+            "feedback", error)) {
+        return false;
+    }
+```
+
+清空输出命令，并**按照 `model_index` 顺序遍历**目标关节角。跳过脚踝模型 DOF，将普通关节目标按映射和方向转换后，写入对应的 `motor_index`：
+
+``` c++
+    command = PolicyMotorCommand{};
+    command.setpoint_count = static_cast<std::size_t>(count);
+	
+	// 按照 `model_index` 顺序遍历目标关节角。跳过脚踝模型 DOF
+    for (int model_index = 0; model_index < count; ++model_index) {
+        // 跳过脚踝模型 DOF，稍后单独计算脚踝力矩。
+        if (mapping_.is_model_dof(model_index)) {
+            continue;
+        }
+
+        const int motor_index = mapping_.get_motor_id(model_index);
+        const auto motor_slot = static_cast<std::size_t>(motor_index);
+
+        const double q = target_model_rad[static_cast<std::size_t>(model_index)];
+
+        // 模型关节方向 → 物理电机方向。
+        const double motor_target = mapping_.get_motor_direction(motor_index) * q;
+
+        command.setpoints[motor_slot] =
+            motor_base::ImpedanceSetpoint(
+                motor_target,                       // 目标位置
+                0.0,                                // 目标速度
+                0.0,                                // 前馈力矩
+                config_.motor.mit_kp[motor_slot],    // 位置增益
+                config_.motor.mit_kd[motor_slot]);   // 速度增益
+    }
+```
+
+最后分别计算左右脚踝的控制力矩。每次调用填入同侧两个脚踝电机的命令，两次调用覆盖四个脚踝电机：
+
+``` c++
+    if (!build_ankle_torque_command(
+            ankle_motor_ik::AnkleSide::Left,
+            target_model_rad, motor_feedback, command, error)) {
+        return false;
+    }
+
+    if (!build_ankle_torque_command(
+            ankle_motor_ik::AnkleSide::Right,
+            target_model_rad, motor_feedback, command, error)) {
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+```
+
+### 私有辅助函数
+
+#### `compute_lowpass2_coefficients()`：计算滤波参数
+
+在`struct AnkleControlConfig`中：
+
+``` c++
+struct AnkleControlConfig {
+
+    /*...*/
+    
+    // 扭矩低通滤波；filter_dt_s 同时作为命令线程循环周期。
+    double filter_cutoff_rad_s   = 100.0;
+    double filter_dt_s           = 0.001;
+
+};
+```
+
+根据两个配置参数计算：
+
+- `filter_dt_s`：采样周期 \(T_s\)，默认 `0.001 s`。
+- `filter_cutoff_rad_s`：截止角频率，默认 `100 rad/s`。
+
+注意这里使用的是**滤波采样周期**，不是策略的 `step_dt`。令 $ u=T_s\omega_c $，代码采用以下公式：
+
+$ D=2500u^2+7071u+10000 $
+
+$   b_0=\frac{2500u^2}{D},\qquad  \qquad b_1=2b_0  b_2=b_0  $
+
+$   a_1=\frac{20000-5000u^2}{D},\qquad a_2=-\frac{2500u^2-7071u+10000}{D} $
+
+代入默认参数，得到：
+
+```
+b0 =  0.002329460
+b1 =  0.004658920
+b2 =  0.002329460
+a1 =  1.858909254
+a2 = -0.868227094
+```
+
+随后按照下面的递推公式过滤期望扭矩：
+
+$ y_k=b_0x_k+b_1x_{k-1}+b_2x_{k-2}    +a_1y_{k-1}+a_2y_{k-2} $
+
+其中，$x$ 是滤波前的期望扭矩，$y$ 是滤波后的扭矩。**系数在*`ActionProcessor`构造时计算一次**，控制循环中只更新历史输入、输出：
+
+``` c++
+ActionProcessor::ActionProcessor(const RobotInterfaceConfig& config,
+                                 const JointMapping& mapping)
+    /*...*/
+    
+      low_pass_coeffs_(compute_lowpass2_coefficients(config.ankle)),
+
+{
+}
+```
+
+具体计算函数：
+
+``` c++
+// filter_cutoff/filter_dt 已由配置加载器校验为有限正值，这里只做纯计算。
+ActionProcessor::LowPass2Coefficients ActionProcessor::compute_lowpass2_coefficients() const
+{
+    const double ts = config_.ankle.filter_dt_s;
+    const double wc = config_.ankle.filter_cutoff_rad_s;
+    const double ts2wc2 = ts * ts * wc * wc;
+    const double d = 2500.0 * ts2wc2 + 7071.0 * ts * wc + 10000.0;
+
+    LowPass2Coefficients coeffs;
+    coeffs.b0 = 2500.0 * ts2wc2 / d;
+    coeffs.b1 = 5000.0 * ts2wc2 / d;
+    coeffs.b2 = 2500.0 * ts2wc2 / d;
+    coeffs.a1 = -(5000.0 * ts2wc2 - 20000.0) / d;
+    coeffs.a2 = -(2500.0 * ts2wc2 - 7071.0 * ts * wc + 10000.0) / d;
+    return coeffs;
+}
+```
+
+
+
+#### `ankle_ik()`：IK 关节角得到电机角
+
+首先判断此次求解是求解左脚踝还是右脚踝，**依据左右获取`AnkleMap`（保存模型索引和电机索引），进而得到求解目标（目标关节角度）**，即`roll`和`pitch`：
+
+``` c++
+bool ActionProcessor::ankle_ik(
+    const ModelJointPositions&                  target_model_rad,   // 模型计算出的关节目标角
+    std::array<double, motor_base::kMaxMotors>& target_motor_rad,   // 电机目标角(引用)
+    ankle_motor_ik::Solver&                     solver,             // 脚踝IK求解器及其历史状态
+    std::string& error)
+{
+    const bool      is_left    = solver.side() == ankle_motor_ik::AnkleSide::Left;
+    const AnkleMap& ankle_map  = is_left ? mapping_->left_ankle() : mapping_->right_ankle();
+    const char*     ankle_name = is_left ? "left" : "right";
+    
+    /* 依据 ankle_map 中的 pitch/roll 的模型索引 获取 target_model_rad 中存储的目标关节角 */
+    const double pitch = target_model_rad[static_cast<std::size_t>(ankle_map.model_pitch_dof)];
+    const double roll  = target_model_rad[static_cast<std::size_t>(ankle_map.model_roll_dof)];
+```
+
+创建 `candidate_solver` 先尝试求解，**两个电机都可达后，再更新原求解器的历史状态**并得到解算后的电机角度：
+
+``` c++
+    // 创建 candidate_solver 是为了先尝试求解，两个电机都可达后，再更新原求解器的历史状态
+    ankle_motor_ik::Solver candidate_solver = solver;
+    const ankle_motor_ik::MotorAngles result = candidate_solver.solve(roll, pitch);
+
+    double upper_motor = 0.0;
+    double lower_motor = 0.0;
+
+	// 可达后再更新原求解器
+
+	// 本次成功：使用新解，并更新历史
+    if (result.reachable()) {
+        upper_motor = result.motor1;
+        lower_motor = result.motor2;
+        solver = candidate_solver;
+    }
+	// 本次失败，但有历史有效解：保持上一次目标
+	else if (solver.has_solution()) {
+        upper_motor = solver.previous_motor1();
+        lower_motor = solver.previous_motor2();
+    } 
+	 // 本次失败，且没有历史有效解：报错
+	else {
+        error = std::string(ankle_name) +
+                " ankle IK unreachable before any valid solution: roll=" +
+                std::to_string(roll) + " rad, pitch=" + std::to_string(pitch) +
+                " rad, motor1_reachable=" +
+                (result.motor1_reachable ? "true" : "false") +
+                ", motor2_reachable=" +
+                (result.motor2_reachable ? "true" : "false");
+        return false;
+    }
+```
+
+依据电机索引判断电机角度是否需要反向，然后将电机目标角度写入 `target_motor_rad`：
+
+``` c++
+    /* 依据电机索引判断电机角度是否需要反向，然后将电机目标角度写入 target_motor_rad */
+    const int upper_motor_direction =
+        mapping_->get_motor_direction(ankle_map.upper_motor_index);
+    const int lower_motor_direction =
+        mapping_->get_motor_direction(ankle_map.lower_motor_index);
+    const double upper_motor_target = upper_motor_direction * upper_motor;
+    const double lower_motor_target = lower_motor_direction * lower_motor;
+
+    target_motor_rad[static_cast<std::size_t>(ankle_map.upper_motor_index)] =
+        upper_motor_target;
+    target_motor_rad[static_cast<std::size_t>(ankle_map.lower_motor_index)] =
+        lower_motor_target;
+    error.clear();
+    return true;
+}
+```
+
+#### `build_ankle_torque_command()`：计算单侧脚踝的两个电机力矩
+
+根据单侧脚踝的目标 pitch/roll 和两个电机的反馈，完成以下计算：
+
+```c
+电机反馈位置 ──FK───────────→ 实际 pitch/roll
+电机反馈速度 ──雅可比映射──→ 实际 pitch/roll 速度
+                                      ↓
+目标 pitch/roll ────────────→ 虚拟关节 PD
+                                      ↓
+                                 二阶低通滤波
+                                      ↓
+                           雅可比转置映射为电机力矩
+                                      ↓
+                         方向修正、千分比换算及限幅
+                                      ↓
+                            写入两个电机的控制命令
+```
+
+首先根据 `side` 选择左右脚踝映射及其历史状态，获取模型关节索引、电机索引和目标角度：
+
+```c++
+bool ActionProcessor::apply_ankle_torque_control(
+    ankle_motor_ik::AnkleSide  side,
+    const ModelJointPositions& target_model_rad,
+    const MotorStateSnapshot&  motor_feedback,
+    FixedPolicyMotorCommand&   command,
+    std::string& error)
+{
+    const bool is_left = side == ankle_motor_ik::AnkleSide::Left;
+
+    const auto& ankle_map =
+        is_left ? mapping_.left_ankle() : mapping_.right_ankle();
+
+    auto& state =
+        is_left ? left_ankle_torque_state_ : right_ankle_torque_state_;
+
+    const auto pitch_index =
+        static_cast<std::size_t>(ankle_map.model_pitch_dof);
+    const auto roll_index =
+        static_cast<std::size_t>(ankle_map.model_roll_dof);
+    const auto upper_index =
+        static_cast<std::size_t>(ankle_map.upper_motor_index);
+    const auto lower_index =
+        static_cast<std::size_t>(ankle_map.lower_motor_index);
+
+    const double desired_pitch = target_model_rad[pitch_index];
+    const double desired_roll = target_model_rad[roll_index];
+```
+
+读取两个电机的位置和速度，并进行方向修正，转换到运动学求解器使用的方向。原始电机位置同时保留，后面用于填充命令的位置字段：
+
+```c++
+    const int upper_direction =
+        mapping_.get_motor_direction(ankle_map.upper_motor_index);
+    const int lower_direction =
+        mapping_.get_motor_direction(ankle_map.lower_motor_index);
+
+    // 物理电机反馈位置。
+     const double upper_position_rad = motor_feedback.position_rad[upper_index];
+    const double lower_position_rad  = motor_feedback.position_rad[lower_index];
+
+    // 转换到运动学求解器方向。
+    const double upper_motor = upper_direction * upper_position_rad;
+    const double lower_motor = lower_direction * lower_position_rad;
+
+    const double upper_motor_velocity =
+        upper_direction * motor_feedback.velocity_rad_s[upper_index];
+    const double lower_motor_velocity =
+        lower_direction * motor_feedback.velocity_rad_s[lower_index];
+```
+
+通过 **FK 正运动学求解器**，由当前两个电机角度求出实际 pitch/roll。不可达或结果不是有限值时，返回失败：
+
+```c++
+    const ankle_motor_fk::FootAngles foot =
+        state.fk_solver.solve(upper_motor, lower_motor);
+
+    if (!foot.reachable ||
+        !std::isfinite(foot.pitch) ||
+        !std::isfinite(foot.roll)) {
+        error = "ankle FK failed while building policy impedance command";
+        return false;
+    }
+```
+
+根据当前姿态计算雅可比矩阵。这里使用的 `virtual_from_motor` 将**电机角速度映射为虚拟关节角速度**，行顺序为 `[pitch, roll]`，列顺序为 `[upper, lower]`：
+
+```c++
+    ankle_jacobian::Result jacobian;
+    std::string jacobian_error;
+
+    if (!ankle_jacobian::solve(
+            foot.pitch,
+            foot.roll,
+            upper_motor,
+            lower_motor,
+            jacobian,
+            jacobian_error)) {
+        error = "failed to build ankle torque jacobian: " + jacobian_error;
+        return false;
+    }
+
+    const double pitch_velocity =
+        jacobian.virtual_from_motor[0][0] * upper_motor_velocity +
+        jacobian.virtual_from_motor[0][1] * lower_motor_velocity;
+
+    const double roll_velocity =
+        jacobian.virtual_from_motor[1][0] * upper_motor_velocity +
+        jacobian.virtual_from_motor[1][1] * lower_motor_velocity;
+```
+
+然后在**虚拟 pitch/roll 关节空间**进行 PD 控制。目标角速度取 `0`，因此阻尼项直接为 `-Kd × 实际角速度`：
+
+```c++
+    const double pitch_torque_des =
+        config_.ankle.virtual_kp[0] * (desired_pitch - foot.pitch) -
+        config_.ankle.virtual_kd[0] * pitch_velocity;
+
+    const double roll_torque_des =
+        config_.ankle.virtual_kp[1] * (desired_roll - foot.roll) -
+        config_.ankle.virtual_kd[1] * roll_velocity;
+```
+
+对 pitch/roll 力矩分别进行二阶低通滤波。`x1/x2` 保存前两次输入，`y1/y2` 保存前两次输出，每次计算后更新历史状态：
+
+```c++
+    auto apply_low_pass = [this](double input, LowPass2State& filter_state) {
+        const double output =
+            low_pass_coeffs_.b0 * input +
+            low_pass_coeffs_.b1 * filter_state.x1 +
+            low_pass_coeffs_.b2 * filter_state.x2 +
+            low_pass_coeffs_.a1 * filter_state.y1 +
+            low_pass_coeffs_.a2 * filter_state.y2;
+
+        filter_state.x2 = filter_state.x1;
+        filter_state.x1 = input;
+        filter_state.y2 = filter_state.y1;
+        filter_state.y1 = output;
+
+        return output;
+    };
+
+    const double pitch_torque_lp =
+        apply_low_pass(pitch_torque_des, state.pitch_filter);
+
+    const double roll_torque_lp =
+        apply_low_pass(roll_torque_des, state.roll_filter);
+```
+
+将滤波后的虚拟关节力矩，通过**同一雅可比矩阵的转置**映射为两个电机的力矩：
+
+```c++
+    const double upper_torque_nm =
+        jacobian.virtual_from_motor[0][0] * pitch_torque_lp +
+        jacobian.virtual_from_motor[1][0] * roll_torque_lp;
+
+    const double lower_torque_nm =
+        jacobian.virtual_from_motor[0][1] * pitch_torque_lp +
+        jacobian.virtual_from_motor[1][1] * roll_torque_lp;
+```
+
+若记虚拟关节速度关系为 `dq_virtual = J × dq_motor`，则对应的电机力矩关系为 `tau_motor = Jᵀ × tau_virtual`。
+
+随后将电机力矩从求解器方向转换回物理电机方向，由 `N·m` 换算为**额定力矩千分比**，再按配置进行对称限幅：
+
+```c++
+    const double scale =
+        1000.0 / config_.ankle.motor_rated_torque_nm;
+
+    const double upper_effort_permille = std::max(
+        -config_.ankle.target_torque_limit_permille,
+        std::min(
+            config_.ankle.target_torque_limit_permille,
+            upper_direction * upper_torque_nm * scale));
+
+    const double lower_effort_permille = std::max(
+        -config_.ankle.target_torque_limit_permille,
+        std::min(
+            config_.ankle.target_torque_limit_permille,
+            lower_direction * lower_torque_nm * scale));
+```
+
+最后写入同侧两个电机的命令：位置字段填当前反馈位置，目标速度为 `0`，计算力矩写入 `effort_ff`，`kp/kd` 均置为 `0`。因此，这两个电机通过力矩项进行控制：
+
+```c++
+    command.setpoints[upper_index] =
+        motor_base::ImpedanceSetpoint(
+            upper_position_rad,     // 当前反馈位置
+            0.0,                    // 目标速度
+            upper_effort_permille,  // 额定力矩千分比
+            0.0,                    // kp
+            0.0);                   // kd
+
+    command.setpoints[lower_index] =
+        motor_base::ImpedanceSetpoint(
+            lower_position_rad,
+            0.0,
+            lower_effort_permille,
+            0.0,
+            0.0);
+
+    error.clear();
+    return true;
+}
+```
+
+## `PolicyCommandWorker`：电机命令下发线程
+
+### 数据结构
+
+#### `struct policyTargetWithRecordFrame`：槽发布的数据
+
+由`publish_target()`函数构造：
+
+``` c++
+private:    
+	struct PolicyTargetWithRecordFrame {
+        PolicyTargetFrame target{};
+        InferenceRecord   record{};
+    };
+```
+
+#### `struct PolicyTargetFrame`：策略希望关节到哪里
+
+**外部构造使用。**输入是模型目标，输出是电机命令：
+
+``` c++
+struct PolicyTargetFrame {
+    std::uint64_t policy_seq{0};					// 标识这次策略输出
+    std::int64_t  published_at_ns{0};				// 目标实际发布的时间
+    std::int64_t  policy_valid_until_ns{0};			// 这个目标最多使用到什么时候
+    std::int64_t  obs_to_action_age_us{0};			// 发布前采样的观测到动作年龄，供诊断使用
+    std::array<double, kDof> target_model_rad{};	// make_model_target() 处理后的模型顺序关节目标角
+};
+```
+
+`build_policy_motor_command()`输出的 `PolicyMotorCommand` 是 worker 线程中的**局部变量**：
+
+```c++
+PolicyMotorCommand command;
+
+action_processor_->build_policy_motor_command(
+    current_target.target_model_rad,
+    motor_feedback,
+    command,
+    error);
+```
+
+随后拆出命令内容，交给电机模块：
+
+```c++
+motor_session_.apply_impedance_setpoints_realtime(
+    command.setpoints,
+    command.setpoint_count,
+    timing);
+```
+
+`RobotMotorSession` 再将其封装成底层 `ControlCommand` 提交。
+
+```
+PolicyTargetFrame.target_model_rad ─┐
+                                    ├─ ActionProcessor
+最新电机反馈 ─────────────────────────┘
+                                          ↓
+                                 PolicyMotorCommand
+                                          ↓
+                           附加 CommandTiming 后提交
+```
+
+例如，`PolicyTargetFrame` 中存的是“左脚踝目标 pitch 为 `0.1 rad`”；`PolicyMotorCommand` 中存的是根据当前反馈计算出的“左脚踝上下两个电机分别输出多少力矩”。
+
+**同一个 `PolicyTargetFrame` 可以生成多次不同的 `PolicyMotorCommand`**：目标没变，但反馈和滤波状态在变化。命令的时间信息由 worker 单独生成，不保存在 `PolicyMotorCommand` 中。
+
+
+### 构造函数
+
+构造函数主要是配置保护配置：
+
+``` c++
+PolicyCommandWorker::PolicyCommandWorker(
+    const RobotInterfaceConfig&      config,
+    RobotMotorSession&               motor_session,
+    ActionProcessor&                 action_processor,
+    const std::atomic<std::int64_t>& first_policy_inference_started_ns)
+    : config_(config),
+      motor_session_(motor_session),
+      action_processor_(action_processor),
+
+      /* 设置保护配置 */
+      target_timeout_ns_(robot_base::seconds_to_ns(
+          config.safety.policy_target_timeout_ms / 1000.0)),
+      command_timeout_ns_(robot_base::seconds_to_ns(
+          config.safety.control_command_timeout_ms / 1000.0)),
+      max_feedback_age_ns_(robot_base::seconds_to_ns(config.sensor_guard.max_motor_sample_age_s)),
+
+      first_policy_inference_started_ns_(first_policy_inference_started_ns)
+{
+}
+```
+
+### 析构函数
+
+``` c++
+PolicyCommandWorker::~PolicyCommandWorker() {
+    stop();
+}
+```
+
+### 接口函数
+
+#### `start()`：线程接管前保持复位 / 启动`policy_cmd`线程
+
+``` c++
+bool PolicyCommandWorker::start(
+    std::array<double, motor_base::kMotorNum> startup_hold_target_motor_rad)
+{
+    // 线程启动之前电机需要保持的角度
+    startup_hold_target_motor_rad_ = std::move(startup_hold_target_motor_rad);
+    {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        error_.clear();
+        failed_.store(false);
+    }
+
+    std::string error;
+    if (!motor_session_.check_health(error)) {
+        std::cerr << "[PolicyCommandWorker] start rejected: " << error << "\n";
+        return false;
+    }
+    // 在线程接管前刷新一次复位命令，为首次 worker 调度保留完整有效期。
+    if (!submit_startup_hold()) {
+        std::cerr << "[PolicyCommandWorker] start rejected: "
+                     "failed to refresh startup reset pose\n";
+        return false;
+    }
+
+    running_.store(true);
+
+    std::string thread_error;
+    if (!robot_base::start_configured_thread(
+            worker_thread_, "policy_cmd", config_.runtime.policy_command,
+            [this] { run(); }, thread_error)) {
+        running_.store(false);
+        std::cerr << "[PolicyCommandWorker] failed to start thread: "
+                  << thread_error << "\n";
+        return false;
+    }
+
+    return true;
+}
+```
+
+#### `stop()`：停止函数
+
+``` c++
+void PolicyCommandWorker::stop()
+{
+    request_stop();
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
+}
+```
+
+#### `request_stop()`：请求停止
+
+``` c++
+void PolicyCommandWorker::request_stop() noexcept
+{
+    running_.store(false);
+}
+```
+
+#### `check_health()`：检查是否正常
+
+``` c++
+bool PolicyCommandWorker::check_health(std::string& error) const
+{
+    if (failed_.load()) {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        error = error_;
+        return false;
+    }
+    if (!running_.load()) {
+        error = "policy command worker is not running";
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+```
+
+#### `publish_target()`：发布完整策略目标帧
+
+> 复制目标及日志 → 设置时间与截止期 → 发布完整帧 → 返回发布时间
+
+**由`policy_step()`调用**接收策略目标及关联日志，设置有效期，再交给 `policy_cmd` 线程消费。**首先把本轮数据放入写槽**：
+
+```c++
+std::int64_t PolicyCommandWorker::publish_target(
+    const PolicyTargetFrame& target,
+    const InferenceRecord* 	 record) noexcept
+{
+    // 从 channel 中获取一个写槽
+    auto& frame  = *target_channel_.acquire_write_slot();
+    frame.target = target;
+    if (config_.recorder.enabled) {
+        frame.record = *record;
+    }
+    
+    // 设置发布时间和截止期；worker 的 run() 循环会检查截止期，过期就触发故障停止。
+    const std::int64_t published_at_ns = robot_base::monotonic_now_ns();
+    frame.target.published_at_ns       = published_at_ns;
+    frame.target.policy_valid_until_ns = published_at_ns + target_timeout_ns_;
+```
+
+**发布完整帧，并返回发布时间：**
+
+``` c++
+    target_channel_.publish_written();
+    return published_at_ns;
+}
+```
+
+**目标是否准入由 `policy_step()` 判断；发布后的命令计算和下发由 `policy_cmd` 线程完成。** 这个函数负责两者之间的数据交接。
+
+#### ` try_consume_completed_record()`：获取一帧完整日志信息
+
+由日志器调用。
+
+``` c++
+bool PolicyCommandWorker::try_consume_completed_record(InferenceRecord& record) noexcept
+{
+    return record_channel_.try_consume_latest(record);
+}
+```
+
+### 私有辅助函数
+
+#### `try_consume_target()`：获取策略目标帧
+
+``` c++
+bool PolicyCommandWorker::try_consume_target(PolicyTargetWithRecordFrame& frame) noexcept
+{
+    return target_channel_.try_consume_latest(frame);
+}
+```
+
+#### `build_command_timing()`：构造电机命令的来源和有效期信息
+
+**标记命令来源与生成时间**：
+
+- `source_policy_seq`：这条命令由哪一轮策略目标生成。
+- `produced_at_ns`：命令计算完成后采样的时间。
+
+同一个策略目标可以生成多条命令，因此多条命令的策略序号相同，生成时间不同。
+
+``` c++
+motor_base::CommandTiming PolicyCommandWorker::build_command_timing(
+    const PolicyTargetFrame& target,
+    std::int64_t             produced_at_ns,
+    std::int64_t feedback_valid_until_ns) const noexcept
+{
+    motor_base::CommandTiming timing;
+    timing.source_policy_seq = target.policy_seq;
+    timing.produced_at_ns    = produced_at_ns;
+    timing.valid_until_ns    = std::min({
+        target.policy_valid_until_ns,
+        produced_at_ns + command_timeout_ns_,
+        feedback_valid_until_ns});
+    return timing;
+}
+```
+
+| 截止期                                 | 约束                             |
+| -------------------------------------- | -------------------------------- |
+| `target.policy_valid_until_ns`         | 当前策略目标最晚可用到何时       |
+| `produced_at_ns + command_timeout_ns_` | 本条电机命令最晚可用到何时       |
+| `feedback_valid_until_ns`              | 本次计算使用的反馈最晚可用到何时 |
+
+这三个值都是绝对截止时刻，单位是纳秒，**使用同一个单调时钟。** 
+
+#### `run()`：线程执行函数
+
+确定控制周期和调度起点：这里规定的是调度目标，实际执行仍会受到计算耗时和线程调度影响。
+
+ ``` c++
+ void PolicyCommandWorker::run()
+ {
+     // 每轮控制循环的目标周期，来自 `filter_dt_s`。例如配置为 `0.001`，就是每 **1 ms** 执行一轮。
+     const auto period = std::chrono::nanoseconds(
+         std::max<std::int64_t>(
+             1,
+             robot_base::seconds_to_ns(config_.ankle.filter_dt_s)));
+ 	// 记录下一次计划唤醒的时间。
+     auto next_wake = std::chrono::steady_clock::now();
+ ```
+
+准备跨循环保留的数据：
+
+``` c++
+    // 当前使用的策略目标及关联记录
+	// 这是引用，不是副本。后面更新 current_frame 的内容后，通过 current_target 读到的也是更新后的目标。
+	PolicyTargetWithRecordFrame current_frame;			
+    const auto& current_target = current_frame.target;
+    bool has_current_target = false;
+	
+	// 保存本轮计算出的电机命令
+    PolicyMotorCommand command;
+    std::string error;
+    std::uint64_t last_recorded_policy_seq = 0;
+```
+
+---
+
+进入循环，**尝试获取最新策略目标**，每轮先推进下一次唤醒时间，再尝试从通道获取最新目标。
+
+- 收到新目标：更新 `current_frame`。
+- 没有新目标，但之前收到过：继续使用缓存的目标，后面检查它是否仍然有效。
+- 从未收到目标：进入启动保持分支。
+
+因此，**控制循环不要求每轮都有新的推理结果**。同一个策略目标可以在有效期内，用最新反馈反复计算电机命令。
+
+``` c++
+    while (running_.load()) {
+        next_wake += period;
+		
+        if (!motor_session_.check_health(error)) {
+            fail(error);
+            break;
+        }
+        
+        if (try_consume_target(current_frame)) {
+            has_current_target = true;
+        }
+```
+
+首个策略目标到来前，保持复位姿态：`refresh_startup_hold()` 会刷新 `startup_hold_target_motor_rad_`，让机器人保持复位完成后的姿态：
+
+```c++
+    if (!has_current_target) {
+        if (!refresh_startup_hold()) {
+            break;
+        }
+    }
+```
+
+不是首帧，则检查策略目标，并获取、检查电机反馈：
+
+``` c++
+    else {
+        const std::int64_t now_ns = robot_base::monotonic_now_ns();
+        if (now_ns >= current_target.policy_valid_until_ns) {
+            fail(format_target_timeout_error(current_target, now_ns));
+            break;
+        }
+
+        if (!motor_session_.refresh_command_feedback(error)) {
+            fail(error);
+            break;
+        }
+
+        std::int64_t feedback_valid_until_ns = 0;
+        if (!motor_session_.validate_motor_feedback_timing(
+                robot_base::monotonic_now_ns(), feedback_valid_until_ns, error)) {
+            fail(error);
+            break;
+        }
+        const auto& motor_feedback = motor_session_.command_feedback();
+
+        error.clear();
+```
+
+接着找出参与控制的电机中，时间戳最早的一份反馈，检查它是否过期：（选择最旧反馈，是因为**整批反馈的时效性由最旧的那份限制**。缓存反馈也必须通过这项检查，不能无限复用）
+
+``` c++
+		if (!validate_motor_feedback_timing(*oldest_feedback, robot_base::monotonic_now_ns(), error)) {
+            fail(error);
+            break;
+        }
+
+        error.clear();
+```
+
+**根据目标和反馈，构建电机命令。**输出是 `command`，包含电机 setpoint 和数量。`ActionProcessor` 在这里完成关节映射、脚踝控制计算等工作。这一步只负责生成命令，尚未提交给电机会话。**计算完成后，再检查时效并确定命令截止期。**
+
+``` c++
+        if (!action_processor_.build_policy_motor_command(
+                current_target.target_model_rad,	// 模型关节顺序的目标角度
+                motor_feedback,						// 物理电机反馈 motor_feedback
+                command,
+                error)) {
+            fail("failed to build policy impedance command: " + error);
+            break;
+        }
+		
+	   // 计算需要时间，所以先前有效的目标和反馈，到这里可能已经过期。
+ 	   // 两次检查分别保证：计算前：不使用已经过期的数据。计算后：不提交计算期间已经失效的结果。
+       const std::int64_t produced_at_ns = robot_base::monotonic_now_ns();
+        if (produced_at_ns >= current_target.policy_valid_until_ns) {
+            fail(format_target_timeout_error(current_target, produced_at_ns));
+            break;
+        }
+        if (!motor_session_.validate_motor_feedback_timing(*oldest_feedback, produced_at_ns, error)) {
+            fail(error);
+            break;
+        }
+
+        if (!motor_session_.check_health(error)) {
+            fail(error);
+            break;
+        }
+
+		// 构造命令时间信息
+        const motor_base::CommandTiming timing =
+            build_command_timing(current_target, produced_at_ns,
+                                 oldest_feedback->host_timestamp_ns);
+```
+
+ **提交命令，并按策略帧发布记录。**把本轮计算的 setpoint 和时间约束提交给电机会话。返回成功表示提交操作成功，并不表示电机已经运动到目标位置。
+
+``` c++
+        const bool applied =
+            motor_session_.apply_impedance_setpoints_realtime(
+                command.setpoints,
+                command.setpoint_count,
+                timing);
+
+        if (!applied) {
+            fail("failed to apply policy impedance command");
+            break;
+        }
+```
+
+提交成功后，按需发布记录：
+
+``` c++
+       // 继续构建日志记录
+        if (config_.recorder.enabled &&
+            current_target.policy_seq != last_recorded_policy_seq) {
+            publish_completed_record()(current_frame.record, command, timing);
+            last_recorded_policy_seq = current_target.policy_seq;
+        }
+    }
+
+    std::this_thread::sleep_until(next_wake);
+    const auto now = std::chrono::steady_clock::now();
+    if (now > next_wake + period) {
+        next_wake = now;
+    }
+}
+```
+
+#### `refresh_startup_hold()`：持续提交复位姿态的保持命令
+
+在命令线程尚未收到第一个策略目标时，持续提交复位姿态的保持命令，并限制等待首个目标的时间。**一旦收到第一个策略目标，就进入正常控制分支。** 后续暂时没有新目标时，会继续使用当前目标并检查其有效期，不会重新回到启动保持阶段。
+
+它只在 `run()` 的这个分支调用：
+
+```c++
+if (!has_current_target) {
+    if (!refresh_startup_hold()) {
+        break;
+    }
+}
+```
+`first_policy_inference_started_ns_`由策略主线程在第一次调用模型推理前写入：
+
+- `started_ns == 0`：正式推理尚未开始。
+- `started_ns > 0`：正式推理已经开始，首个目标必须及时到达。
+
+``` c++
+bool PolicyCommandWorker::refresh_startup_hold()
+{
+    // 获取首次正式推理的开始时间
+    const std::int64_t started_ns  = first_policy_inference_started_ns_.load(std::memory_order_acquire);
+```
+
+---
+
+**然后确定首个策略目标的截止期**。当前默认规则是：
+
+| 阶段           | 首个目标的等待限制                      |
+| -------------- | --------------------------------------- |
+| 正式推理开始前 | `deadline_ns = 0`，尚未启用首目标截止期 |
+| 正式推理开始后 | 最晚等待到“首次推理开始时间＋60 ms”     |
+
+这里始终使用第一次推理的起点，重复保持姿态不会把这 60 ms 延长。
+
+```c++
+// 确定首个策略目标的截止期
+const std::int64_t deadline_ns = started_ns == 0 ? 0 : started_ns + target_timeout_ns_;
+const std::int64_t now_ns      = robot_base::monotonic_now_ns();
+```
+
+---
+
+**截止期内，刷新复位姿态命令**：`startup_hold_target_motor_rad_` 是 `reset_joints()` 最后成功提交的**物理电机位置目标**，在 worker 启动时传入。
+
+``` c++
+    // 首帧前复位命令也封顶首次正式推理的截止期。
+    const bool refreshed = (deadline_ns == 0 || now_ns < deadline_ns) &&
+        motor_session_.apply_targets_rad(
+            startup_hold_target_motor_rad_, deadline_ns);
+    if (!refreshed) {
+        const std::int64_t failed_now_ns = robot_base::monotonic_now_ns();
+        if (deadline_ns != 0 && failed_now_ns >= deadline_ns) {
+            fail("first policy target deadline expired: deadline_ns=" +
+                std::to_string(deadline_ns) + ", overdue_us=" +
+                std::to_string(robot_base::ns_to_us(failed_now_ns - deadline_ns)));
+        } else {
+            fail("failed to refresh startup reset pose");
+        }
+        return false;
+    }
+    return true;
+}
+```
+
+## `RobotMotorSession`：电机控制器
+
+管理电机控制器、启停电机、提交控制目标、读取反馈及检查反馈时效。
+
+给上层提供：**反馈信息**（电机位置、速度等状态），以及**控制入口**。
+
+**`PolicyCommandWorker` 通过 `RobotMotorSession` 获取电机反馈并提交控制指令。** 因此电机 Session 同时服务于策略读取状态和命令线程下发目标。先记住边界：
+
+- **Session 管理硬件访问与生命周期。** 策略推理、观测拼接、动作处理由其他模块承担。
+
+### 数据结构
+
+#### `enum ShutdownResult`：停机结果
+
+``` c++
+enum class ShutdownResult {
+    Confirmed,              // stop 命令执行成功
+    ReleasedWithCommLoss,   // stop 命令执行失败且通信故障 下 控制器释放
+    RetryRequired,          // stop 命令执行失败但通信正常，需重试
+};
+```
+
+#### `struct MotorStateSnapshot`：存储电机数据
+
+``` c++
+// inference层需要的电机数据，从底层的 MotorStatusSnapshot 获取
+struct MotorStateSnapshot {
+    std::int64_t timestamp_ns{0};   // 时间戳
+
+    std::array<double, motor_base::kMotorNum> position_rad{};   // 位置
+    std::array<double, motor_base::kMotorNum> velocity_rad_s{}; // 速度
+    std::array<double, motor_base::kMotorNum> torque_percent{}; // 力矩
+
+    std::array<std::uint8_t, motor_base::kMotorNum> comm_ok{};  // 通信状态
+    std::array<std::uint8_t, motor_base::kMotorNum> enabled{};  // 使能状态
+};
+```
+
+### 构造函数
+
+**`background_thread_options_` 是多个后台线程共用的一套配置**，每个线程仍然独立运行。
+
+``` c++
+RobotMotorSession::RobotMotorSession(const RobotInterfaceConfig& config)
+    : config_(config.motor),
+      motor_rt_options_(config.runtime.motor_rt),				// rt 线程配置
+      background_thread_options_(config.runtime.background),	// motor_status、rt_event、motor_mon 线程配置
+      command_timeout_ns_ (robot_base::seconds_to_ns(config.safety.control_command_timeout_ms / 1000.0)),
+      max_feedback_age_ns_(robot_base::seconds_to_ns(config.sensor_guard.max_motor_sample_age_s)) {}
+```
+
+### 接口函数
+
+#### 控制器配置
+
+##### `initialize()`：初始化配置
+
+> **创建控制器、建立通信、启动控制线程、确认初始 STOP，再提交控制模式配置。**
+
+首先检查是否允许初始化，清空命令线程的反馈缓存，**创建控制器，并进行连接**：
+
+``` c++
+bool RobotMotorSession::initialize()
+{
+    // 首先检查是否允许初始化，清空命令线程的反馈缓存
+    if (initialized_.load()) {
+        return true;
+    }
+    // A failed stop/initialization may still own an active RT controller.
+    if (controller_) return false;
+
+    command_feedback_ = {};
+    has_command_feedback_ = false;
+    // 使用工厂函数创建电机控制器
+    controller_ = create_controller();
+    // 连接电机
+    std::cout << "[RobotMotorSession] connecting...\n";
+    if (!controller_->connect()) {
+        std::cerr << "[RobotMotorSession] connect failed.\n";
+        controller_.reset();
+        return false;
+    }
+    // 等待全部电机及通信就绪
+    if (!controller_->wait_all_motors_ready(
+        config_.wait_all_motors_timeout_ms,
+        config_.wait_all_motors_poll_ms)) {
+        release_controller();
+        return false;
+	}
+```
+
+基类的 `connect()` 调用驱动的 `connect_impl()`。当前 MYACT 实现最终调用 adapter 的 `init()`，初始化 EtherCAT 主站及通信资源。失败时销毁控制器并返回 `false`。这里尚未启动 RT 线程。
+
+当前 MYACT 实现在调用线程中推进 EtherCAT 收发，检查从站是否配置就绪、链路是否正常、WKC 是否完整。默认最多等待 **40 秒**，要求连续 **10 个检查周期**满足条件。`poll_ms` 默认 100 ms，实际控制的是**进度日志间隔**；内部检查约每 1 ms 一次。这一阶段确认通信具备启动条件，电机尚未通过后面的 `restart()` 启动运行。
+
+---
+
+**配置状态打印**：指定需要打印状态的电机；空列表关闭打印。放在 `start()` 前，是因为打印选项只允许在启动前配置。当前驱动也会根据打印列表决定是否启动监控线程。
+
+``` c++
+    if (config_.print_motors_info) {
+        controller_->set_print_info(config_.print_motor_ids);
+    } else {
+        controller_->set_print_info({});
+    }
+```
+
+---
+
+**启动控制线程：**`start()` 启动公共状态、事件处理及 RT 控制等线程，并检查线程配置是否成功。随后 RT 线程负责持续执行命令处理、驱动状态机和通信收发。失败时调用 `shutdown()` 清理可能已经启动的部分资源，再销毁控制器。
+
+``` c++
+   if (!controller_->start()) {
+        std::cerr << "[RobotMotorSession] RT prerequisite failed: "
+                  << "realtime scheduling is not active.\n";
+		release_controller();
+        return false;
+    }
+    rt_started_ = true;
+	// RT 启动后失败时保留控制器，由调用方统一进入 shutdown()。
+    if (!stop()) return false;
+```
+
+---
+
+**提交各轴模式配置，标记初始化成功：**逐轴提交目标控制模式，默认是 `IMPEDANCE`。模式命令必须放在 STOP 确认之后，因为 STOP 会使较早的模式命令失效。
+
+``` c++
+    // STOP invalidates earlier mode commands, so configure only after its ACK.
+    for (int i = 0; i < config_.num_motors; ++i) {
+        if (!submit_discrete_command(
+                motor_base::ControlCommand::set_mode(config_.control_mode, i),
+                "set_mode")) return false;
+    }
+    initialized_.store(true);
+
+    return true;
+}
+```
+
+这里有一个重要区别：**`submit_discrete_command()` 只检查提交是否被接受，没有等待模式执行成功。** 因此，`initialize()` 返回 `true` 表示通信、线程、初始 STOP 及模式提交阶段已经完成。上层 `RobotInterface` 随后还会调用 `restart()`，请求启动电机并等待对应确认。
+
+##### `shutdown()`：停机
+
+通过`wait_for_discrete_command`发送`stop`命令：
+
+``` c++
+ShutdownResult RobotMotorSession::shutdown(const motor_base::CommandSubmitResult& request)
+{
+    const bool stop_confirmed = !rt_started_ || wait_for_discrete_command(request, "stop");
+    // stop 命令没有执行成功但是通信链路完好，返回 RetryRequired
+    if (!stop_confirmed &&
+        !(controller_ && controller_->communication_fault_latched() &&
+          !controller_->communication_healthy())) {
+        return ShutdownResult::RetryRequired;
+    }
+    // 释放控制器。电机停机成功返回Confirmed，通信链路异常返回 ReleasedWithCommLoss
+    release_controller();
+    return stop_confirmed ? ShutdownResult::Confirmed
+                          : ShutdownResult::ReleasedWithCommLoss;
+}
+```
+
+> 为什么`shutdown`会有参数？不应该直接调用 stop 命令？
+
+这个参数用于**确认之前已经提交的 STOP**。当前关闭流程分成三步：
+
+```c++
+const auto request = motor_session_.request_stop(); // 先提交 STOP
+policy_command_worker_->stop();                    // 停止并等待命令线程退出
+motor_session_.shutdown(request);                  // 确认该 STOP，再释放控制器
+```
+
+这样安排有两个目的：
+
+- **STOP 尽早提交**，无需等待命令线程 `join()` 完成。
+- **控制器最后释放**，确保命令线程已经退出，不会继续访问它。
+
+参数 `request` 包含提交状态和 `command_id`，让 `shutdown()` 等待同一条 STOP。如果 `shutdown()` 内直接调用 `stop()`，就会再次提交 STOP：未完成时底层会复用原 ID；**如果原 STOP 已在等待线程退出期间完成，则会创建新请求，再等待一次确认。**
+
+#### 离散控制命令
+
+##### `request_stop()`：全轴停止（非阻塞）
+
+通过`controller_`的`send_discrete_command`发送全轴停机命令。
+
+``` c++
+motor_base::CommandSubmitResult RobotMotorSession::request_stop()
+{
+    if (!controller_) {
+        return {motor_base::CommandSubmitStatus::INVALID_COMMAND, std::nullopt};
+    }
+    return controller_->send_discrete_command(motor_base::ControlCommand::stop());
+}
+```
+
+##### `stop()`：全轴停止（阻塞）
+
+STOP 为 `PENDING` 时，默认最多等待 4 秒；提交失败、执行失败或超时则返回 `false`。**`request_stop()` 用于需要先发起停止、稍后再确认的场景：**
+
+- 整机关闭：先提交 STOP，再停止命令线程，最后交给 `shutdown(request)` 确认并释放。
+- 策略或命令线程故障：先提交 STOP，再处理线程退出和错误信息。
+- 电机示例退出及会话析构：提交 STOP 后交给 `shutdown()`。
+
+``` c++
+bool RobotMotorSession::stop()
+{
+    return wait_for_discrete_command(request_stop(), "stop");
+}
+```
+
+##### `restart()`：全轴重启（阻塞）
+
+``` c++
+bool RobotMotorSession::restart()
+{
+    if (!initialized_.load() || !controller_) {
+        return false;
+    }
+    if (!controller_->is_realtime_scheduling_ready()) {
+        std::cerr << "[RobotMotorSession] restart rejected: "
+                  << "realtime scheduling is not active.\n";
+        return false;
+    }
+    return wait_for_discrete_command(
+        controller_->send_discrete_command(motor_base::ControlCommand::restart()),
+        "restart");
+}
+```
+
+##### `submit_discrete_command()`：提交离散命令
+
+通过`controller_->send_discrete_command(command)`转发。
+
+``` c++
+bool RobotMotorSession::submit_discrete_command(
+    const motor_base::ControlCommand& command, const char* context)
+{
+    const motor_base::CommandSubmitResult result =
+        controller_->send_discrete_command(command);
+    if (result.status == motor_base::CommandSubmitStatus::ACCEPTED) {
+        return true;
+    }
+
+    std::cerr << "[RobotMotorSession] " << context
+              << " command rejected: "
+              << command_submit_status_name(result.status) << "\n";
+    return false;
+}
+```
+
+#### 连续控制命令
+
+##### `submit_position_targets_rad()`：提交目标位置命令
+
+**本质调用 ControlCommand 的工厂函数构造 Command**。
+
+> 为什么这个函数没有构建序列号也能检测命令是否过期？
+
+``` c++
+// 仅构造 POSITION 模式的位置目标。
+bool RobotMotorSession::submit_position_targets_rad(
+    const std::array<double, motor_base::kMotorNum>& target_motor_rad,
+    const motor_base::CommandTiming& timing)
+{
+    if (!initialized_.load() || !controller_) {
+        return false;
+    }
+	// 是否允许调用 POSITION 控制
+    if (config_.control_mode != motor_base::MotorControlMode::POSITION) {
+        std::cerr << "[RobotMotorSession] submit_position_targets_rad requires position mode\n";
+        return false;
+    }
+    
+    // 调用 ControlCommand 的工厂函数构造并写入时间信息
+    auto command = motor_base::ControlCommand::make_position_targets_rad(
+        target_motor_rad.data(), target_motor_rad.size());
+    
+    // 通过 控制器的 send_continuous_command 函数发布
+    const motor_base::CommandSubmitResult result =
+        controller_->send_continuous_command(command);
+    if (result.status != motor_base::CommandSubmitStatus::ACCEPTED) {
+        std::cerr << "[RobotMotorSession] submit_position_targets_rad command rejected: "
+                  << command_submit_status_name(result.status) << "\n";
+        return false;
+    }
+    return true;
+}
+```
+
+##### `submit_impedance_setpoints()`：提交力位混合控制命令
+
+``` c++
+bool RobotMotorSession::submit_impedance_setpoints(
+    const std::array<motor_base::ImpedanceSetpoint, motor_base::kMotorNum>& setpoints,
+    const motor_base::CommandTiming& timing)
+{
+    if (!initialized_.load() || !controller_) {
+        return false;
+    }
+    if (config_.control_mode != motor_base::MotorControlMode::IMPEDANCE) {
+        std::cerr << "[RobotMotorSession] submit_impedance_setpoints requires impedance mode\n";
+        return false;
+    }
+    // 通过工厂函数构造并写入时间信息
+    motor_base::ControlCommand command =
+        motor_base::ControlCommand::make_impedance_targets(
+            setpoints.data(),
+            static_cast<std::size_t>(config_.num_motors));
+    command.timing = timing;
+
+    // 发送命令
+    const motor_base::CommandSubmitResult result =
+        controller_->send_continuous_command(command);
+    if (result.status == motor_base::CommandSubmitStatus::ACCEPTED) {
+        return true;
+    }
+
+    std::cerr << "[RobotMotorSession] submit_impedance_setpoints command rejected: "
+              << command_submit_status_name(result.status) << "\n";
+    return false;
+}
+```
+
+#### 获取电机状态
+
+##### `check_health()`：检查电机总线健康
+
+查询底层锁存故障，不消费反馈或重新判断逐轴状态。
+
+``` c++
+bool RobotMotorSession::check_health(std::string& error) const
+{
+    if (!initialized_.load() || !controller_) {
+        error = "motors are not initialized";
+        return false;
+    }
+    if (controller_->terminal_fault_latched()) {
+        error = "motor controller terminal fault is latched";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+```
+
+##### `refresh_feedback_for_command()`：更新`command`通道电机状态缓存
+
+``` c++
+bool RobotMotorSession::refresh_feedback_for_command(std::string& error)
+{
+    return refresh_feedback(feedback_for_command_, FeedbackChannel::Command, error);
+}
+```
+
+##### `get_feedback_for_command()`：获取`command`通道电机信息缓存
+
+``` c++
+const MotorStateSnapshot& RobotMotorSession::get_feedback_for_command() const noexcept
+{
+    return feedback_for_command_.snapshot;
+}
+```
+
+##### `refresh_feedback_for_policy()`：更新`policy`通道电机状态缓存
+
+``` c++
+bool RobotMotorSession::refresh_feedback_for_policy(std::string& error)
+{
+    return refresh_feedback(feedback_for_policy_, FeedbackChannel::Policy, error);
+}
+```
+
+##### `get_feedback_for_policy()`：获取`policy`通道电机信息缓存
+
+``` c++
+const MotorStateSnapshot& RobotMotorSession::get_feedback_for_policy() const noexcept
+{
+    return feedback_for_policy_.snapshot;
+}
+```
+
+##### `validate_feedback_timing_for_command()`：
+
+``` c++
+bool RobotMotorSession::validate_feedback_timing_for_command(
+    std::int64_t  now_ns,
+    std::int64_t& feedback_valid_until_ns,
+    std::string& error) const
+{
+    if (!feedback_for_command_.has_feedback) {
+        error = "policy motor feedback is not initialized";
+        return false;
+    }
+
+    const auto timestamp_ns = feedback_for_command_.snapshot.timestamp_ns;
+    const std::int64_t deadline_ns =
+        timestamp_ns + max_feedback_age_ns_;
+    if (timestamp_ns > 0 && now_ns < deadline_ns) {
+        feedback_valid_until_ns = deadline_ns;
+        error.clear();
+        return true;
+    }
+
+    error = std::string(timestamp_ns <= 0
+                ? "motor feedback timestamp missing: motor_index="
+                : "motor feedback expired: motor_index=") +
+        std::to_string(feedback_for_command_.oldest_motor_index) +
+        ", feedback_age_us=" + std::to_string(robot_base::ns_to_us(
+            now_ns - timestamp_ns)) +
+        ", max_motor_age_us=" + std::to_string(robot_base::ns_to_us(max_feedback_age_ns_));
+    return false;
+}
+```
+
+### 私有辅助函数
+
+#### `create_controller()`：创建电机控制器
+
+是一个工厂函数：**集中创建通信适配器和具体电机驱动，返回统一基类指针。**
+
+``` c++
+std::unique_ptr<motor_base::MotorControllerBase>
+RobotMotorSession::create_controller() const
+{
+    // 创建通信适配器
+    auto adapter = std::make_shared<myactua::EthercatAdapterIGH>();
+    // 准备驱动配置，再覆盖两类线程选项
+    myactua::MyActMotorController::Options controller_options;
+    controller_options.rt_thread_options = motor_rt_options_;
+    controller_options.background_thread_options = background_thread_options_;
+    // 创建并返回具体控制器
+    return std::make_unique<myactua::MyActMotorController>(
+        std::move(adapter), config_.num_motors, controller_options);
+}
+```
+
+#### `release_controller()`：释放控制器
+
+负责**关闭控制器、销毁对象，并重置会话状态**。
+
+```c++
+void RobotMotorSession::release_controller()
+{
+    if (controller_) controller_->shutdown();
+    controller_.reset();
+    rt_started_ = false;
+    initialized_.store(false);
+    command_feedback_     = {};
+    has_command_feedback_ = false;
+}
+```
+
+**1.停止控制器线程：**
+
+```c++
+if (controller_) controller_->shutdown();
+```
+
+控制器存在时，底层 `shutdown()` 会：
+
+- 通知 RT 循环退出，并通过 `join()` 等待线程结束。
+- 清除实时调度就绪状态。
+- 调用驱动停止回调。
+- 停止事件分发、状态发布等相关后台线程。
+
+此时控制器对象仍然存在。
+
+**2. 销毁控制器对象：**
+
+``` 
+controller_.reset();
+```
+
+`controller_` 是 `unique_ptr`，`reset()` 会销毁它持有的对象，并将指针置空。
+
+基类具有虚析构函数，因此会正确执行 `MyActMotorController` 的析构。控制器持有的 adapter 随之释放；当 adapter 的最后一个共享引用消失时，其析构会释放 EtherCAT 主站。
+
+驱动析构也会调用 `shutdown()`；前一步已关闭时，不会重复执行活动线程的停止流程。
+
+**3. 重置生命周期标志**
+
+```c++
+rt_started_ = false;
+initialized_.store(false);
+```
+
+- 会话不再持有已启动的 RT 控制器。
+- 会话不再处于初始化成功状态。
+
+**4. 清空命令侧反馈缓存**
+
+```
+command_feedback_     = {};
+has_command_feedback_ = false;
+```
+
+清除旧反馈，并标记缓存无效。后续必须收到新反馈，才能继续使用命令侧反馈接口。
+
+**调用前提很重要：这个函数本身不提交 STOP，也不确认电机停止。** RT 已启动时，外层 `shutdown(request)` 先确认 STOP，或确认满足通信故障释放条件，再调用它；初始化早期失败时也通过它清理资源。调用前还应确保命令生产线程已经退出，避免继续访问正在释放的控制器。
+
+#### `wait_for_discrete_command()`：等待一条已提交的离散命令完成
+
+> 这个函数**只等待结果，不负责提交命令。**
+
+```c++
+bool RobotMotorSession::wait_for_discrete_command(
+    const motor_base::CommandSubmitResult& request, const char* context)
+{
+    // 检查命令是否提交成功
+    if (request.status != motor_base::CommandSubmitStatus::ACCEPTED) {
+        std::cerr << "[RobotMotorSession] " << context << " command rejected: "
+                  << command_submit_status_name(request.status) << "\n";
+        return false;
+    }
+    // 输出缺少命令 ID，后面使用 *request.command_id 取出 ID
+    if (!request.command_id) {
+        std::cerr << "[RobotMotorSession] " << context << " command missing command_id\n";
+        return false;
+    }
+```
+
+- `request`：提交结果，包含是否接受命令及对应的 `command_id`。
+- `context`：日志标签，例如 `"stop"`、`"restart"`，便于判断是哪条命令出错。
+
+---
+
+**设置本次等待的截止时间：**使用 `steady_clock`，保证计算经过时间时不受系统日期或时间调整影响。计时从进入本次等待开始，而不是从命令最初提交时开始。
+
+``` c++
+     const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(config_.discrete_command_completion_timeout_ms);
+```
+
+**在等待截至时间内不断遍历查看命令执行结果：**依据`ControlCommand.command_id`传递给`get_discrete_command_result()`函数查询结果。
+
+``` c++
+    for (;;) {
+        const auto result = controller_->get_discrete_command_result(*request.command_id);
+        switch (result) {
+            case motor_base::DiscreteCommandResult::SUCCEEDED:
+                return true;
+            case motor_base::DiscreteCommandResult::FAILED:
+                std::cerr << "[RobotMotorSession] " << context << " command failed\n";
+                return false;
+            case motor_base::DiscreteCommandResult::UNKNOWN:
+                std::cerr << "[RobotMotorSession] " << context << " command result unknown\n";
+                return false;
+            case motor_base::DiscreteCommandResult::PENDING:
+                break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::cerr << "[RobotMotorSession] " << context
+                      << " timed out waiting for command completion\n";
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+```
+
+#### `refresh_feedback()`：从指定通道更新并获取电机状态
+
+获取原始逐轴反馈信息：
+
+``` c++
+bool RobotMotorSession::refresh_feedback(FeedbackCache& cache, FeedbackChannel channel, std::string& error)
+{
+    if (!initialized_.load() || !controller_) {
+        error = "policy motor feedback is not initialized";
+        return false;
+    }
+
+    // 获取原始逐轴反馈信息
+    std::array<motor_base::MotorStatusSnapshot, motor_base::kMotorNum> feedback{};
+    const bool received = channel == FeedbackChannel::Policy
+        ? controller_->try_consume_latest_feedback_for_policy(feedback)
+        : controller_->try_consume_latest_feedback_for_command(feedback);
+```
+
+处理为 `MotorStateSnapshot`，推理层需要的信息：
+
+``` c++
+    if (received) {
+        MotorStateSnapshot snapshot;
+        snapshot.timestamp_ns    = feedback[0].host_timestamp_ns;
+        cache.oldest_motor_index = feedback[0].motor_index;
+        for (int i = 0; i < config_.num_motors; ++i) {
+            const auto& motor = feedback[static_cast<std::size_t>(i)];
+            if (motor.host_timestamp_ns < snapshot.timestamp_ns) {
+                snapshot.timestamp_ns    = motor.host_timestamp_ns;
+                cache.oldest_motor_index = motor.motor_index;
+            }
+            snapshot.position_rad[i]   = motor.position_rad;
+            snapshot.velocity_rad_s[i] = motor.velocity_rad_s;
+            snapshot.torque_percent[i] = motor.torque_percent;
+            snapshot.comm_ok[i] = motor.comm_ok;
+            snapshot.enabled[i] = motor.enabled;
+        }
+        
+        cache.snapshot = snapshot;
+        cache.has_feedback = true;
+    }
+    if (!cache.has_feedback) {
+        error = "policy motor feedback is not initialized";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+```
+
+## `RobotImuSession`：IMU 控制器
+
+### 数据结构
+
+####  `struct AhrsStateSnapshot`：存储 IMU 数据
+
+``` c++
+struct AhrsStateSnapshot {
+    std::uint64_t sample_timestamp_ns{0};   // IMU 采样时间戳，单位 ns；若 IMU 不提供则与 接受时间 相同
+    std::int64_t  receive_timestamp_ns{0};  // IMU 接收时间戳，单位 ns；
+
+    std::array<double, 3> body_ang_vel{0.0, 0.0, 0.0};          // roll_speed, pitch_speed, heading_speed
+    std::array<double, 3> euler{0.0, 0.0, 0.0};                 // roll, pitch, heading 
+    std::array<double, 3> projected_gravity{0.0, 0.0, -1.0};    // projected_gravity_x,_y,_z 
+
+    bool projected_gravity_valid{false};
+};
+```
+
+#### `class RobotImuSession`：IMU 控制器
+
+``` c++
+class RobotImuSession {
+public:
+    // 生命周期操作与状态读取须串行；AHRS 回调为单生产者，状态读取为单消费者。
+    explicit RobotImuSession(const RobotInterfaceConfig& config);
+    ~RobotImuSession();
+
+    RobotImuSession(const RobotImuSession&) = delete;
+    RobotImuSession& operator=(const RobotImuSession&) = delete;
+	
+    // 初始化函数
+    bool initialize();
+    void deinitialize();
+    bool is_initialized() const noexcept { return reader_ != nullptr; }
+
+    // policy/inference 线程独占；true 表示已有缓存，不表示本次有新帧或反馈未过期。
+    bool refresh_feedback_for_policy(std::string& error);
+    // 仅读取缓存；须先刷新成功，引用在下次刷新或生命周期重置前使用完毕。
+    const AhrsStateSnapshot& get_feedback_for_policy() const noexcept;
+
+private:
+    // 配置
+    imu_base::ReaderConfig config_;
+
+    // 仅在 start 成功后持有；释放前须 stop 并等待回调结束。
+    std::unique_ptr<imu_base::IMUReaderBase> reader_;
+
+    // IMU 接收线程生产，仅 policy/inference 线程消费。
+    robot_base::SpscLatestChannel<AhrsStateSnapshot> policy_feedback_channel_;
+    AhrsStateSnapshot feedback_for_policy_;
+    bool has_feedback_for_policy_{false};
+};
+```
+
+### 构造函数
+
+主要是配置：选取 IMU 的类型以及设备读取路径；如果为串口，则配置 波特率，如果为 CAN，则配置 CAN接口以及 CAN波特率；以及是否实时打印 IMU 数据 和 配置 IMU 线程选项。
+
+``` c++
+RobotImuSession::RobotImuSession(const RobotInterfaceConfig& config)
+{
+    config_.type   = config.imu.type;       // IMU 类型
+    config_.device = config.imu.device;     // IMU 设备路径
+
+    config_.baudrate = config.imu.baudrate;             // IMU 串口波特率
+
+    config_.configure_can = config.imu.configure_can;   // 是否配置 CAN 接口
+    config_.can_bitrate   = config.imu.can_bitrate;     // IMU CAN 波特率
+
+    config_.print_imu  = config.imu.print_imu;          // 是否打印 IMU 数据
+    config_.print_ahrs = config.imu.print_ahrs;         // 是否打印 AHRS 数据
+    
+    config_.thread_options = config.runtime.imu_reader; // IMU 读取线程选项
+}
+```
+
+### 析构函数
+
+``` c++
+RobotImuSession::~RobotImuSession()
+{
+    deinitialize();
+}
+```
+
+### 接口函数
+
+#### `initialize()`：初始化控制器
+
+首先初始化 SPSC 的消息通道：
+
+``` c++
+bool RobotImuSession::initialize()
+{
+    if (is_initialized()) {
+        return true;
+    }
+
+    // 初始化通道
+    policy_feedback_channel_.reset_empty();
+    has_feedback_for_policy_ = false;
+```
+
+然后配置`IMUReaderBase`，并通过`move`语句给`reader_`：
+
+``` c++
+    // 初始化并持有 IMUReaderBase
+    std::unique_ptr<imu_base::IMUReaderBase> reader;
+	// 依据配置选择 IMU 类型
+    switch (config_.type) {
+        case imu_base::ReaderType::A100_SERIAL:
+            reader = std::make_unique<imu::IMUReader>();
+            break;
+        case imu_base::ReaderType::XSENS_MTI_CAN:
+            reader = std::make_unique<imu::XsensMtiCanReader>();
+            break;
+        default:
+            std::cerr << "[RobotImuSession] Unsupported IMU reader type.\n";
+            return false;
+    }
+	// 设置回调函数：先把数据处理为 AhrsStateSnapshot，然后发布在 policy_feedback_channel_ 通道
+    reader->set_ahrs_callback([this](const imu_base::AHRSData& data) {
+        AhrsStateSnapshot state;
+        state.receive_timestamp_ns = data.receive_timestamp_ns;
+        state.sample_timestamp_ns  = data.sample_timestamp_ns;
+
+        state.body_ang_vel = {data.roll_speed, data.pitch_speed, data.heading_speed};
+        state.euler = {data.roll, data.pitch, data.heading};
+        state.projected_gravity = {data.projected_gravity_x,
+                                  data.projected_gravity_y,
+                                  data.projected_gravity_z};
+        state.projected_gravity_valid = data.projected_gravity_valid;
+        policy_feedback_channel_.publish(state);
+    });
+
+    if (!reader->start(config_)) {
+        std::cerr << "[RobotInterface] IMU start failed.\n";
+        reader->stop();
+        policy_feedback_channel_.reset_empty();
+        return false;
+    }
+
+    reader_ = std::move(reader);
+    return true;
+}
+```
+
+### 私有辅助函数
+
+## `PolicySession`：模型推理控制器
+
+
+
+是**模型推理与实时控制回路之间唯一的交界层**。它独占一个 ONNX Runtime 会话（含其线程池），把“675/705 维观测数组”变成“12 维原始动作”，并在加载阶段就把所有可能失败、可能分配内存、可能创建线程的动作全部做完，使运行期只剩一次`Run` 。
+
+它属于本仓库已成型的一类“资源域会话”命名——与 RobotMotorSession、RobotImuSession 并列：
+
+| 会话                | 独占资源                   | 生命周期 | 所有者线程    |
+| ------------------- | -------------------------- | -------- | ------------- |
+| `RobotMotorSession` | EtherCAT 主站 + 电机控制器 | 进程级   | `policy_cmd`  |
+| `RobotImuSession`   | CAN 读线程 + 解析器        | 进程级   | `imu_can_rx`  |
+| `PolicySession`     | ORT `Env`/`Session`/线程池 | 进程级   | `policy_main` |
+
+三者共同特征：**不可拷贝、独占一类外部资源、单一所有者线程串行调用**。这正是 `Session` 这个词在这里的语义来源，而不是“一次 HTTP 会话”那种短生命周期含义。
+
+### ORT
+
+| 概念                   | 是什么                                                       | 类比            |
+| ---------------------- | ------------------------------------------------------------ | --------------- |
+| **ONNX**               | 一个**模型交换格式**（`.onnx` 文件），内部是 protobuf：计算图（graph）+ 权重（initializer）+ 算子集版本（opset） | `.o` 目标文件   |
+| **ONNX Runtime (ORT)** | 一个**推理引擎**，负责读 `.onnx`、做图优化、分配内存、起线程、执行算子 | 链接器 + 运行时 |
+
+配置对象**按“生命周期由长到短”排：**
+
+``` c++
+Ort::Env          	// 进程级：日志、线程池基础设施、EP 注册表      （全局一个）
+Ort::SessionOptions // 会话级：线程数、图优化级别、执行模式、EP 选择
+Ort::Session      	// 会话级：加载模型 → 图优化 → 内存规划 → 可执行图
+    
+Ort::RunOptions   	// 单次调用级：本次 Run 的日志级别、terminate 标志
+Ort::Value          // 数据级：一个张量（含类型 + shape + 数据指针）
+```
+
+#### `Ort::Env`：全局环境对象
+
+`Ort::Env` 是 ONNX Runtime 的**全局环境对象**，可以把它理解为整个 ORT 运行时的“根”或“宿主”。所有其他 ORT 组件（包括 `Session`）都直接或间接地依赖它而存在，它掌管着**进程级别**的日志系统和全局线程池等基础资源。
+
+- **必须是单例，且最先创建**：在一个进程（或一个 JVM 生命周期）中，**最多只能存在一个** `Ort::Env` 实例。并且，**必须先创建 `Ort::Env`，然后才能创建任何 `Session`**。如果尝试创建第二个 Env，通常会返回已有的实例或引发异常。
+- **资源的集中管理者**：它持有所有其他 ORT 对象共享的**全局状态**，主要包括**日志记录器（Logger）** 和可选的**全局线程池（Global Thread Pools）**。即使你不做任何配置，创建一个 Env 也会建立默认的日志系统。
+
+##### 日志级别与自定义Logger
+
+可以控制 ORT 输出的日志详细程度。日志级别从低到高包括 `VERBOSE`、`INFO`、`WARNING`、`ERROR` 和 `FATAL`，**默认级别是 `WARNING`**。
+
+``` c++
+typedef enum OrtLoggingLevel {
+  ORT_LOGGING_LEVEL_VERBOSE,  ///< Verbose informational messages (least severe).
+  ORT_LOGGING_LEVEL_INFO,     ///< Informational messages.
+  ORT_LOGGING_LEVEL_WARNING,  ///< Warning messages.
+  ORT_LOGGING_LEVEL_ERROR,    ///< Error messages.
+  ORT_LOGGING_LEVEL_FATAL,    ///< Fatal error messages (most severe).
+} OrtLoggingLevel;
+```
+
+基本创建：指定日志级别和用于标识的 logid：
+
+``` c++
+Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "my_application");
+```
+
+如果需要将 ORT 日志接入你自己的日志系统，可以传入一个**自定义的日志函数**：
+
+``` c++
+Ort::Env env(ORT_LOGGING_LEVEL_VERBOSE, "my_app", my_logging_function, my_logger_param);
+```
+
+##### 全局线程池
+
+|              | 含义                                                        | 类比               |
+| ------------ | ----------------------------------------------------------- | ------------------ |
+| **intra-op** | 单个算子**内部**并行，比如一个 675×256 的矩阵乘切成多块并行 | 一个部门内多人协作 |
+| **inter-op** | 图里**不同节点之间**并行，比如两个独立分支同时算            | 多个部门并行开工   |
+
+默认情况下，每个 `Session` 会创建和管理自己的线程池。但如果你的进程中需要加载**多个模型**，为每个 Session 单独创建线程池会导致线程数量膨胀，引发资源争用。
+
+此时，可以在 `Ort::Env` 层面配置**全局共享线程池**，让所有（或部分）Session 复用同一组线程，从而更精细地控制系统总线程数。
+
+``` c++
+Ort::ThreadingOptions tp;
+tp.SetGlobalIntraOpNumThreads(4); // 算子内并行线程数
+tp.SetGlobalInterOpNumThreads(1); // 算子间并行线程数
+
+// 使用 ThreadingOptions 创建 Env
+Ort::Env env(&tp, ORT_LOGGING_LEVEL_WARNING, "my_app");
+```
+
+关于线程数设置，有明确的约定：**设为 `0`** 表示让 ORT 根据系统逻辑核心数自动决定；**设为 `1`** 则表示禁用线程池，直接使用调用线程执行。
+
+> 需要注意，全局线程池生效的前提是：后续创建的 `Session` 通过 `SessionOptions::DisablePerSessionThreads()` 显式禁用了其私有线程池。
+
+嵌入式实时控制里的通行做法（本仓库就是这么配的）：
+
+- `intra_op = 1` （或 2，且严格绑核）——避免 ORT 自己起一堆线程和实时线程抢 CPU；
+- `inter_op` 保持默认 1，配合`ORT_SEQUENTIAL` 让节点顺序执行；
+- 关闭 spinning。
+
+#### `Ort::Session`：控制器对象
+
+```  c++
+Ort::Session(env, "policy.onnx", options);
+```
+
+这一行内部完成了：
+
+1. **模型加载与解析**：读取 ONNX 或 ORT 格式文件，构建内部计算图。
+2. **图优化**：根据配置的优化级别，对计算图进行变换（如常量折叠、算子融合）。
+3. **算子 kernel 绑定** ：每个节点绑定到 CPU EP 的具体实现。
+4. **内核实例化与内存规划**：为选定的算子创建可执行的内核，并预先分配好内存。
+
+---
+
+**`Ort::Session` 依赖于 `Ort::Env` 对象**。一个常见的陷阱是：如果将 `Ort::Env` 声明在函数内部，当函数返回时，`Env` 会被销毁，而返回的 `Session` 所依赖的底层资源也随之失效，导致后续调用 `Run()` 时发生 **Segmentation Fault**。因此，**必须确保 `Ort::Env` 的生命周期长于所有依赖它的 Session**。
+
+##### `TypeInfo`：获取 Type 信息
+
+`session_.Get(Input/Output)TypeInfo(0)` 返回`Ort::TypeInfo` ，里面有两层信息：
+
+``` c++
+type.GetONNXType() == ONNX_TYPE_TENSOR     // 是不是张量（也可能是序列/映射）
+  
+const auto info = type.GetTensorTypeAndShapeInfo();
+info.GetElementType() == FLOAT             // dtype 是不是 float32
+info.GetShape()                            // 形状，动态维是 -1
+```
+
+##### `GetInput(Output)NameAllocated()`：获取端口名
+
+ORT 老 API 是`GetInputName(0, allocator)` ，返回`char*` ， 内存由 allocator 拥有，调用方不知道何时释放 ——容易泄漏，也容易误 free。新 API 是`GetInputNameAllocated` ，返回`AllocatedStringPtr` （本质是`unique_ptr<char[]>` ）， 析构自动释放 。
+
+代码里`.get()` 取出裸指针，赋给`std::string` —— 拷贝一份 ，然后`AllocatedStringPtr` 临时对象立刻析构，内存释放。这一步是安全的关键。
+
+``` c++
+impl_->input_name  = impl_->ort_session_.GetInputNameAllocated(0, allocator).get();
+impl_->output_name = impl_->ort_session_.GetOutputNameAllocated(0, allocator).get();
+```
+
+##### `Run()`：运行模型推理
+
+``` c++
+std::vector<Ort::Value> Run(
+    const RunOptions& run_options,	  // 通常传 Ort::RunOptions{nullptr} 表示默认配置
+    
+    const char* const* input_names,   // 输入名称数组：必须与模型输入名严格匹配
+    const Value* input_values,        // 输入数据数组：顺序必须与 input_names 一一对应
+    size_t input_count,               // 输入数量
+    
+    const char* const* output_names,  // 输出名称数组
+    const Value* output_values,       // 输入数据数组：顺序必须与 input_names 一一对应
+    size_t output_count,              // 输出数量
+);
+```
+
+
+
+#### `Ort::SessionOptions`：配置容器
+
+`SessionOptions` 是一个**轻量级的配置容器**，它本身不执行任何计算，只在 `Session` 的**构造阶段**被读取和使用。Session 创建完毕后，`SessionOptions` 的使命就基本结束了。
+
+关键原则是：**它只影响 Session 的构建过程，不影响运行时的行为**。例如，你不能通过修改一个已存在的 `SessionOptions` 来改变一个已在运行的 Session 的线程数。
+
+> `SessionOptions` 的配置项可以按目的分为几个核心维度。**除非你对某个改动有明确的把握，否则建议保留默认的优化设置**，因为 ORT 的默认值已经针对通用场景做了良好调优。
+
+##### 执行提供器
+
+这是决定**模型跑在什么硬件上**的首要配置。`SessionOptions` 允许你按**优先级顺序**追加多个 EP，ORT 会将计算图的节点分配给列表中靠前的、且能支持该算子的 EP。
+
+在 C++ 中，通过 `AppendExecutionProvider` 系列方法添加：
+
+```c++
+#include <onnxruntime_cxx_api.h>
+
+Ort::SessionOptions options;
+options.AppendExecutionProvider_CUDA(0); // 优先使用 GPU 0
+// CPU 作为隐式回退，通常无需显式添加
+```
+
+一个常见的策略是将最快的硬件 EP（如 CUDA、TensorRT）放在最前，让 CPU 作为最终的“安全网”。
+
+##### 图优化
+
+ORT 会在加载模型时对计算图进行变换，以提升运行效率。`GraphOptimizationLevel` 控制优化强度。
+
+| 级别                  | 说明                                                         |
+| :-------------------- | :----------------------------------------------------------- |
+| `ORT_DISABLE_ALL`     | 关闭所有优化                                                 |
+| `ORT_ENABLE_BASIC`    | 基础优化：常量折叠、冗余节点消除等                           |
+| `ORT_ENABLE_EXTENDED` | 在基础之上，增加复杂的算子融合（如 Conv+BN、Gemm+Activation） |
+| `ORT_ENABLE_ALL`      | **生产环境推荐**：启用所有优化，包括布局变换等               |
+
+代码示例：
+```c++
+// 2. 图优化：生产环境启用全部
+options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+```
+
+##### 线程配置与执行模式
+
+ORT 的线程模型围绕两个概念：**算子内并行**（Intra-op）与**算子间并行**（Inter-op）。
+
+| 配置项              | 含义                         | 调优建议                                                     |
+| :------------------ | :--------------------------- | :----------------------------------------------------------- |
+| `IntraOpNumThreads` | 单个算子内部并行化的线程数   | 通常在 **2 到 4** 之间较优，过多会导致争用。设为 `0` 由 ORT 自动决定，设为 `1` 则禁用线程池，使用调用线程。 |
+| `InterOpNumThreads` | 同时执行多个独立算子的线程数 | 在默认的**顺序执行模式**下通常设为 `1` 即可；仅在启用并行执行模式时才有意义。 |
+
+此外，`ExecutionMode` 控制算子间的调度策略：`ORT_SEQUENTIAL`（默认，顺序执行）或 `ORT_PARALLEL`（在可能时并行执行独立算子）。并行模式可能提升吞吐，但也引入更多不确定性。
+
+``` c++
+// 3. 线程：算子内并行 4 线程，算子间顺序
+options.SetIntraOpNumThreads(4);
+options.SetInterOpNumThreads(1);
+```
+
+ORT 有`SEQUENTIAL` 和`PARALLEL` 两种执行模式。`PARALLEL` 会把图切分成多个流并行跑，需要 inter-op 线程池， 执行顺序不确定 。实时控制要的是 可预测 ：同样的输入，每次耗时分布应该稳定。并行执行会让最坏耗时变长（线程同步开销），所以这里必须选顺序执行。
+
+``` c++
+typedef enum ExecutionMode {
+  ORT_SEQUENTIAL = 0,
+  ORT_PARALLEL = 1,
+} ExecutionMode;
+
+options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+```
+
+ORT 线程池在等任务时有两种等待方式：
+
+- **允许自旋（默认）** ：线程在循环里反复检查任务队列，占满 CPU，延迟极低但 烧核 ；
+- 禁止自旋 ：线程睡眠在 futex/条件变量上，被唤醒才干活，延迟略高但 不占 CPU 。
+
+在 RK3588 这种“策略跑在 CPU4，电机控制跑在 CPU7（FIFO80）”的布局里，如果 ORT 的 worker 在 CPU5 上自旋，就会：
+
+- 拉高整板功耗和温度；
+- 与实时线程竞争内存带宽和 LLC；
+- 在核数紧张时直接被调度器判为“抢占者”。
+
+> 实时系统里，自旋等待是用 CPU 换延迟；当你不是唯一用户时，这笔交易通常不划算。
+>
+
+``` c++
+// 4. 进阶：开启自旋以降低延迟（可选）
+options.AddConfigEntry("session.intra_op.allow_spinning", "0");  // "0" 为关闭自旋
+```
+
+**配置线程亲和性：**
+
+``` c++
+// ORT affinity 使用从 1 开始的编号，Linux CPU ID 从 0 开始。
+const std::string cpu = std::to_string(threading.onnx_worker_cpu_id + 1);
+options.AddConfigEntry(
+    kOrtSessionOptionsConfigIntraOpThreadAffinities, cpu.c_str());
+```
+
+
+
+##### 内存优化
+
+ORT 通过两种机制来优化内存分配：
+
+- **`EnableCpuMemArena`**（默认 `true`）：启用 CPU 内存池。内存被池化复用，减少分配开销，但在多线程下可能增加峰值内存。
+- **`EnableMemoryPattern`**（默认 `true`）：在首次运行时记录内存分配模式，供后续相同形状的输入复用，加速执行。
+
+**何时需要关闭？** 如果你的模型**输入形状变化很大**（如动态 batch size），内存模式可能不再匹配，导致额外的开销或内存增长。此时可以考虑将 `EnableMemoryPattern` 设为 `false`，以空间换稳定。
+
+##### 日志、性能分析与模型导出
+
+- **日志**：`SetSessionLogId` 和 `SetSessionLogSeverityLevel` 可以覆盖 `Env` 级别的日志设置，为特定 Session 打上标签并控制输出详细程度。
+- **性能分析**：`EnableProfiling` 开启后，ORT 会生成 JSON 格式的性能追踪文件，是定位算子级瓶颈的关键工具。
+- **导出优化后的模型**：通过 `SetOptimizedModelFilePath`，可以将图优化后的模型保存下来。后续直接用这个文件创建 Session，可以**跳过优化步骤，显著缩短加载时间**。配合 `session.save_model_format=ORT`，还可以保存为体积更小的 `.ort` 格式。
+
+``` c++
+// 5. 导出优化后的模型，加速后续加载
+options.SetOptimizedModelFilePath("optimized_model.onnx");
+
+// 使用 options 构造 Session (options 此后不再影响该 Session)
+Ort::Session session(env, "model.onnx", options);
+```
+
+#### `Ort::Value`：通用数据容器
+
+`Ort::Value` 是 ONNX Runtime C++ API 中用于封装所有输入/输出数据的**通用容器**。它是对底层 C API `OrtValue` 的 RAII 包装，本质上是 ORT 推理管线与 C++ 数据之间的**唯一数据载体**。
+
+在 ORT 的 C++ 接口中，无法直接将一个 `std::vector` 或原始指针传给 `Session::Run`。所有数据都必须先被“装入” `Ort::Value` 这个信封中，ORT 才能识别和处理。`Session::Run` 的返回值，也是一组 `Ort::Value`。这个“信封”可以容纳多种 ONNX 数据类型，最常见的是**张量（Tensor）**，但也支持**序列（Sequence）**和**映射（Map）**。
+
+##### 创建方式
+
+创建张量有两种根本不同的方式，核心区别在于**内存由谁分配、由谁释放**。
+
+**方式一：ORT 分配内存（推荐用于输入数据）**
+
+使用 `Ort::Value::CreateTensor<T>(memory_info, shape, shape_len)`。ORT 会根据你给定的形状和类型，自行分配内存。创建后，你通过 `GetTensorMutableData<T>()` 获取指针，再将数据**拷贝**进去。
+
+```c++
+// 创建由 ORT 管理内存的张量
+auto tensor = Ort::Value::CreateTensor<float>(memory_info, shape.data(), shape.size());
+
+float* data = tensor.GetTensorMutableData<float>();
+std::copy(input_vector.begin(), input_vector.end(), data); // 将数据拷贝进去
+```
+
+这种方式下，**内存的生命周期完全由 `Ort::Value` 自身管理**，你无需干预释放，是最安全、最省心的选择。
+
+**方式二：包裹用户内存（零拷贝，但责任自负）**
+
+``` c++
+//                                       指向用户内存的指针
+Ort::Value::CreateTensor<T>(memory_info, data_ptr, data_size, shape, shape_len)
+```
+
+这种方式**不会拷贝数据**，而是直接将 `Ort::Value` 指向你提供的内存缓冲区。ORT 不拥有这块内存，只是包一层元数据（dtype、shape、strides）交给`Run` 。这就是所谓 zero-copy / user-provided buffer ：输入数据不需要在 ORT 内部再拷一份。
+
+这里有一条必须遵守的铁律：**你提供的内存，其生命周期必须长于所有引用它的 `Ort::Value`**。`Ort::Value` 的析构**不会**释放这块用户内存。如果 `Ort::Value` 仍然存活，而你提前释放了底层数据，后续推理就会访问无效内存。
+
+这种方式适合数据已经驻留在特定内存（如 GPU 显存、预分配的缓冲区）中，需要**避免拷贝开销的场景**。
+
+##### 生命周期与所有权
+
+`Ort::Value` 的设计围绕**移动语义（Move Semantics）** 和**引用计数**展开，理解这一点能避免许多常见错误。
+
+**不可拷贝：**`Ort::Value` **没有可用的拷贝构造函数**。这意味着你不能用 `auto v2 = v1;` 来“复制”一个 `Ort::Value`。这从根本上防止了底层句柄被意外重复释放。
+
+**按值传递，利用移动语义**：既然不可拷贝，那么如何传递 `Ort::Value`？答案是**按值传递（pass by value）**。`Ort::Value` **支持移动构造和移动赋值**，因此在函数间返回或传递时，资源所有权会被高效地“移动”过去，而不是复制。
+
+一个典型的错误模式是试图返回 `Ort::Value` 的引用：`Ort::Value& func()`。由于 `CreateTensor` 返回的是一个临时对象，返回其引用会导致悬垂引用（dangling reference），是**未定义行为**。正确的方式是直接按值返回。
+
+**引用计数保障安全共享**：在某些内部实现中，`Ort::Value` 的底层资源是引用计数的。虽然不能拷贝 `Ort::Value` 对象本身，但如果你通过某种方式持有多个指向同一底层资源的句柄，引用计数会确保资源在所有引用都消失后才被释放。不过，在常规使用中，遵循“移动而非拷贝”的原则就足够了。
+
+##### 完整示例
+
+``` c++
+#include <onnxruntime_cxx_api.h>
+#include <vector>
+
+// 假设 session 已创建，且已知输入名称为 "input"
+std::vector<float> input_data    = {1.0f, 2.0f, 3.0f, 4.0f};
+std::vector<int64_t> input_shape = {1, 4}; // batch=1, features=4
+
+auto memory_info = Ort::MemoryInfo::CreateCpu(
+    OrtArenaAllocator, OrtMemTypeDefault);
+
+// 创建由 ORT 管理内存的输入张量
+auto input_tensor = Ort::Value::CreateTensor<float>(
+    memory_info, input_shape.data(), input_shape.size());
+
+// 将数据拷贝到 ORT 管理的内存中
+float* tensor_data = input_tensor.GetTensorMutableData<float>();
+std::copy(input_data.begin(), input_data.end(), tensor_data);
+
+// 准备运行参数
+const char* input_names[] = {"input"};
+const char* output_names[] = {"output"};
+
+// Run 接收 Ort::Value 数组的指针
+auto output_tensors = session.Run(
+    Ort::RunOptions{nullptr},
+    input_names, &input_tensor, 1,   // 输入
+    output_names, 1                  // 输出
+);
+
+// 访问输出数据
+float* output_data = output_tensors[0].GetTensorMutableData<float>();
+```
+
+#### `Ort::MemoryInfo::CreateCpu()`：内存分配
+
+| 参数                | 含义                                                         |
+| ------------------- | ------------------------------------------------------------ |
+| `OrtDevice::CPU`    | 内存所在设备                                                 |
+| `OrtArenaAllocator` | 分配器类型：arena（内存池，一次大块分配、内部切分，避免频繁 malloc） |
+| `OrtMemTypeDefault` | 用途：普通输入输出（对比 `OrtMemTypeCPUInput` 用于某些 EP 的“主机侧输入”） |
+
+``` c++
+inline MemoryInfo MemoryInfo::CreateCpu(OrtAllocatorType type, OrtMemType mem_type) {
+  OrtMemoryInfo* p;
+  ThrowOnError(GetApi().CreateCpuMemoryInfo(type, mem_type, &p));
+  return MemoryInfo(p);
+}
+```
+
+### 数据结构
+
+#### `struct PolicyInferenceResult`：单次推理结果
+
+``` c++
+struct PolicyInferenceResult {
+    std::array<float, kDof> raw_action{};   // 模型输出原始值
+    std::int64_t inference_start_ns{0};     // 推理开始时间戳
+    std::int64_t inference_end_ns{0};       // 推理结束时间戳
+};
+```
+
+#### `struct PolicySession::Impl`：保存会话持久状态
+
+```  c++
+struct PolicySession::Impl {
+    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "robot_policy"};
+    Ort::Session ort_session_{nullptr};
+    Ort::RunOptions run_options;
+    std::string input_name, output_name;
+    const char* input_names[1]{nullptr};
+    const char* output_names[1]{nullptr};
+    std::size_t input_size{0};
+    PolicyObservation input_buffer{};        // 705 容量
+    std::array<float, kDof> output_buffer{}; // 12
+    Ort::Value input_tensor{nullptr};
+    Ort::Value output_tensor{nullptr};
+};
+```
+
+`pimpl` 在这里承担三件事：
+
+- 头文件不暴露 ORT 。`policy_session.hpp` 只 include`policy_observation_config.hpp` 和标准库；任何包含它的翻译单元（如`robot_interface.hpp` ）都不需要`onnxruntime_cxx_api.h` 的 include 路径和宏定义。这是 CMake 里把`ONNXRuntime::onnxruntime` 设为 PRIVATE 链接的前提。
+- `is_loaded()` 语义天然成立 ：`impl_ == nullptr` 就是未加载，不需要额外的 bool 标志去和真实状态同步。
+- `shutdown()` 退化为`impl_.reset()` ：ORT 的线程池在`Ort::Session` 析构时由 ORT 自己 join，本模块不需要维护任何线程句柄。
+命名上`ort_session_` 带下划线后缀，是为了与类名`PolicySession` 区分——避免读代码时把`impl_->session` 误认为“策略会话自身”。
+
+### 接口函数
+
+| 成员                      | 语义                                            | 失败表现                            |
+| ------------------------- | ----------------------------------------------- | ----------------------------------- |
+| `load(config, threading)` | 一次性初始化，内部自带 `shutdown()`，可重复调用 | 返回 `false`，原因在 `last_error()` |
+| `shutdown()`              | 释放 `Impl`（连带 ORT 会话与线程池）            | 幂等，无异常                        |
+| `is_loaded()`             | 只判断 `impl_ != nullptr`                       | 不产生副作用                        |
+| `infer(obs, result)`      | 热路径，单次推理                                | 返回 `false`，原因在 `last_error()` |
+| `last_error()`            | 返回 `const std::string&`，**noexcept**         | 热路径零拷贝                        |
+
+#### `load()`：加载模型
+
+`load` 的本质，是**把“所有可能失败、可能阻塞、可能分配内存、可能创建线程”的事情**，从 50 HZ 的控制周期里，全部搬到启动期的一次性初始化里做完。做完之后，`infer` 才能是三十行的纯热路径。
+
+---
+
+先`shutdown()` ：让`load` 可以重复调用（reload 场景）。不先释放旧会话就直接`make_unique<Impl>` 覆盖，旧线程池的析构时机就变成隐式行为，容易在“重载模型”时出现两个会话短暂共存、线程数翻倍的问题。`impl_.reset()` 会析构整个`Impl` ——包括`Ort::Session` 、`Ort::Env` 、两个`Ort::Value` 。ORT 的线程池在`Ort::Session` 析构时由 ORT 自己 join。
+
+> 对应知识点 ：RAII。`shutdown()` 是显式版，析构函数是隐式版，两者都走`impl_.reset()` ，行为一致。
+
+``` c++
+bool PolicySession::load(const PolicyConfig& config,
+                         const RuntimeThreadingConfig& threading)
+{
+    shutdown();
+    last_error_.clear();
+```
+
+---
+
+**进行参数校验**：
+
+``` c++
+    if (threading.onnx_intra_op_threads != 1 && threading.onnx_intra_op_threads != 2) {
+        last_error_ = "ONNX intra-op threads must be 1 or 2";
+        return false;
+    }
+
+	// intra_op_threads 的数量
+    const bool dual = threading.onnx_intra_op_threads == 2;
+
+    if (dual && (threading.policy_main.cpu_ids.size() != 1 ||
+                 threading.onnx_worker_cpu_id < 0 ||
+                 threading.onnx_worker_cpu_id >= CPU_SETSIZE ||
+                 threading.policy_main.cpu_ids[0] == threading.onnx_worker_cpu_id)) {
+        last_error_ = "two-thread ONNX mode requires distinct main and worker CPUs";
+        return false;
+    }
+```
+
+两个设计决策：
+
+1. 只允许 1 或 2，不是`>= 1` 。为什么？因为超过 2 个 intra-op 线程在 RK3588 这种 8 核板子上会挤占实时核，而且`verify_onnx_workers` 的核验逻辑是“恰好 1 个 worker”，超出就得重写归因逻辑。 限制取值范围，比写一个通用但没人用的实现更工程化。
+
+2. 双线程必须显式指定两个不同 CPU 。`cpu_ids.size() != 1` 意味着主线程必须恰好绑 1 个核——否则“worker 和 main 不同核”这个约束无法表达。
+
+> 启动期“快速失败（fail fast）”。在碰任何系统资源之前把非法配置拒掉，错误信息明确到具体约束。
+
+---
+
+**构建 CPU 集合`cpu_set_t`：**
+
+``` c++
+    cpu_set_t main_mask{};
+    if (!threading.policy_main.cpu_ids.empty() &&
+        !cpu_mask(threading.policy_main.cpu_ids, main_mask, last_error_)) {
+        return false;
+    }
+
+    cpu_set_t worker_mask{};
+	// 在构造 ORT 对象前记录基线，准备、模型加载和核验期间不得启动其他后台线程。
+    std::set<pid_t> tasks_before;
+    if (dual) {
+        CPU_SET(threading.onnx_worker_cpu_id, &worker_mask);
+        if (!list_task_ids(tasks_before, last_error_)) return false;
+    }
+```
+
+`list_task_ids` 枚举`/proc/self/task/` ，得到当前进程的所有线程的 TID 。在`Ort::Session` 构造和`warm_up()` 之后，再枚举一次， 差集 就是“ORT 新建的线程”。然后逐个核验它们的 CPU 亲和性。没有基线，就无法区分“ORT 起的线程”和“你自己起的线程” ，归因就失败了。
+
+---
+
+**获取观测维度 + 校验模型后缀：**
+
+``` c++
+    // 和 observation_size 一致
+	const std::size_t input_size = policy_observation::observation_size(config.gait.enabled);
+
+    if (std::filesystem::path(config.model_path).extension() != ".onnx") {
+        last_error_ = "policy model path must name an .onnx file";
+        return false;
+    }
+```
+
+---
+
+**设置`SessionOptions`：**
+
+为什么不用`sched_setaffinity` 自己绑 ：ORT 的线程由 ORT 创建，你拿不到 TID 就无法在创建时绑定；只能通过 ORT 的配置项让它在创建时自己绑。核验则是事后用`/proc` 检查—— “让它自己配 + 事后核验”是处理第三方线程池的标准套路 。
+
+``` c++
+
+try {
+        Ort::SessionOptions options;
+        // 设置 intra-op 线程数
+        options.SetIntraOpNumThreads(threading.onnx_intra_op_threads);
+        // 设置执行模式为串行
+        options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        // 设置图优化级别为所有优化
+        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        // 禁用 intra-op 线程自旋等待
+        options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        // 设置 intra-op 线程亲和性
+        if (dual) {
+            // ORT affinity 使用从 1 开始的编号，Linux CPU ID 从 0 开始。
+            const std::string cpu = std::to_string(threading.onnx_worker_cpu_id + 1);
+            options.AddConfigEntry(
+                kOrtSessionOptionsConfigIntraOpThreadAffinities, cpu.c_str());
+        }
+```
+
+---
+
+**构造`Impl` 与`Ort::Session`**：
+
+``` c++
+        impl_ = std::make_unique<Impl>();
+        impl_->ort_session_ = Ort::Session(impl_->env, config.model_path.c_str(), options);
+		// 端口校验
+        if (impl_->ort_session_.GetInputCount()  != 1 ||
+            impl_->ort_session_.GetOutputCount() != 1) {
+            last_error_ = "ONNX policy requires exactly one input and one output";
+            shutdown();
+            return false;
+        }
+```
+
+---
+
+**校验模型输入和输出端口，并获取端口名：**
+
+ORT 老 API 是`GetInputName(0, allocator)` ，返回`char*` ， 内存由 allocator 拥有，调用方不知道何时释放 ——容易泄漏，也容易误 free。新 API 是`GetInputNameAllocated` ，返回`AllocatedStringPtr` （本质是`unique_ptr<char[]>` ）， 析构自动释放 。代码里`.get()` 取出裸指针，赋给`std::string` —— 拷贝一份 ，然后`AllocatedStringPtr` 临时对象立刻析构，内存释放。这一步是安全的关键。
+
+``` c++
+        // 校验端口输入、输出
+		std::string port_error;
+        if (!validate_port(impl_->ort_session_.GetInputTypeInfo(0),
+                           {1, static_cast<int64_t>(input_size)},
+                           "input", port_error) ||
+            !validate_port(impl_->ort_session_.GetOutputTypeInfo(0),
+                           {1, static_cast<int64_t>(kDof)},
+                           "output", port_error)) {
+            last_error_ = port_error;
+            shutdown();
+            return false;
+        }
+
+		// 获取端口名
+	    Ort::AllocatorWithDefaultOptions allocator;
+        impl_->input_name  = impl_->ort_session_.GetInputNameAllocated(0, allocator).get();
+        impl_->output_name = impl_->ort_session_.GetOutputNameAllocated(0, allocator).get();
+		// C 风格
+		impl_->input_names[0]  = impl_->input_name.c_str();
+        impl_->output_names[0] = impl_->output_name.c_str();
+```
+
+---
+
+**预分配张量(`Ort::Value`)：** **零热路径分配** 的核心。
+
+> 如何避免推理时的数据拷贝？用 user-provided buffer 创建`Ort::Value` ，输入侧直接写、输出侧直接读，不经过 ORT 的 allocator。
+
+``` c++
+        const std::array<int64_t, 2>     input_shape{1 , static_cast<int64_t>(input_size)};
+        constexpr std::array<int64_t, 2> output_shape{1, static_cast<int64_t>(kDof)};
+
+        const auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+        impl_->input_tensor = Ort::Value::CreateTensor<float>(
+            memory, impl_->input_buffer.data(), input_size,
+            input_shape.data(), input_shape.size());
+        impl_->output_tensor = Ort::Value::CreateTensor<float>(
+            memory, impl_->output_buffer.data(), impl_->output_buffer.size(),
+            output_shape.data(), output_shape.size());
+        impl_->input_size = input_size;
+		// 预热
+        if (!warm_up()) {
+            shutdown();
+            return false;
+        }
+    } catch (const std::exception& e) {
+        last_error_ = "failed to load ONNX policy: " + std::string(e.what());
+        shutdown();
+        return false;
+    }
+```
+
+**线程校验：**
+
+``` c++
+    if (dual) {
+        const std::string error =
+            verify_onnx_workers(main_mask, worker_mask, tasks_before);
+        if (!error.empty()) {
+            last_error_ = error;
+            shutdown();
+            return false;
+        }
+    }
+    return true;
+}
+```
+
+#### `shutdown()`：关闭控制器
+
+``` c++
+void PolicySession::shutdown()
+{
+    impl_.reset();
+}
+```
+
+####  `infer()`：运行推理
+
+``` c++
+bool PolicySession::infer(const PolicyObservation& observation,  // 前 impl_->input_size 个有效
+                          PolicyInferenceResult&   result)
+{
+    if (!is_loaded()) {
+        last_error_ = "policy is not loaded";
+        return false;
+    }
+    // 记录本次推理开始时间戳
+    result.inference_start_ns = robot_base::monotonic_now_ns();
+    try {
+        // 首先检验观测是否为有限值，如果满足条件则继续推理
+        if (!std::all_of(observation.begin(), observation.begin() + impl_->input_size,
+                         [](float x) { return std::isfinite(x); })) {
+            result.inference_end_ns = robot_base::monotonic_now_ns();
+            last_error_ = "policy input contains non-finite value";
+            return false;
+        }
+
+        // 复制观测到输入缓冲区
+        std::copy_n(observation.begin(), impl_->input_size, impl_->input_buffer.begin());
+        // 运行推理
+        impl_->ort_session_.Run(impl_->run_options,
+                           impl_->input_names, &impl_->input_tensor, 1,
+                           impl_->output_names, &impl_->output_tensor, 1);
+        // 复制推理结果到输出缓冲区
+        std::copy(impl_->output_buffer.begin(), impl_->output_buffer.end(), result.raw_action.begin());
+    } catch (const std::exception& e) {
+        result.inference_end_ns = robot_base::monotonic_now_ns();
+        last_error_ = "ONNX inference failed: " + std::string(e.what());
+        return false;
+    }
+    // 记录本次推理结束时间戳
+    result.inference_end_ns = robot_base::monotonic_now_ns();
+    // 检验推理结果是否为有限值
+    if (!std::all_of(result.raw_action.begin(), result.raw_action.end(),
+                     [](float x) { return std::isfinite(x); })) {
+        last_error_ = "policy output contains non-finite value";
+        return false;
+    }
+    last_error_.clear();
+    return true;
+}
+```
+
+
+
+### 私有辅助函数
+
+#### `validate_port()`：检查模型端口
+
+> 模型上线前怎么检查端口？ 加载后读`GetInputTypeInfo` ，校验 dtype、shape、数量。
+
+onnx 有如下类型：
+
+``` c++
+#include"onnxruntime_c_api.h"
+
+// Synced with onnx TypeProto oneof
+typedef enum ONNXType {
+  ONNX_TYPE_UNKNOWN,
+  ONNX_TYPE_TENSOR,
+  ONNX_TYPE_SEQUENCE,
+  ONNX_TYPE_MAP,
+  ONNX_TYPE_OPAQUE,
+  ONNX_TYPE_SPARSETENSOR,
+  ONNX_TYPE_OPTIONAL
+} ONNXType;
+```
+
+具体实现代码：
+
+``` c++
+bool validate_port(const Ort::TypeInfo& type,
+                   const std::vector<int64_t>& expected,
+                   const char* role, std::string& error)
+{
+    // 必须是 tensor 类型
+    if (type.GetONNXType() != ONNX_TYPE_TENSOR) {
+        error = std::string("ONNX ") + role + " must be a tensor";
+        return false;
+    }
+    // 获取 tensor 的 type 和 shape
+    const auto info = type.GetTensorTypeAndShapeInfo();
+    if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        error = std::string("ONNX ") + role + " must be float32";
+        return false;
+    }
+    const auto shape = info.GetShape();
+    // Model metadata may declare a dynamic batch; runtime tensors use batch 1.
+    if (shape.size() != expected.size() ||
+        (shape[0] != expected[0] && shape[0] != -1) ||
+        !std::equal(shape.begin() + 1, shape.end(), expected.begin() + 1)) {
+        std::ostringstream out;
+        out << "ONNX " << role << " shape mismatch: expected [";
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            if (i) out << ',';
+            out << expected[i];
+        }
+        out << "], got [";
+        for (std::size_t i = 0; i < shape.size(); ++i) {
+            if (i) out << ',';
+            out << shape[i];
+        }
+        out << ']';
+        error = out.str();
+        return false;
+    }
+    return true;
+}
+```
+
+#### `warm_up()`：预热模型
+
+> 为什么检查输出有限性：零输入下输出是 NaN/Inf，通常意味着：模型权重里有 NaN、某些层对零输入做了`log(0)` /`1/x` 、或者量化反量化有溢出。 这类问题在真机上表现为“策略一启动就抽风”，在这里拦下来价值极大。
+
+``` c++
+bool PolicySession::warm_up()
+{
+    try {
+        // This happens before any motor or IMU startup, outside the control loop.
+        for (int i = 0; i < 20; ++i) {
+            impl_->ort_session_.Run(impl_->run_options,
+                                    impl_->input_names,
+                                   &impl_->input_tensor,
+                                    1,
+                                   impl_->output_names,
+                                  &impl_->output_tensor, 
+                                   1);
+        }
+        if (!std::all_of(impl_->output_buffer.begin(),
+                         impl_->output_buffer.end(),
+                         [](float x) { return std::isfinite(x); })) {
+            last_error_ = "ONNX warmup output contains non-finite value";
+            return false;
+        }
+    } catch (const Ort::Exception& e) {
+        last_error_ = "ONNX warmup failed: " + std::string(e.what());
+        return false;
+    }
+    return true;
+}
+```
+
+##### `verify_onnx_workers()`：校验`worker`
+
+``` c++
+```
+
+
+
+## `RobotInterface`：顶层编排者
+
+它不实现任何算法，只负责把「配置 → 会话 → 处理器 → 策略运行时 → 命令线程」按正确顺序组装起来，并对外暴露一个极窄的驱动面：`initialize()` /`policy_step()` /`shutdown()` 。
+
+### 前置声明
+
+``` c++
+class ActionProcessor;
+class ObservationBuilder;
+```
+
+这两个类型只在 .cpp 里使用（作为`unique_ptr` 的完整类型），头文件不需要它们的定义。
+
+> 这是**典型的编译期解耦手法**——改`ActionProcessor` 的成员不会触发所有包含`robot_interface.hpp` 的翻译单元重编。
+
+### 数据结构
+
+#### `PolicyStepPhase`：策略的状态机
 
 推理状态：
 
@@ -2772,7 +5996,543 @@ private:
     std::int64_t 	policy_step_phase_started_ns_{0};			// 本次推理开始时间
 ```
 
-设置函数：
+#### `enum ShutdownResult`：电机关闭结果
+
+``` c++
+enum class ShutdownResult {
+    Confirmed,              // stop 命令执行成功
+    ReleasedWithCommLoss,   // stop 命令执行失败且通信故障 下 控制器释放
+    RetryRequired,          // stop 命令执行失败但通信正常，需重试
+};
+```
+
+### 构造函数
+
+**只保存配置，不做任何 I/O**。
+
+``` c++
+/* 保存外部传入的接口配置，后续由初始化函数按模块使用。 */
+RobotInterface::RobotInterface(RobotInterfaceConfig config)
+    : config_(std::move(config)),
+      motor_session_(config_),
+      imu_session_(config_)
+{
+}
+```
+
+### 析构函数
+
+析构函数**只给一次机会** shutdown；`RetryRequired` 则 `std::terminate`。析构函数已经是保底路径，必须直接`terminate`。
+
+``` c++
+/* 析构仅尝试关闭一次；未获准释放时立即终止进程。 */
+RobotInterface::~RobotInterface() noexcept {
+    if (shutdown() == ShutdownResult::RetryRequired) {
+        std::fputs("[RobotInterface] Fatal: destructor shutdown failed; "
+                   "STOP not confirmed. Terminating process.\n", stderr);
+        std::fflush(stderr);
+        std::terminate();
+    }
+}
+```
+
+这是有意的安全取舍：STOP 未确认就销毁对象，等于把驱动器留在未知状态。与其静默地"尽力而为"，不如让进程明确死亡。调用方（如`policy_test` ）则可以在析构前显式循环重试`shutdown()` 。
+
+### 接口函数
+
+#### `initialize()`：初始化
+
+##### 构建映射  / `processor`
+
+``` c++
+/* 编排机器人完整运行态：电机、策略、IMU 和站立姿态复位。 */
+bool RobotInterface::initialize() {
+
+    if (!initialize_processors()) {
+        shutdown();
+        return false;
+    }
+```
+
+##### 加载策略模型
+
+``` c++
+    /* 模型 load/warmup、ORT worker 校验和内存锁定发生在电机、IMU 或
+    recorder 线程启动之前，保证新增 TID 可归因且失败时不会触碰电机 */
+    if (!policy_session_.load(config_.policy, config_.runtime)) {
+        std::cerr << "[RobotInterface] load_policy failed: "
+                  << policy_session_.last_error() << "\n";
+        shutdown();
+        return false;
+    }
+```
+
+##### 配置线程运行环境（锁页）
+
+> 关键意图： 策略加载和内存锁页都在电机/IMU 线程启动之前完成 ，这样失败时不会碰硬件，也避免新线程分配 TLB/栈页干扰 EtherCAT 实时性。`shutdown()` 则是严格逆序：先`request_stop()` → 停 worker → 电机 shutdown → 收尾记录 → 关 policy → 关 recorder → 关 IMU。
+
+``` c++
+    // 进程/主线程运行环境：模型就绪后、其他线程和硬件启动前完成。
+    if (config_.runtime.require_process_memory_lock) {
+        // 解决 MCL_FUTURE 在创建线程时一次性填充并锁定整个默认栈，
+        // 拉长 EtherCAT 启动收发交接空档并导致失同步的问题。
+        // 按需锁页，时序敏感线程仍在进入业务循环前预触碰所需栈页。
+        if (::mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0) {
+            const int saved_errno = errno;
+            std::cerr << "[RobotInterface] mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) "
+                      << "failed: errno=" << saved_errno << " ("
+                      << std::strerror(saved_errno)
+                      << "). Check RLIMIT_MEMLOCK and CAP_IPC_LOCK.\n";
+            shutdown();
+            return false;
+        }
+
+        const int prefault_error =
+            robot_base::prefault_current_thread_stack(
+                config_.runtime.policy_main.stack_prefault_bytes);
+        if (prefault_error != 0) {
+            std::cerr << "[RobotInterface] policy_main stack prefault after "
+                      << "mlockall failed: errno=" << prefault_error << " ("
+                      << std::strerror(prefault_error)
+                      << "); maximum 1 MiB and valid page size required\n";
+            shutdown();
+            return false;
+        }
+    }
+```
+
+##### 启动日志记录
+
+``` c++
+    // 日志生命周期：按已校验的观测维度启动独立记录器。
+    if (config_.recorder.enabled) {
+        const auto observation_size = policy_observation::observation_size(config_.policy.gait.enabled);
+        if (!inference_recorder_.start(config_.recorder,
+                                       observation_size,
+                                       config_.runtime.background)) {
+            std::cerr << "[RobotInterface] failed to open inference log: "
+                      << inference_recorder_.last_error() << "\n";
+            inference_recorder_failed_ = true;
+            shutdown();
+            return false;
+        }
+        std::cout << "[RobotInterface] inference log: "
+                  << inference_recorder_.log_path() << "\n";
+    }
+```
+
+##### 初始化电机
+
+``` c++
+    // 初始化电机
+    if (!motor_session_.initialize()) {
+        shutdown();
+        return false;
+    }
+    if (!motor_session_.restart()) {
+        shutdown();
+        return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+```
+
+##### 初始化IMU
+
+``` c++
+    // 初始化 IMU
+    if (!imu_session_.initialize()) {
+        shutdown();
+        return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+```
+
+##### 恢复到初始位置
+
+``` c++
+    // 恢复到初始位置
+    std::array<double, motor_base::kMotorNum> startup_hold_target_motor_rad{};
+    if (!reset_joints(startup_hold_target_motor_rad)) {
+        shutdown();
+        return false;
+    }
+```
+
+##### 配置并开启策略命令线程
+
+``` c++
+   // 处理器和复位姿态就绪后，绑定 worker 的固定依赖。
+    try {
+        policy_command_worker_ = std::make_unique<PolicyCommandWorker>(
+            config_, motor_session_, *action_processor_, first_policy_inference_started_ns_);
+    } catch (const std::exception& error) {
+        std::cerr << "[RobotInterface] failed to construct policy command worker: "
+                  << error.what() << "\n";
+        shutdown();
+        return false;
+    }
+
+    // 开启策略命令线程
+    if (!policy_command_worker_->start(std::move(startup_hold_target_motor_rad))) {
+        std::cerr << "[RobotInterface] failed to start policy command worker\n";
+        shutdown();
+        return false;
+    }
+
+    initialized_ = true;
+    return true;
+}
+```
+
+#### `shutdown()`：显式关闭
+
+显式关闭，失败可重试。**先请求一次电机停止并确认停止；仅在持续通信故障时允许未确认释放。**
+
+``` c++
+/* 先请求并确认停止；仅在持续通信故障时允许未确认释放。 */
+ShutdownResult RobotInterface::shutdown() {
+
+    // 首先请求一次电机停止命令
+    const auto request = motor_session_.request_stop();
+    initialized_ = false;
+
+    // 会话释放控制器前，先结束仍可能访问控制器的命令线程。
+    if (policy_command_worker_) {
+        policy_command_worker_->stop();
+    }
+
+    // 如果之前非阻塞请求失败，则调用阻塞停机命令
+    const auto result = motor_session_.shutdown(request);
+    if (result == ShutdownResult::RetryRequired) { // 发生了通信故障
+        return result;
+    }
+```
+
+**记录已完成的策略帧，确保所有命令都被执行：**
+
+``` c++
+    // 记录已完成的策略帧，确保所有命令都被执行。
+    if (policy_command_worker_) {
+        record_completed_policy_frame(*policy_command_worker_);
+        policy_command_worker_.reset();
+    }
+```
+
+**关闭策略推理线程：**
+
+``` c++
+    policy_runtime_.shutdown();
+```
+
+**停止日志记录器：**
+
+``` c++
+
+    inference_recorder_.stop();
+    inference_recorder_failed_ = false;
+    policy_step_phase_ = PolicyStepPhase::Idle;
+    policy_step_phase_started_ns_    = 0;
+    last_policy_target_published_ns_ = 0;
+    first_policy_inference_started_ns_.store(0, std::memory_order_release);
+    imu_session_.deinitialize();
+    return result;
+}
+```
+
+#### `set_target_velocity()`：设置目标速度
+
+主要是按 YAML 中配置的范围限制并保存目标速度，顺序为 [vx, vy, yaw_rate]。
+
+``` c++
+/* 按 YAML 中配置的范围限制并保存目标速度，顺序为 [vx, vy, yaw_rate]。 */
+void RobotInterface::set_target_velocity(double vx, double vy, double yaw_rate) {
+    if (config_.command_ranges.lin_vel_x) {
+        const auto& range = *config_.command_ranges.lin_vel_x;
+        vx = std::clamp(vx, range[0], range[1]);
+    }
+    if (config_.command_ranges.lin_vel_y) {
+        const auto& range = *config_.command_ranges.lin_vel_y;
+        vy = std::clamp(vy, range[0], range[1]);
+    }
+    if (config_.command_ranges.ang_vel_z) {
+        const auto& range = *config_.command_ranges.ang_vel_z;
+        yaw_rate = std::clamp(yaw_rate, range[0], range[1]);
+    }
+    target_velocity_ = {vx, vy, yaw_rate};
+}
+```
+
+#### `policy_step()`：执行一次策略闭环
+
+**一次推理状态从预检`PolicyStepPhase::Precheck`开始**：
+
+``` c++
+bool RobotInterface::policy_step() {
+    // 一次推理状态从预检开始
+    set_policy_step_phase(PolicyStepPhase::Precheck);
+    // 首先检查 policy_command_worker 是否初始化
+    if (!policy_command_worker_) {
+        return handle_policy_step_failure("policy command worker is not initialized");
+    }
+    auto& worker = *policy_command_worker_;
+    const std::array<double, 3> target_velocity = target_velocity_;
+    std::string worker_error;
+    // check_health 覆盖 worker 与 motor 会话状态，policy 加载状态在此一并检查。
+    if (!worker.check_health(worker_error)) {
+        return handle_policy_step_failure(worker_error);
+    }
+    // 检查 policy_session 是否已加载
+    if (!policy_session_.is_loaded()) {
+        return handle_policy_step_failure("policy is not loaded");
+    }
+```
+
+**然后进入传感器数据读取`PolicyStepPhase::SensorSnapshot`阶段：**
+
+``` c++
+    // 进入传感器数据读取阶段
+    set_policy_step_phase(PolicyStepPhase::SensorSnapshot);
+    // 从电机会话获取最新状态快照
+    if (!motor_session_.refresh_feedback_for_policy(worker_error)) {
+        return handle_policy_step_failure(worker_error);
+    }
+    const MotorStateSnapshot motor_state = motor_session_.get_feedback_for_policy();
+    // 从 IMU 会话获取最新状态快照
+    if (!imu_session_.refresh_feedback_for_policy(worker_error)) {
+        return handle_policy_step_failure(worker_error);
+    }
+    const AhrsStateSnapshot ahrs_state = imu_session_.get_feedback_for_policy();
+    // 检查传感器数据是否有效
+    const std::int64_t timing_now_ns = robot_base::monotonic_now_ns();
+    const std::int64_t imu_receive_timestamp_ns = ahrs_state.receive_timestamp_ns;
+    // 独立 latest-value 数据源只检查各自的时间戳和年龄。
+    if (motor_state.timestamp_ns <= 0) {
+        return handle_policy_step_failure(
+            "motor timestamp missing: host_timestamp_ns invariant violated");
+    }
+    if (imu_receive_timestamp_ns <= 0) {
+        return handle_policy_step_failure(
+            "IMU timestamp missing: host_timestamp_ns invariant violated");
+    }
+    const std::int64_t imu_age_ns   = timing_now_ns - imu_receive_timestamp_ns;
+    const std::int64_t motor_age_ns = timing_now_ns - motor_state.timestamp_ns;
+    if (imu_age_ns   > robot_base::seconds_to_ns(config_.sensor_guard.max_imu_sample_age_s) ||
+        motor_age_ns > robot_base::seconds_to_ns(config_.sensor_guard.max_motor_sample_age_s)) {
+        return handle_policy_step_failure(
+            "sensor timing guard failed: imu_age_us=" +
+            std::to_string(robot_base::ns_to_us(imu_age_ns)) +
+            ", motor_age_us=" + std::to_string(robot_base::ns_to_us(motor_age_ns)));
+    }
+    // 观测时间取两源中较老的时间戳：两份数据都不晚于该时刻，作为新鲜度的保守估计。
+    const std::int64_t observation_time_ns = std::min(motor_state.timestamp_ns, imu_receive_timestamp_ns);
+```
+
+**利用传感器数据构建观测帧（`PolicyStepPhase::Inference`）：**
+
+``` c++
+    // 进入观测构建阶段
+    set_policy_step_phase(PolicyStepPhase::Observation);
+    PolicyObservation policy_observation;
+    std::string observation_error;
+    if (!observation_builder_->build(motor_state,
+                                     ahrs_state,
+                                     target_velocity,
+                                     policy_observation,
+                                     observation_error)) {
+        return handle_policy_step_failure("failed to build policy observation: " +
+                                          observation_error);
+    }
+```
+
+**进入后处理阶段（`PolicyStepPhase::PostInference`），处理模型输出原始数据，并记录进recoder：**
+
+``` c++
+   // 进入后处理阶段：处理模型输出原始数据，并记录进recoder
+    set_policy_step_phase(PolicyStepPhase::PostInference);
+    if (!worker.check_health(worker_error)) {
+        return handle_policy_step_failure(worker_error);
+    }
+    const auto target_model_rad = action_processor_->make_model_target(policy_result.raw_action);
+
+    // 在 admission 前填充与准入无关的
+    InferenceRecord log_record;
+    if (config_.recorder.enabled) {
+        log_record.frame_index = observation_builder_->frame_index();
+        log_record.motor_sample_timestamp_ns = motor_state.timestamp_ns;
+        log_record.rx_pos_rad     = motor_state.position_rad;
+        log_record.rx_vel_rad_s   = motor_state.velocity_rad_s;
+        log_record.torque_percent = motor_state.torque_percent;
+        log_record.comm_ok        = motor_state.comm_ok;
+        log_record.enabled        = motor_state.enabled;
+        log_record.imu_sample_timestamp_ns = ahrs_state.sample_timestamp_ns;
+        log_record.imu_receive_timestamp_ns = imu_receive_timestamp_ns;
+        log_record.motor_age_us = robot_base::ns_to_us(timing_now_ns - motor_state.timestamp_ns);
+        log_record.inference_start_ns = policy_result.inference_start_ns;
+        log_record.inference_end_ns   = policy_result.inference_end_ns;
+        log_record.policy_seq = policy_seq;
+        log_record.policy_observation_time_ns = observation_time_ns;
+        log_record.policy_observation = policy_observation;
+        log_record.raw_action = policy_result.raw_action;
+        log_record.target_model_rad = target_model_rad;
+    }
+```
+
+**然后进行发布（`PolicyStepPhase::Publish`），把目标数据通过 SPSC 通道发布给`worker`线程：**
+
+``` c++
+    set_policy_step_phase(PolicyStepPhase::Publish);
+    const std::int64_t decision_now_ns = robot_base::monotonic_now_ns();
+    // 观测到动作的年龄超过门限即丢弃，首帧前保持年龄从首次推理时刻起计。
+    const std::int64_t obs_age_ns      = decision_now_ns - observation_time_ns;
+    const std::int64_t hold_started_ns = last_policy_target_published_ns_ != 0
+        ? last_policy_target_published_ns_
+        : first_policy_inference_started_ns_.load(std::memory_order_acquire);
+
+    const bool result_dropped = obs_age_ns > kMaxObsToActionAgeNs;
+
+    // 追加 admission 时效字段；两项年龄固定在 decision_now。
+    if (config_.recorder.enabled) {
+        log_record.obs_to_action_age_us = robot_base::ns_to_us(obs_age_ns);
+        log_record.target_hold_age_us   = robot_base::ns_to_us(decision_now_ns - hold_started_ns);
+        log_record.policy_result_dropped = result_dropped;
+    }
+
+    // 丢弃的结果不发布给policy_worker，不刷新发布时间。
+    if (!result_dropped) {
+        PolicyTargetFrame target;
+        target.policy_seq       = policy_seq;
+        target.target_model_rad = target_model_rad;
+        // worker 的目标超时诊断也使用该年龄。
+        target.obs_to_action_age_us = robot_base::ns_to_us(obs_age_ns);
+        // 通过 target_channel 发布给 policy_worker 线程
+        if (config_.recorder.enabled) {
+            last_policy_target_published_ns_ = worker.publish_target(target, &log_record);
+        } else {
+            last_policy_target_published_ns_ = worker.publish_target(target);
+        }
+        observation_builder_->set_last_action(policy_result.raw_action);
+    }
+
+    // 推进观测帧计数；丢弃结果也会推进。
+    observation_builder_->advance_frame();
+
+    // 尝试从 record_channel 收取 worker 完成的记录。
+    record_completed_policy_frame(worker);
+	// 丢弃的直接由 record_policy_frame() 记录
+    if (result_dropped && config_.recorder.enabled) {
+        record_policy_frame(log_record);
+    }
+
+
+    // 进入空闲阶段
+    set_policy_step_phase(PolicyStepPhase::Idle);
+    return true;
+}
+```
+
+### 私有辅助函数
+
+#### `initialize_processors()`：构造`processor`
+
+``` c++
+bool RobotInterface::initialize_processors() {
+    std::unique_ptr<const JointMapping> mapping;
+    try {
+        mapping = std::make_unique<const JointMapping>(static_cast<int>(kDof), config_.joint_mapping);
+    } catch (const std::invalid_argument& error) {
+        std::cerr << "[RobotInterface] initialize_processors failed: "
+                  << error.what() << "\n";
+        return false;
+    }
+
+    auto action_processor    = std::make_unique<ActionProcessor>(config_, *mapping);
+    auto observation_builder = std::make_unique<ObservationBuilder>(config_, *mapping);
+
+    // 先替换旧处理器，再释放它们引用的旧映射。
+    action_processor_    = std::move(action_processor);
+    observation_builder_ = std::move(observation_builder);
+    joint_mapping_       = std::move(mapping);
+
+    return true;
+}
+```
+
+#### `reset_joints()`：初始化站姿
+
+``` c++
+/* 按平滑插值将关节恢复到 default_joint_pos_rad 初始姿态。 */
+bool RobotInterface::reset_joints(
+    std::array<double, motor_base::kMotorNum>& final_target_motor_rad) {
+    // 获取配置的默认关节姿态
+    const auto& target_model_q = config_.default_joint_pos_rad;
+    std::string error;
+    // 获取当前电机位置信息
+    if (!motor_session_.refresh_feedback_for_policy(error)) {
+        std::cerr << "[RobotInterface] reset_joints rejected: " << error << "\n";
+        return false;
+    }
+    const MotorStateSnapshot motor_state = motor_session_.get_feedback_for_policy();
+    if (motor_state.timestamp_ns <= 0 || !robot_base::finite_array(motor_state.position_rad)) {
+        std::cerr << "[RobotInterface] reset_joints rejected: motor feedback is invalid.\n";
+        return false;
+    }
+
+    // 从电机位置信息中提取当前关节姿态
+    std::array<double, kDof> start_model_q{};
+    if (!action_processor_->build_model_positions_from_motor(
+            motor_state.position_rad, start_model_q, error)) {
+        std::cerr << "[RobotInterface] reset_joints rejected: "
+                  << error << "\n";
+        return false;
+    }
+
+    const int ramp_steps = 100;
+    const auto reset_period_us = std::max<std::int64_t>(
+        1,
+        static_cast<std::int64_t>(std::llround(
+            config_.safety.control_command_timeout_ms * 500.0)));
+    const auto dt = std::chrono::microseconds(reset_period_us);
+    std::array<double, motor_base::kMotorNum> target_rad{};
+    std::array<double, kDof> q_cmd_model{};
+
+    for (int k = 1; k <= ramp_steps; ++k) {
+        const double alpha = static_cast<double>(k) / static_cast<double>(ramp_steps);
+        for (std::size_t i = 0; i < q_cmd_model.size(); ++i) {
+            q_cmd_model[i] = start_model_q[i] * (1.0 - alpha) + target_model_q[i] * alpha;
+        }
+        if (!action_processor_->build_motor_position_targets_from_model(q_cmd_model, target_rad, error)) {
+            std::cerr << "[RobotInterface] reset_joints failed: "
+                      << error << "\n";
+            return false;
+        }
+        motor_base::CommandTiming timing;
+        timing.produced_at_ns = robot_base::monotonic_now_ns();
+        timing.valid_until_ns = timing.produced_at_ns + robot_base::seconds_to_ns(
+            config_.safety.control_command_timeout_ms / 1000.0);
+        bool submitted = false;
+        if (config_.motor.control_mode == motor_base::MotorControlMode::POSITION) {
+            submitted = motor_session_.submit_position_targets_rad(target_rad, timing);
+        } else if (config_.motor.control_mode == motor_base::MotorControlMode::IMPEDANCE) {
+            const auto setpoints = ActionProcessor::make_position_impedance_setpoints(
+                target_rad, config_.motor);
+            submitted = motor_session_.submit_impedance_setpoints(setpoints, timing);
+        }
+        if (!submitted) {
+            return false;
+        }
+        if (k < ramp_steps) {
+            std::this_thread::sleep_for(dt);
+        }
+    }
+
+    final_target_motor_rad = std::move(target_rad);
+    return true;
+}
+```
+
+#### `set_policy_step_phase()`：设置推理状态
 
 ``` c++
 void RobotInterface::set_policy_step_phase(PolicyStepPhase phase) noexcept
@@ -2782,49 +6542,41 @@ void RobotInterface::set_policy_step_phase(PolicyStepPhase phase) noexcept
 }
 ```
 
-#### 对外接口
+#### `record_completed_policy_frame()`：记录完整策略帧
 
 ``` c++
-class RobotInterface {
-public:
-    /* 构造函数只保存配置；配置由 load_deploy_config() 加载并完整校验 */
-    explicit RobotInterface(RobotInterfaceConfig config);
-    ~RobotInterface();
-	
-    /* initialize 完成模型准备、锁页、日志/硬件启动及姿态复位，只调用一次 */
-    bool initialize();
-    bool is_initialized() const {
-        return initialized_ && worker_.is_running();
-    }
-
-    /* 启停、速度缓存及 policy_step 由同一所有者线程串行访问 */
-    bool policy_step();
-	
-    /* 设置速度 */
-    void set_target_velocity(double vx, double vy, double yaw_rate);
-    
-    /* 初始化失败后仍可重复 shutdown，析构也会执行清理 */
-    ShutdownResult shutdown();
-```
-
-#### 构造函数
-
-``` c++
-/* 保存外部传入的接口配置，后续由初始化函数按模块使用。 */
-RobotInterface::RobotInterface(RobotInterfaceConfig config)
-    : config_(std::move(config)),											// move 语义初始配置
-      motor_session_(config_.motor, config_.safety, config_.runtime),		// 配置 motor_session
-      imu_session_(config_.imu, config_.runtime),							// 配置 imu_session
-      worker_(config_, motor_session_, first_policy_inference_started_ns_)	// 配置 worker_
+void RobotInterface::record_completed_policy_frame(PolicyCommandWorker& worker)
 {
+    if (!config_.recorder.enabled) {
+        return;
+    }
+    InferenceRecord record;
+    if (worker.try_consume_completed_record(record)) {
+        record_policy_frame(record);
+    }
 }
 ```
 
-#### `initialize()`：初始化
+#### `record_policy_frame()`：记录策略帧
 
-见初始化流程。
+``` c++
+// 记录策略帧
+void RobotInterface::record_policy_frame(const InferenceRecord& record) {
+    if (!config_.recorder.enabled  || inference_recorder_failed_) {
+        return;
+    }
 
-#### `set_target_velocity()`：设置速度
+    if (!inference_recorder_.try_record(record)) {
+        std::cerr << "[RobotInterface] failed to queue inference log: "
+                  << inference_recorder_.last_error() << "\n";
+        inference_recorder_failed_ = true;
+    }
+}
+```
+
+# 脉塔电机
+
+### `set_target_velocity()`：设置速度
 
 ``` c++
 private:
@@ -2849,433 +6601,7 @@ void RobotInterface::set_target_velocity(double vx, double vy, double yaw_rate) 
 }
 ```
 
-
-
-#### `policy_step()`：执行一次策略闭环
-
-
-
-# 初始化流程
-
-## 信号注册与配置加载
-
-### 注册信号
-
-先注册 `SIGINT`、`SIGTERM`，信号处理函数只设置退出标志 `g_stop_requested`。
-
-``` c++
-#include <csignal>   
-std::signal(SIGINT, signal_handler);
-std::signal(SIGTERM, signal_handler);
-
-void signal_handler(int)
-{
-    g_stop_requested.store(true);
-}
-```
-
-### 加载`yaml`配置文件
-
-配置路径优先使用 `argv[1]`，否则使用编译时的 `ROBOT_DEPLOY_CONFIG_PATH`。CMake 将默认路径设置为 `src/inference/config/deploy.yaml`。
-
-`load_deploy_config()` 先恢复 `RobotInterfaceConfig` 默认值，再解析、校验 YAML，填入关节映射、增益、初始姿态、动作处理和观测参数等。当前 YAML 的 `step_dt = 0.02`，对应 **50 Hz 策略循环**。
-
-模型路径采用默认的 `model/policy.onnx`，由加载器相对于编译时的 `src/inference` 根目录解析。
-
-``` c++
-const std::string config_path =
-    argc > 1 ? argv[1] : std::string(ROBOT_DEPLOY_CONFIG_PATH);
-
-// 加载 yaml 配置文件，覆盖默认值
-if (!inference::load_deploy_config(config_path, cfg, config_error)) {
-    std::cerr << "[ERROR] Failed to load deploy config: "
-              << config_error << "\n";
-    return 1;
-}
-```
-
-## `initialize()`：编排机器人完整运行态
-
-### `initialize_processors()`：初始化处理器
-
-``` c++
-├─ RobotInterface::initialize()
-│  │
-│  ├─ initialize_model_processors()               // 装配模型输入、输出处理对象
-│  │  │
-│  │  ├─ JointMapping::create(kDof, joint_mapping, error)
-│  │  │  └─ JointMapping::configure()
-│  │  │     ├─ // 校验电机方向、索引、映射数量及重复项
-│  │  │     └─ // 建立直驱关节与并联脚踝的内部映射数据   
-│  │  │
-│  │  ├─ 构造 ActionProcessor
-│  │  │  ├─ 保存共享 mapping、动作配置、限位、电机增益和力矩配置
-│  │  │  ├─ compute_low_pass_coefficients()       // 计算力矩滤波系数
-│  │  │  └─ reset_runtime_state()                 // 初始化脚踝 IK、FK 和滤波状态
-│  │  │
-│  │  ├─ 构造 ObservationBuilder
-│  │  │  ├─ 保存共享 mapping、观测缩放、默认关节位置和策略配置
-│  │  │  └─ reset_runtime_state()                 // 初始化脚踝状态、历史观测及帧计数
-│  │  │
-│  │  └─ 保存 action_processor_、observation_builder_
-```
-
-#### `JointMapping::create()`：构建电机映射
-
-对应代码：
-
-``` c++
-std::shared_ptr<const JointMapping> JointMapping::create(
-    int dof_count,
-    const inference::JointMappingConfig& config,
-    std::string& error)
-{
-    std::shared_ptr<JointMapping> mapping(new JointMapping());
-    mapping->config_ = config;
-    if (!mapping->configure(dof_count, error)) {
-        return {};
-    }
-    error.clear();
-    return mapping;
-}
-```
-
-#### 构建`ActionProcessor`
-
-``` c++
-auto action_processor = std::make_unique<robot_detail::ActionProcessor>(
-    mapping,
-    config_.action,
-    config_.ankle_motor_limits,
-    config_.motor.mit_kp,
-    config_.motor.mit_kd,
-    config_.ankle_torque);
-
-action_processor_   = std::move(action_processor);
-```
-
-#### 构建`ObservationBuilder`
-
-``` c++
-auto observation_builder = std::make_unique<robot_detail::ObservationBuilder>(
-    mapping,
-    config_.observation_scales,
-    config_.action.default_joint_pos_rad,
-    config_.policy);
-
-observation_builder_ = std::move(observation_builder);
-```
-
-### 配置 ORT
-
-``` c++
-│  ├─ 创建局部 PolicyExecutionSetup execution
-│  │
-│  ├─ execution.prepare(config_.runtime, error)    // 准备 ORT 执行选项
-│  │  ├─ 清空旧准备状态
-│  │  ├─ 检查 ONNX 线程数及双线程 CPU 配置
-│  │  ├─ cpu_mask()                              // 配置了主 CPU 集合时构造预期掩码
-│  │  ├─ list_task_ids()                         // [双线程] 记录已有线程基线
-│  │  │  └─ 枚举 /proc/self/task
-│  │  ├─ 构造 Ort::SessionOptions
-│  │  ├─ SetIntraOpNumThreads()
-│  │  ├─ SetExecutionMode(ORT_SEQUENTIAL)
-│  │  ├─ SetGraphOptimizationLevel(ORT_ENABLE_ALL)
-│  │  ├─ AddConfigEntry()                        // 关闭 intra/inter-op spinning
-│  │  └─ AddConfigEntry()                        // [双线程] 配置 worker affinity
-│  │
-│  ├─ execution.session_options()                // 取得已准备的会话选项
-```
-
-对应代码：
-
-``` c++
-// 模型 load/warmup、ORT worker 校验和内存锁定发生在电机、IMU 或
-// recorder 线程启动之前，保证新增 TID 可归因且失败时不会触碰电机。
-{
-    PolicyExecutionSetup execution;
-    std::string error;
-    if (!execution.prepare(config_.runtime, error)) {
-        std::cerr << "[RobotInterface] prepare_policy_execution failed: " << error << "\n";
-        shutdown();
-        return false;
-    }
-    if (!policy_runtime_.load(config_.policy, execution.session_options())) {
-        std::cerr << "[RobotInterface] load_policy failed: "
-                  << policy_runtime_.last_error() << "\n";
-        shutdown();
-        return false;
-    }
-    if (!execution.verify_workers(error)) {
-        std::cerr << "[RobotInterface] verify_policy_workers failed: " << error << "\n";
-        shutdown();
-        return false;
-    }
-}
-```
-
-### 加载模型
-
-``` c++
-│  ├─ policy_runtime_.load(config_.policy, options)
-│  │  ├─ PolicyRuntime::shutdown()               // 清理旧模型会话
-│  │  ├─ observation_size()                      // 根据 gait_phase 选择输入维度
-│  │  ├─ 检查模型扩展名、会话选项准备状态
-│  │  ├─ 构造 PolicyRuntime::Impl
-│  │  │  └─ 创建 Ort::Env、RunOptions 等对象
-│  │  ├─ Ort::Session(...)                       // 加载模型，ORT 按配置创建内部线程
-│  │  ├─ GetInputCount() / GetOutputCount()      // 要求单输入、单输出
-│  │  ├─ validate_port()                         // 分别校验输入和输出
-│  │  │  └─ 检查 Tensor 类型、float32 和形状
-│  │  ├─ GetInputNameAllocated()
-│  │  ├─ GetOutputNameAllocated()
-│  │  ├─ 检查并保存输入输出名称
-│  │  ├─ Ort::MemoryInfo::CreateCpu()
-│  │  ├─ Ort::Value::CreateTensor<float>()        // 输入 Tensor，引用固定输入缓冲区
-│  │  ├─ Ort::Value::CreateTensor<float>()        // 输出 Tensor，引用固定输出缓冲区
-│  │  └─ warm_up()
-│  │     ├─ Ort::Session::Run() × 20             // 执行预热
-│  │     └─ 检查预热输出是否全部为有限值
-```
-
-### 校验
-
-``` c++
-│  ├─ execution.verify_workers(error)
-│  │  ├─ 单线程模式：准备状态有效即可返回
-│  │  └─ 双线程模式：最多等待 100 ms，每隔 1 ms 重试
-│  │     ├─ list_task_ids()                      // 读取加载后的线程列表
-│  │     ├─ 与准备阶段基线比较，识别新增线程
-│  │     ├─ verify_task()                        // 检查 worker 或辅助线程
-│  │     │  ├─ sched_getaffinity()               // CPU 集合
-│  │     │  ├─ sched_getscheduler()              // SCHED_OTHER
-│  │     │  └─ sched_getparam()                  // 优先级 0
-│  │     └─ 检查指定 worker CPU 上恰好有一个 worker
-│  │
-│  ├─ 局部 execution 离开作用域                   // 释放准备对象，模型 Session 继续保留
-```
-
-### 配置线程运行环境
-
-``` c++
-│  ├─ [require_process_memory_lock]
-│  │  ├─ mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)
-│  │  └─ prefault_current_thread_stack()          // 锁页后再次预触碰主线程栈
-```
-
-### `policy_main`线程
-
-因为 **`policy_main` 就是正在执行 `main()` 的主线程，进程启动时已经存在**，只需配置当前线程。这里把主线程命名为 `policy_main`，设置并校验 CPU 亲和性、栈预触碰、调度策略和优先级。成功后，同一个线程继续初始化机器人并运行策略循环。
-
-``` c
-// // src/inference/examples/policy_test.cpp 中调用
-const robot_base::ThreadSetupResult main_setup =robot_base::configure_current_thread("policy_main", cfg.runtime.policy_main);
-
-if (!main_setup.success) {
-    std::cerr << "[ERROR] Failed to configure policy_main: "
-              << main_setup.error << "\n";
-    return 1;
-}
-```
-
-### 配置模型观测线程
-
-``` c
-│  ├─ [config_.recorder.enabled]
-│  │  ├─ observation_size()                      // 设置记录器使用的观测维度
-│  │  ├─ inference_recorder_.start(config, background)
-│  │  │  ├─ stop()                               // 清理可能存在的旧记录器
-│  │  │  ├─ 检查观测维度，整理 flush/队列参数
-│  │  │  ├─ filesystem::create_directories()
-│  │  │  ├─ make_log_filename()
-│  │  │  ├─ 打开日志文件
-│  │  │  ├─ write_header()
-│  │  │  ├─ 清空队列，初始化运行状态和会话时间戳
-│  │  │  └─ start_configured_thread("infer_log", background)
-│  │  │     └─ worker_loop()                    // [子线程入口] 消费队列并写日志
-│  │  └─ log_path()                              // 输出日志路径
-```
-
-### 配置`motor_session`
-
-``` c++
-│  ├─ motor_session_.initialize(true)            // 暂缓通信故障保护锁存
-│  │  │
-│  │  ├─ 检查是否已经初始化、是否残留控制器
-│  │  ├─ 构造 EthercatAdapterIGH
-│  │  ├─ 填充控制器线程配置
-│  │  │  ├─ rt_thread_options = runtime.motor_rt
-│  │  │  └─ background_thread_options = runtime.background
-│  │  │
-│  │  ├─ 构造 MyActMotorController
-│  │  │  ├─ 构造 MotorControllerBase
-│  │  │  │  ├─ 检查电机数量、队列容量和周期参数
-│  │  │  │  ├─ status_channel_.configure()
-│  │  │  │  ├─ rt_event_dispatcher_.configure_thread()
-│  │  │  │  └─ 初始化命令队列及反馈通道
-│  │  │  ├─ 创建电机对象
-│  │  │  ├─ 配置事件打印器和状态打印器
-│  │  │  ├─ status_monitor_.configure()
-│  │  │  └─ adapter->set_event_sink()            // 注册 EtherCAT 事件接收入口
-│  │  │
-│  │  ├─ set_communication_protection_enabled(false)
-```
-
-### 配置电机底层
-
-``` c++
-│  │  ├─ controller_->connect()
-│  │  │  └─ MyActMotorController::connect_impl()
-│  │  │     └─ EthercatAdapterIGH::init()
-│  │  │        ├─ ecrt_request_master(0)
-│  │  │        ├─ ecrt_master_create_domain()
-│  │  │        ├─ 逐个配置从站
-│  │  │        │  ├─ ecrt_master_slave_config()
-│  │  │        │  ├─ ecrt_slave_config_pdos()
-│  │  │        │  ├─ ecrt_slave_config_watchdog()
-│  │  │        │  ├─ ecrt_slave_config_dc()
-│  │  │        │  └─ ecrt_domain_reg_pdo_entry_list()
-│  │  │        ├─ ecrt_master_activate()
-│  │  │        ├─ ecrt_domain_data()
-│  │  │        └─ 读取诊断开关及诊断周期环境变量
-│  │  │
-│  │  ├─ controller_->wait_all_motors_ready()
-│  │  │  └─ 循环等待从站和过程数据稳定
-│  │  │     ├─ adapter->receive_physical()
-│  │  │     ├─ adapter->send_physical()
-│  │  │     ├─ adapter->is_configured()          // 检查各从站
-│  │  │     ├─ adapter->get_bus_health()         // 检查链路和 WKC
-│  │  │     └─ sleep_for(1 ms)                   // 尚未就绪时继续等待
-│  │  │
-│  │  ├─ controller_->set_print_info()           // 设置打印列表；禁用时传空列表
-│  │  │
-│  │  ├─ controller_->start()
-│  │  │  └─ MotorControllerBase::start()
-│  │  │     ├─ 重置实时命令和反馈状态
-│  │  │     ├─ status_channel_.start()
-│  │  │     │  └─ start_configured_thread("motor_status", background)
-│  │  │     │     └─ thread_func()              // [子线程入口] 更新状态缓存及回调
-│  │  │     ├─ rt_event_dispatcher_.start()
-│  │  │     │  └─ start_configured_thread("rt_event", background)
-│  │  │     │     └─ thread_func()              // [子线程入口] 分发实时事件
-│  │  │     ├─ MyActMotorController::realtime_start_callback()
-│  │  │     │  └─ [打印列表非空] status_monitor_.start()
-│  │  │     │     └─ start_configured_thread("motor_mon", background)
-│  │  │     │        └─ thread_func()           // [子线程入口] 打印电机状态
-│  │  │     ├─ start_configured_thread("ecat_rt", motor_rt)
-│  │  │     │  └─ thread_func()                 // [子线程入口] 实时命令处理与周期收发
-│  │  │     └─ 标记实时调度已经就绪
-│  │  │
-│  │  ├─ rt_started_ = true
-│  │  ├─ stop()                                 // 先让全部电机进入确认停止状态
-│  │  │  ├─ request_stop()
-│  │  │  │  └─ controller_->send_discrete_command(STOP)
-│  │  │  └─ wait_for_stop()
-│  │  │     ├─ get_discrete_command_result()     // 等待 STOP 执行成功
-│  │  │     └─ sleep_for(1 ms)                  // 未完成时继续等待
-│  │  ├─ 逐个电机 submit_command(SET_MODE)
-│  │  │  └─ controller_->send_discrete_command() // 提交控制模式设置命令
-│  │  ├─ initialized_ = true
-│  │  └─ motion_enabled_ = false
-│  ├─ motor_session_.restart(-1)                 // 恢复全部电机运行
-│  │  ├─ 检查初始化状态和实时调度状态
-│  │  ├─ controller_->send_discrete_command(RESTART)
-│  │  ├─ 循环 get_discrete_command_result()      // 等待执行成功或超时
-│  │  └─ 成功后 motion_enabled_ = true
-│  │
-│  ├─ sleep_for(500 ms)
-```
-
-### 配置 IMU 模块
-
-``` c++
-│  ├─ imu_session_.initialize()
-│  │  ├─ 填充 ReaderConfig                      // 设备、类型、波特率、CAN 参数等
-│  │  ├─ thread_options = runtime.imu_reader
-│  │  ├─ 重置 AHRS 通道和缓存
-│  │  ├─ 根据类型创建 reader
-│  │  ├─ reader_->set_ahrs_callback()            // 注册姿态数据回调，接收后发布到 AHRS 通道
-│  │  ├─ reader_->start(imu_cfg)                 // 以下二选一
-│  │  │  ├─ XsensMtiCanReader::start()
-│  │  │  │  ├─ print_configuration()
-│  │  │  │  ├─ parser_->reset()
-│  │  │  │  ├─ configure_socket_can_interface()  // [configure_can]
-│  │  │  │  ├─ can_port_->open()
-│  │  │  │  └─ start_configured_thread("imu_can_rx", imu_reader)
-│  │  │  │     └─ read_loop()                   // [子线程入口] 接收 CAN 数据
-│  │  │  └─ IMUReader::start()
-│  │  │     ├─ print_configuration()
-│  │  │     ├─ parser_->reset()
-│  │  │     ├─ serial_port_->open()
-│  │  │     └─ start_configured_thread("imu_serial_rx", imu_reader)
-│  │  │        └─ read_loop()                   // [子线程入口] 接收串口数据
-│  │  └─ initialized_ = true
-│  │
-│  ├─ sleep_for(1 s)
-```
-
-### 恢复到初始位置
-
-``` c++
-│  ├─ reset_joints(startup_hold_target_motor_rad)
-│  │  ├─ motor_session_.motion_enabled()         // 确认电机允许运动
-│  │  ├─ motor_session_.get_motor_snapshot()
-│  │  │  └─ controller_->try_consume_latest_status_policy()
-│  │  ├─ 检查反馈时间戳和位置有效性
-│  │  ├─ action_processor_->build_reset_start_model_pose()
-│  │  │  ├─ 将直驱电机位置转换到模型关节顺序
-│  │  │  └─ ankle_motor_fk::solve()             // 左右脚踝 FK，恢复真实起始姿态
-│  │  ├─ 循环 100 步线性插值至默认姿态
-│  │  │  ├─ 计算当前步 q_cmd_model
-│  │  │  ├─ action_processor_->build_motor_targets()
-│  │  │  │  ├─ 转换直驱关节索引和方向
-│  │  │  │  ├─ apply_ankle_ik()                  // 左右脚踝 IK
-│  │  │  │  │  └─ Solver::solve()
-│  │  │  │  └─ 检查脚踝电机物理行程限位
-│  │  │  ├─ motor_session_.apply_targets_rad()
-│  │  │  │  ├─ 按 IMPEDANCE / POSITION 构造命令
-│  │  │  │  ├─ target_command_timing()          // 设置命令有效期
-│  │  │  │  └─ controller_->send_policy_setpoint()
-│  │  │  └─ sleep_for(dt)                       // 最后一步不等待
-│  │  └─ 保存最终电机目标到 startup_hold_target_motor_rad
-│  │
-│  ├─ initialized_ = true
-```
-
-### 开启运行
-
-``` c++
-│  ├─ worker_.start(*action_processor_, startup_hold_target_motor_rad)
-│  │  └─ PolicyCommandWorker::start()
-│  │     ├─ 保存动作处理器引用和启动保持目标
-│  │     ├─ 清空旧错误状态
-│  │     ├─ motor_session_.apply_targets_rad()   // 在线程接管前刷新保持命令及有效期
-│  │     ├─ running_ = true
-│  │     └─ start_configured_thread("policy_cmd", policy_command)
-│  │        └─ loop()                           // [子线程入口] 持续生成并提交电机命令
-│  │
-│  └─ return true                               // initialize() 完成
-```
-
-### 配置 XBOX
-
-``` c++
-├─ XboxController::start_polling()
-│  └─ start_configured_thread("xbox_poll", background)
-│     └─ polling_loop()                          // [子线程入口] 读取手柄事件
-│
-```
-
-## 进入循环
-
-``` c++
-└─ 主循环
-   └─ RobotInterface::policy_step()
-      ├─ 检查运行状态、读取反馈
-      ├─ ObservationBuilder::build()
-      ├─ PolicyRuntime::infer()
-      └─ 发布策略目标，由 policy_cmd 线程消费
-```
+### `policy_step()`：执行一次策略闭环
 
 # 脉塔电机
 
@@ -5997,7 +9323,7 @@ uint8_t crc8_atm(const uint8_t* data, std::size_t length) {
 
 8 位 CRC 校验方法：
 
-``` c++
+``` `c++
 uint8_t IMUParser::CRC8_Table(const std::vector<uint8_t>& data) {
     uint8_t crc8 = 0x00;
     for (uint8_t value : data) {
