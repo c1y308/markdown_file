@@ -8998,94 +8998,179 @@ RK3588 PREEMPT_RT / EtherCAT 系统级故障定位与恢复
 
 这才是这次排障最有价值的部分。
 
-# IMU
+# Xsens陀螺仪
+
+## CAN
+
+### CAN帧的组成
+
+<img src="assets/CAN帧组成.png" alt="CAN帧组成" style="zoom:50%;" />
+
+在 Linux SocketCAN 开发中，CAN 控制器、驱动以及内核会处理许多底层通信细节，应用程序通常不需要自己计算 CAN 帧的 CRC，也不需要自行识别帧的起始和结束，Linux 提供的 `can_frame` 结构会向应用程序提供 ID、载荷长度及载荷等信息。
 
 ``` c++
-initial_and_start_imu()
-        │
-        ▼
-┌────────────────────────────────────────────────────────────┐
-│ IMUReader::start()                                          │
-│ 1) 打开串口 /dev/ttyUSB0                                    │
-│ 2) running_ = true                                          │
-│ 3) worker_thread_ = std::thread(&IMUReader::read_loop, this)│
-└────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────── 后台 IMU 读取线程 ───────────────────────┐
-│ read_loop()                                                  │
-│ - serial_port_->read(...)                                    │
-│ - parser_->feed(...)                                         │
-│ - 解析 IMU/AHRS 帧                                           │
-│ - AHRS callback(data)                                        │
-│ - usleep(1000)                                               │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────── RobotInterface IMU缓存 ──────────────────┐
-│ set_ahrs_callback(...)                                       │
-│ - lock(imu_mutex_)                                           │
-│ - body_ang_vel_ = roll/pitch/heading speed                   │
-│ - euler_ = roll/pitch/heading                                │
-│ - quat_ = qw/qx/qy/qz                                        │
-│ - ahrs_ready_ = true                                         │
-└──────────────────────────────────────────────────────────────┘
-        │
-        ▼
-policy_step() 构造 observation 时读取这些缓存
-
+struct can_frame {
+    uint32_t can_id;    // 4 字节
+    uint8_t  len;       // 1 字节
+    uint8_t  __pad;     // 1 字节
+    uint8_t  __res0;    // 1 字节
+    uint8_t  len8_dlc;  // 1 字节
+    uint8_t  data[8];   // 8 字节
+};
 ```
 
+#### CAN ID
 
+当 Xsens IMU 发送一条消息时，总线上的其他节点都可以观察到该消息，并根据自身的接收规则决定是否处理。这种通信方式称为**广播通信（Broadcast Communication）**。Linux 主控并不是必须主动询问 IMU 当前的角速度是多少，IMU 可以按照配置主动、周期性地发送测量数据，Linux 主控负责接收并解析。
+
+CAN ID 有两个主要作用：
+
+- 在 CAN 协议层面，参与决定哪条消息优先获得总线使用权，即**仲裁（Arbitration）**：对于相同格式的 CAN 数据帧，**ID 数值越小，仲裁优先级越高**，但这不意味着高优先级报文可以打断一个已经开始正常传输的报文。
+- 应用协议可以赋予它具体含义，在应用协议层面，用来**区分不同类型的消息**。
+
+例如，Xsens MTi-600 系列协议文档中定义了以下消息：
+
+| CAN ID（协议定义值） | 消息名称         | 含义               |
+| -------------------- | ---------------- | ------------------ |
+| `0x021`              | Quaternion       | 四元数姿态         |
+| `0x032`              | RateOfTurn       | 角速度             |
+| `0x034`              | Acceleration     | 加速度             |
+| `0x035`              | FreeAcceleration | 去除重力后的加速度 |
+| `0x051`              | Temperature      | 温度               |
+
+这些定义来自 Xsens 官方协议手册，而不是 CAN 通用协议。
+
+#####  **不是设备 ID**
+
+<img src="assets/CANID不是设备ID.png" alt="CANID不是设备ID" style="zoom:50%;" />
+
+同一个设备可以发送具有不同 ID 的消息。因此，CAN ID 更适合理解为**消息标识符**，而不是设备地址。
+
+> 进一步思考：如果总线上同时存在两个 Xsens IMU，并且都使用 `0x032` 发送角速度数据，那么仅凭这个 ID，接收程序就无法区分数据来自哪个 IMU。这也是为什么实际工程中需要统一规划 CAN ID。
+
+##### 总线仲裁
+
+标准 CAN ID **使用 11 个二进制位**，因此其数值范围为：$ 0\sim 2^{11}-1=2047 $​。2047 转换成十六进制就是 `0x7FF`。CAN 总线存在两种逻辑状态：
+
+| 逻辑值 | 名称   | 英文          |
+| ------ | ------ | ------------- |
+| 0      | 显性位 | Dominant Bit  |
+| 1      | 隐性位 | Recessive Bit |
+
+> 为什么要使用这两个特殊的名称？因为当多个节点同时向总线发送信号时，**0 可以覆盖 1，而 1 无法覆盖 0。（线与逻辑）**
+
+**逐位仲裁（Bitwise Arbitration）**：假设两个不同节点分别发送这两个 ID 的标准数据帧，并同时竞争空闲的总线。首先将其转换成 11 位二进制：
+
+| 消息   | 十六进制 | 十进制 | 二进制        |
+| ------ | -------- | ------ | ------------- |
+| 四元数 | `0x021`  | 33     | `00000100001` |
+| 角速度 | `0x032`  | 50     | `00000110010` |
+
+CAN ID 从最高有效位开始发送，每个节点在发送的同时监听总线。
+
+<img src="assets/逐位仲裁.png" alt="逐位仲裁" style="zoom:50%;" />
+
+**非破坏性仲裁（Non-destructive Arbitration）：**关键在于，当发送 `0x032` 的节点发现自己发送的是 1，而总线上实际出现的是 0，**它就知道存在优先级更高的竞争者**，于是主动退出仲裁。获胜节点不需要重新开始发送，其报文也没有因为这次竞争而被破坏。
+
+ **非抢占性（Non-preemptive）**：优先级高不代表任何时候都能先发送，优先级决定的是竞争总线时谁获胜，而不是谁可以随时打断其他设备的通信。
+
+##### `canid_t`：存储 CAN ID
+
+- 标准帧（Standard Frame，SFF）：11 位 ID。
+- 扩展帧（Extended Frame，EFF）：29 位 ID。
+- Linux 的 `frame.can_id`：32 位无符号整数。
+
+``` c++
+#include <can.h>
+
+struct can_frame {
+	canid_t can_id;  /* 32 bit CAN_ID + EFF/RTR/ERR flags */
+	union {
+		/* CAN frame payload length in byte (0 .. CAN_MAX_DLEN)
+		 * was previously named can_dlc so we need to carry that
+		 * name for legacy support
+		 */
+		__u8 len;
+		__u8 can_dlc; /* deprecated */
+	} __attribute__((packed)); /* disable padding added in some ABIs */
+	__u8 __pad; /* padding */
+	__u8 __res0; /* reserved / padding */
+	__u8 len8_dlc; /* optional DLC for 8 byte payload length (9 .. 15) */
+	__u8 data[CAN_MAX_DLEN] __attribute__((aligned(8)));
+};
+
+
+/* special address description flags for the CAN_ID */
+#define CAN_EFF_FLAG 0x80000000U /* EFF/SFF is set in the MSB */
+#define CAN_RTR_FLAG 0x40000000U /* remote transmission request */
+#define CAN_ERR_FLAG 0x20000000U /* error message frame */
+
+/* valid bits in CAN ID for frame formats */
+#define CAN_SFF_MASK 0x000007FFU /* standard frame format (SFF) */
+#define CAN_EFF_MASK 0x1FFFFFFFU /* extended frame format (EFF) */
+#define CAN_ERR_MASK 0x1FFFFFFFU /* omit EFF, RTR, ERR flags */
+```
+
+<img src="assets/canid数据结构.png" alt="canid数据结构" style="zoom:50%;" />
+
+| 标志 | 全称                        | 作用                                 |
+| :--- | :-------------------------- | :----------------------------------- |
+| EFF  | Extended Frame Format       | 区分标准帧与扩展帧                   |
+| RTR  | Remote Transmission Request | 远程请求帧（请求其他节点发送数据帧） |
+| ERR  | Error Message Frame Flag    | 标记 Linux CAN 错误通知              |
+
+### **SocketCAN**
+
+#### 控制器、收发器、差分信号
+
+- **控制器**：组装（识别） CAN 帧、仲裁、生成（校验） CRC；知道什么是 ID、数据帧、仲裁和 CRC。
+- **收发器**：逻辑（差分）信号转换为差分（逻辑）电气信号；将逻辑上的 0 和 1 转换成总线上的电气信号，或者进行反向转换。
+
+> 实际硬件中，CAN 控制器可能集成在处理器内部，也可能是独立芯片。收发器则常常是独立的硬件器件。
+
+CAN 使用**差分信号**（Differential Signal）进行通信。接收端主要根据两根信号线之间的电压差判断逻辑状态： $V_{\mathrm{diff}}=V_{\mathrm{CAN\_H}}-V_{\mathrm{CAN\_L}} $。
+
+<img src="assets/CAN差分信号.png" alt="CAN差分信号" style="zoom: 33%;" />
+
+这也从物理层解释了我们上一轮学习的内容：**显性状态（有电压差，被主动拉高拉低）可以覆盖隐性状态**，从而实现总线仲裁。
+
+#### **终端电阻**
+
+对于常见的高速 CAN 总线，通常需要在总线的两个物理末端分别接入一个 120 Ω 的终端电阻。
+
+<img src="assets/终端电阻.png" alt="终端电阻" style="zoom:33%;" />
+
+终端电阻主要用于抑制信号反射。需要记住：
+
+- 通常是总线两个末端各接一个，而不是每个设备都接一个。部分设备内部已经集成了终端电阻。
+- **终端电阻配置不当可能导致通信不稳定。**在实际接线前需要查看设备说明书，不能盲目增加电阻。
+
+#### 从硬件到 Linux 应用程序
+
+<img src="assets/从硬件到应用程序.png" alt="从硬件到应用程序" style="zoom: 80%;" />
+
+##### **什么是 can0？**
+
+Linux 网络接口可以进行如下类比：
+
+| 接口名称（示例） | 含义                |
+| ---------------- | ------------------- |
+| `eth0`           | 以太网接口          |
+| `wlan0`          | 无线网络接口        |
+| `lo`             | 本地回环接口        |
+| `can0`           | CAN 网络接口        |
+| `can1`           | 另一个 CAN 网络接口 |
+| `vcan0`          | 虚拟 CAN 网络接口   |
+
+Linux **将 CAN 纳入统一的网络设备和 socket 接口体系**，这就是 SocketCAN 的基本设计思想。`can0` 不是 Xsens IMU 的名称，而是 Linux 主机上的 CAN 网络接口名称。如果一条 CAN 总线上连接了多个设备，那么通过同一个 `can0` 接口就可以接收这些设备发送的报文。
+
+# A100陀螺仪
 
 查看是否连接：
 
 ``` shell
 dmesg | tail -n 20
 ```
-
-## 核心数据结构
-
-``` c++
-class SerialPort {
-public:
-    SerialPort();
-    ~SerialPort();
-    
-    /* 只有一个串口，禁止拷贝构造和拷贝复制 */
-    SerialPort(const SerialPort&) = delete;
-    SerialPort& operator=(const SerialPort&) = delete;
-    SerialPort(SerialPort&&) = delete;
-    SerialPort& operator=(SerialPort&&) = delete;
-    
-    /* 打开/关闭操作 */
-    bool open(const std::string& device, int baudrate);
-    void close();
-    bool is_open() const;
-    
-    /* 读/写操作 */
-    int read(uint8_t* buffer, int max_len);
-    int write(const uint8_t* data, int len);
-    
-    bool set_baudrate(int baudrate);
-    void flush();
-    
-    const std::string& get_device_path() const { return device_path_; }
-    int get_baudrate() const { return baudrate_; }
-    int get_file_descriptor() const { return fd_; }
-
-private:
-    int baudrate_to_constant(int baudrate);
-    
-    int fd_;  					// 对应文件描述符
-    std::string device_path_;	// /dev/xxx(ttyUSB0)
-    int baudrate_;  			// 波特率
-    
-    struct termios oldtio_;
-    struct termios newtio_;
-};
-```
-
 ## CRC校验
 
 ### 为什么选择异或

@@ -2868,276 +2868,23 @@ root      9999  0.0  0.0      0     0 ?        D    12:00   0:00 [jbd2/sda1-8]
 # + (foreground) - 前台进程组
 ```
 
-## 常用库
+## 文件描述符
 
-### 时间库
+Linux 中的文件描述符（File Descriptor，FD）是一个非负整数，用于**引用当前进程所打开的资源**。Linux 中的许多资源都可以通过文件描述符进行操作，例如普通文件、串口、Socket 等。
 
-两种库核心都是解决两个问题：
-
-- 现在几点？例如：
-
-  ```
-  2026-08-18 14:30:25
-  ```
-
-  这是**现实世界时间 / wall-clock time**。
-
-- 过了多久？例如：一次 inference 花了 1.37 ms这里根本不关心：`14:30:25`而是在测：Δt=t1−t0。这是**elapsed time / duration**。
-
-  典型用途：
-
-  - inference latency；
-  - 控制周期；
-  - timeout；
-  - jitter。
-
-  这时候应该优先用：`std::chrono::steady_clock`而不是 `system_clock`。
-
-#### `<time.h>`
-
-**只有需要和 Linux/POSIX 系统接口交互时**，再直接使用 `<time.h>`。
-
-##### `time_t`/`time()`：纪元开始经过的秒数
-
-``` c
-time_t now = time(nullptr);
-```
-
-它通常可以理解成：**Unix Epoch→现在之间经过的秒数**。Unix Epoch 是：1970-01-01 00:00:00 UTC.
-
-但严格说，C/C++ 标准并没有要求 `time_t` 必须就是“Unix 秒数”，只是绝大多数 Linux 系统都是这么实现的。
-
-##### `struct tm`/`localtime()`：把秒数拆成年月日
-
-`time_t` 本身不适合人类阅读，所以有：
-
-``` c
-struct tm {
-    int tm_sec;
-    int tm_min;
-    int tm_hour;
-
-    int tm_mday;
-    int tm_mon;
-    int tm_year;
-
-    int tm_wday;
-    int tm_yday;
-
-    int tm_isdst;
-};
-```
-
-比如：
-
-``` c
-std::time_t now = std::time(nullptr);
-std::tm* local  = std::localtime(&now);
-```
-
-这就把：`1787034625`解释成：
-
-```
-2026-08-18
-14:30:25
-```
-
-不过这里有两个很经典的坑：
-
-- `tm_year`不是直接的年份，而是：`year−1900`，所以：`local->tm_year + 1900`才是真实年份。
-
-- 而：`tm_mon`范围是：0 ~ 11所以：`local->tm_mon + 1`才是月份。
-
-这就是老 C API 很典型的问题：
-
-> 数据有语义，但是类型系统没有表达这种语义。
-
-##### `clock_t`/`clock()`：进程消耗的CPU时间
-
-`clock()` 测量的通常是：进程消耗的 CPU 时间，而不是现实经过时间。比如程序：
-
-```c
-sleep(5);
-```
-
-现实中过了：5s但这个进程可能几乎没有使用 CPU。所以：
-
-```
-clock()
-```
-
-测出来可能远远不到 5 秒。
-
-##### `struct timespec`/`clock_gettime()`：可选时钟源（纳秒级）
-
-常用的时钟类型 (`clk_id`)，这是该函数最灵活的地方，可以根据需求选择不同的“时钟源”：
-
-| **时钟类型**               | **描述**                                                     |
-| -------------------------- | ------------------------------------------------------------ |
-| `CLOCK_REALTIME`           | **系统实时时间**（墙上时钟）。反映从 1970 年开始算经过的秒数。如果你手动修改了系统时间，它会跟着变。 |
-| `CLOCK_MONOTONIC`          | **单调时钟**。从系统启动开始计时经过的秒数，不受系统时间修改的影响（对应`std::chrono::steady_clock`）。**最适合用来测量程序运行耗时**。 |
-| `CLOCK_PROCESS_CPUTIME_ID` | **进程 CPU 时间**。统计当前进程在 CPU 上运行的总时间（不包括休眠时间）。 |
-| `CLOCK_THREAD_CPUTIME_ID`  | **线程 CPU 时间**。仅统计当前线程消耗的 CPU 时间。           |
-
-`clock_gettime`比传统的 `time()`（秒级）或 `gettimeofday()`（微秒级）更强大，因为它能达到 **纳秒级（Nanoseconds）** 的精度。
-
-``` c++
-// clk_id: 指定要使用的“时钟类型”（见下文）。
-// *tp: 指向 timespec 结构体的指针，函数会将获取到的时间写入其中。
-// 返回值: 成功返回 0，失败返回 -1。
-int clock_gettime(clockid_t clk_id, struct timespec *tp);
-
-
-struct timespec {
-    time_t   tv_sec;        /* 秒 (seconds) */
-    long     tv_nsec;       /* 纳秒 (nanoseconds: 10^-9 秒) */
-};
-
-
-TIMESPEC2NS(time);//一个宏: struct timespec 结构体（包含秒和纳秒）转换成一个 64 位整数（uint64_t）的纳秒值。
-```
-
-#### `<chrono>`
-
-`chrono` 的设计比 `time.h` 高一个抽象层次。它的核心只有三个概念：
-
-​									$$Duration + Clock + TimePoint$$
-
-把这三个搞懂，`chrono` 基本就懂了。
-
-##### `duration`：一段时间
-
-```c++
-std::chrono::seconds()
-std::chrono::milliseconds()
-std::chrono::microseconds()
-std::chrono::nanoseconds()
-    
-    
-// 可以使用std::chrono::duration_cast<std::chrono::xxseconds>(xx) 进行安全类型转换
-auto us = std::chrono::duration_cast<std::chrono::microseconds>(ns);
-```
-
-都是`duration`，也就是**一段时间有多长**。例如：
-
-```c++
-std::chrono::milliseconds timeout{10};
-```
-
-表示：10ms.不是：某个时间点是 10 ms。而是有一段 10 ms 的长度。
-
----
-
-实际上：`std::chrono::milliseconds`大致等价于：
-
-```c++
-std::chrono::duration<long long, std::milli>
-```
-
-其中：`std::milli`代表：$10^{-3}s$；
-
-类似：`std::chrono::microseconds`就是：$10^{-6}s$；
-
-类似：`std::chrono::nanoseconds`就是：$10^{-9}s$。
-
-所以 chrono 把**数值和单位放进了类型系统**；这就是它比传统 C API 好很多的核心原因。
-
-可以使用`.count`来获取**这个 duration 以自身单位表示的数值**：
-
-``` c++
-std::chrono::nanoseconds d{1000};  // 返回 1000，而不是0.000001 second
-```
-
-##### `time_point`/`xxx_clock::now()`：时间点
-
-如果 `duration` 是过了多久，那么：`time_point`就是时间轴上的某个点。例如：
-
-```c++
-auto start = std::chrono::steady_clock::now();
-```
-
-这里`start`的类型本质上就是：
-
-```c++
-std::chrono::time_point<std::chrono::steady_clock>
-```
-
----
-
-chrono 里最常用的三个 Clock：
-
-```c++
-std::chrono::system_clock			// 现实世界当前时间;可以与 time_t 互转。适合：日志时间、年月日、timestamp
-std::chrono::steady_clock			// 专门适合测latency。单调时钟，时间不会倒退
-std::chrono::high_resolution_clock
-```
-
-其中真正需要重点掌握前两个。
-
-##### `sleep for()`和`sleep until()`
-
-chrono 还能很好地描述休眠。例如：
-
-```c++
-std::this_thread::sleep_for(std::chrono::milliseconds(10));
-```
-
-意思是：休眠大约 10 ms。这里参数就是`duration`；语义是**睡多久**。
-
----
-
-而：
-
-```
-std::this_thread::sleep_until(next);
-```
-
-参数则是：`time_point`，语义是**睡到什么时候**。比如要做一个：1kHz循环，即：T=1ms.很多初学者会写：
-
-```c++
-while (running) {
-    do_work();
-
-
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(1));
-}
-```
-
-这其实有问题。假设：
-
-```c++
-do_work = 0.2 ms
-sleep   = 1.0 ms
-```
-
-实际周期就是：1.2ms而不是：1ms.还会不断发生 drift。
-
-------
-
-更合理的思路是：
-
-```c++
-using clock = std::chrono::steady_clock;
-
-
-auto next = clock::now();
-
-
-while (running) {
-    next += std::chrono::milliseconds(1);
-
-
-    do_work();
-
-
-    std::this_thread::sleep_until(next);
-}
-```
+## 文件控制相关库
 
 ### `<fcntl.h>` 
 
-文件控制，打开文件并且以什么模式和属性打开文件。
+**打开文件**：
+
+``` c++
+// 函数：
+open()      // 打开文件 - 如打开串口设备
+fcntl()     // 文件描述符控制
+```
+
+**并且以什么模式和属性打开文件：**
 
 ``` c
 // 文件打开标志（open()函数使用）：
@@ -3148,15 +2895,11 @@ O_RDWR      // 读写模式 - 本程序中串口需要读写
 O_CREAT     // 如果不存在则创建
 O_TRUNC     // 如果存在则清空
 O_APPEND    // 追加模式
-
-```
-
----
-
-``` c
+  
 // 文件状态标志：
 O_NONBLOCK  // 非阻塞模式 - 避免串口阻塞
 ```
+
 **文件描述符默认是阻塞模式：**执行 `read() / write()` 等 I/O 系统调用时，如果操作条件不满足（如无数据可读、发送缓冲区已满），**进程会被内核挂起阻塞**，直到条件满足才返回。设置 `O_NONBLOCK` 后，I/O 调用永远不会阻塞等待：
 
 - 条件满足时，正常完成读写并返回实际操作的字节数；
@@ -3170,9 +2913,7 @@ O_SYNC      // 同步写入
 
 默认情况下，Linux 的 `write()` 采用**延迟写**机制：调用仅把数据写入内核页缓存（Page Cache）就立即返回，真正的磁盘写入由内核后台线程异步完成。这种方式性能很高，但掉电或系统崩溃时，可能丢失缓存中尚未刷盘的数据。
 
-`O_SYNC` 是 Linux `open()` 系统调用的**同步写文件状态标志**，属于 POSIX 标准定义，核心作用是**强制写操作必须持久化到物理磁盘后才返回**，保证数据的落盘一致性。
-
-可以理解为：**每次 write 之后自动执行一次 `fsync(fd)`，会造成严重性能瓶颈**。工程上更推荐批量写入后手动调用 `fsync()`，而非全程开启该标志。
+`O_SYNC` 是 Linux `open()` 系统调用的**同步写文件状态标志**，属于 POSIX 标准定义，核心作用是**强制写操作必须持久化到物理磁盘后才返回**，保证数据的落盘一致性。可以理解为：每次 write 之后自动执行一次 `fsync(fd)`，会造成严重性能瓶颈。工程上更推荐批量写入后手动调用 `fsync()`，而非全程开启该标志。
 
 ---
 
@@ -3192,13 +2933,6 @@ O_NOCTTY    // 不分配控制终端 - 防止串口成为控制终端
 
 ```
 O_CLOEXEC
-```
-1
-
-```c
-// 函数：
-open()      // 打开文件 - 如打开串口设备
-fcntl()     // 文件描述符控制
 ```
 ### `<unistd.h>`
 
@@ -3287,14 +3021,544 @@ if (stat("/dev/ttyUSB0", &file_stat) == 0) {
 // <sys/ioctl.h>中声明的核心原型
 int ioctl(int fd, unsigned long request, ...);
 
-// fd：打开的设备文件描述符（比如你 I2C 代码中的/dev/i2c-1的 fd）；
-// request：核心！是用户态和内核约定的 “命令码”（比如 I2C_SLAVE），告诉内核要执行什么操作；
+// fd：打开的设备文件描述符
+// request：用户态和内核约定的 “命令码”（比如 I2C_SLAVE），告诉内核要执行什么操作；
 // ...：可变参数，根据命令码传递参数（比如 I2C_SLAVE 命令需要传从设备地址）。
 ```
 
+## `socket`库
+
+Linux 里 socket 是一种**文件描述符**，可以理解成 “网络文件”。一切网络收发，最终都可以看成对这个 fd 的 `read / write`。它支持两类最常用：
+
+- **SOCK_STREAM**：TCP，面向连接、可靠、有序，有流量控制。
+- **SOCK_DGRAM**：UDP，无连接、数据报、不保证送达、不保证顺序。
+
+协议族最常用：`AF_INET`（IPv4），`AF_INET6`（IPv6）。
+
+### `<sys/socket.h>`
+
+#### `socket()`：创建套接字
+
+``` c++
+#include <sys/socket.h>
+int socket(int domain, int type, int protocol);
+// 成功：一个非负整数，socket fd
+// 失败：-1，`errno` 记录错误
+```
+
+- `domain`：通信协议族，`AF_INET` / `AF_INET6` / `PF_CAN(Protocol Family CAN)`。
+- `type`：通信方式，`SOCK_STREAM` / `SOCK_DGRAM` / `SOCK_RAW` / `SOCK_RDM`。
+- `protocol`：具体协议，一般填 `0`，让内核自动选合适的（TCP、UDP）/ `CAN_RAW`。
+
+#### `bind()`：绑定地址 + 端口
+
+把这个 socket 固定到本机某个 IP + 端口。
+
+```c++
+int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+```
+
+- 服务器一般要 `bind`，客户端大多不需要（内核自动分配随机端口）。
+- 如果端口是 0：内核自动选一个空闲端口。
+
+`struct sockaddr` 是通用头，IPv4 实际用 `struct sockaddr_in` 填充，再强制转成 `sockaddr*` 传给 bind。
+
+#### `connect()`：客户端发起连接（TCP）
+
+```c
+int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+```
+
+客户端用，向服务器地址发起三次握手。 UDP 也可以调用 connect，效果不是建立连接，而是给这个 UDP socket “记住” 默认对端，之后可以直接 send/recv，不用每次传地址。
+
+#### `listen()`：服务器进行监听（TCP 专属）
+
+```c++
+int listen(int sockfd, int backlog);
+```
+
+只用于 TCP 服务器。 `backlog`：内核未完成 + 已完成握手的连接队列上限（具体含义内核版本略有差异，不是最大并发连接数）。
+
+调用之后，这个 fd 不再用来收发数据，专门用来等客户端连接。
+
+#### `accept()`：取出一个已完成连接
+
+```c++
+int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+```
+
+阻塞式默认行为：队列里没有连接就卡住。
+
+- 成功：返回一个**新的 fd**，这个新 fd 才是和客户端通信的套接字；原来的 listen fd 继续监听。
+- `addr` 输出对端的地址端口，不想获取可以传 `NULL`。
+
+这就是 TCP 一服务器多客户端的基础：每连进来一个，拿到一个新 fd。
+
+#### `send() / recv()`：发送 / 接受
+
+```c++
+ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+```
+
+`flags` 常用 0，就是普通读写。 返回值重点：
+
+- 大于 0：成功发送 / 收到多少字节，**不一定等于你要求的长度**，TCP 流式，要自己循环拼包。
+- 0：TCP 对端正常关闭。
+- -1：出错，看 `errno`。
+
+也可以用 `read /write`，socket 是 fd，所以：
+
+```c
+read(fd, buf, size);
+write(fd, buf, size);
+```
+
+等价于 `recv / send`，flags 为 0 的版本。
+
+#### `sendto() / recvfrom()`（UDP 常用）
+
+```c
+ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen);
+ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+```
+
+UDP 无连接，每次收发都带上对方地址。
+
+#### `close()`：关闭套接字
+
+```c
+close(fd);
+```
+
+递减文件引用计数，计数到 0 内核才真正释放资源。 TCP 会触发四次挥手。
+
+### CAN socket
+
+Socket（套接字）本质是操作系统提供的一种通信端点（Communication Endpoint）。普通 C++ 应用程序运行在用户空间，**不能直接操作 CAN 控制器**。因此 Linux 内核需要提供一种机制，让应用程序能够使用其通信功能。Socket 就是这种机制之一。
+
+#### 创建 CAN socket
+
+``` c++
+fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
+```
+
+#### 查询接口索引
+
+创建查询结构体`ifreq`，Linux 提供的**网络接口请求结构体**（Interface Request），它可以用于查询接口索引、接口名称、接口状态等网络设备信息。
+
+``` c++
+#include <if,h>
+ifreq ifr = {};
+
+// 把需要查询的接口名称的字符串拷贝进结构体
+std::strncpy(ifr.ifr_name, interface_name.c_str(), IFNAMSIZ - 1);
+```
+
+假设：
+
+``` c++
+interface_name = "can0";
+```
+
+那么执行后，`ifr.ifr_name` 中就保存了字符串 `"can0"`。
+
+这里的 `IFNAMSIZ` 是**接口名称缓冲区的大小**，在 Linux 中为 16 字节。代码最多复制 15 个字符，结合之前的零初始化，为字符串结尾的 `\0` 留出空间。对于超过长度限制的接口名，健壮的工程代码还应进行显式检查，避免静默截断。
+
+最后通过`ioctl()`发起系统调用向内核查询对应的索引：
+
+``` c++
+if (ioctl(fd_, SIOCGIFINDEX, &ifr) < 0) {
+    std::cerr << "[HARDWARE ERROR] Cannot find CAN interface "
+              << interface_name << ": " << std::strerror(errno)
+              << std::endl;
+    ::close(fd_);
+    fd_ = -1;
+    return false;
+}
+```
+
+`SIOCGIFINDEX` 会将网络接口索引写入 `ifr.ifindex`。
+
+#### `bind()`：socket 绑定接口
+
+获得接口索引后，程序执行`bind()` 将 Socket 与指定的 CAN 网络接口关联起来。
+
+``` c++
+sockaddr_can addr = {};
+addr.can_family   = AF_CAN;				// 	Address Family CAN
+addr.can_ifindex  = ifr.ifr_ifindex;
+
+bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+```
+
+其中，`sockaddr_can` 是 CAN 专用的 Socket 地址结构：
+
+| 字段          | 含义     | 当前示例 |
+| ------------- | -------- | -------- |
+| `can_family`  | 地址族   | `AF_CAN` |
+| `can_ifindex` | 接口索引 | `3`      |
+
+#### `setsockopt()`：设置内核属性
+
+``` c++
+int setsockopt(
+    int sockfd,				// 修改哪个 Socket
+    int level,				// 修改的选项位于哪个协议层
+    int optname,			// 修改什么选项
+    const void* optval,		// 配置数据的地址
+    socklen_t optlen		// 配置数据的总字节数
+);
+```
+
+由于不同的 Socket 选项需要不同类型的配置数据，所以使用 `const void*` 接收数据地址，再通过 `optlen` 告诉内核配置数据有多大。
+
+##### `CAN_RAW_ERR_FILTER`：开启内核报文过滤
+
+> 本轮需要特别掌握两个容易混淆的概念：**掩码决定比较哪些位，目标值决定这些位应该是什么；内核过滤与应用程序过滤承担不同的职责。**
+
+在之前的学习中，我们已经知道 Linux 会将接收到的报文放入 Socket 接收队列，然后由 Reader 调用 `recvmsg()` 取出。假设机器人总线上同时存在 IMU、电机控制器和电池管理系统。
+
+<img src="Linux开发/CAN过滤.png" alt="CAN过滤" style="zoom:50%;" />
+
+内核过滤主要具有以下优势：
+
+- 减少无关报文占用 Socket 接收队列，在高负载总线上，降低无关报文造成接收队列积压的风险。
+- 减少 Reader 处理无关报文的开销，减少用户态 `recvmsg()` 调用次数。
+
+但需要注意，**SocketCAN 内核过滤不会降低物理 CAN 总线上的通信负载**。其他设备仍然会正常发送报文。
+
+``` c++
+struct can_filter {
+    canid_t can_id;		// 匹配什么值？
+    canid_t can_mask;	// 哪些二进制位需要参与比较？
+};
+```
+
+Linux 的过滤匹配公式为：
+
+``` c++
+(received_can_id & can_mask) == (can_id & can_mask)
+```
+
+---
+
+**如何精确匹配 Xsens 的标准数据帧？**
+
+``` c++
+can_filter filter{};
+
+filter.can_id = 0x032;
+filter.can_mask = CAN_EFF_FLAG | CAN_SFF_MASK | CAN_RTR_FLAG;
+
+int result = setsockopt(
+    fd_,
+    SOL_CAN_RAW,
+    CAN_RAW_FILTER,
+    filter,
+    sizeof(filter)
+);
+
+
+// 只接收 ID 为 0x032 的扩展数据帧，不允许标准帧和远程请求帧
+filter.can_id = 0x032 | CAN_EFF_FLAG;
+filter.can_mask =  CAN_EFF_FLAG | CAN_EFF_MASK | CAN_RTR_FLAG;
+```
+
+---
+
+**如果需要接收多个 Xsens ID 呢？**如果希望内核只接收这三种标准数据帧，可以这样编写：
+
+``` c++
+const canid_t mask = CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG;
+
+struct can_filter filters[] = {
+    {0x005, mask},
+    {0x021, mask},
+    {0x032, mask}
+};
+
+int result = setsockopt(
+    fd_,
+    SOL_CAN_RAW,
+    CAN_RAW_FILTER,
+    filters,
+    sizeof(filters)
+);
+```
+
+默认情况下，**多个 CAN 过滤器之间采用逻辑或（OR）的关系**。只要满足其中任意一个过滤条件，报文就可以通过。
+
+---
+
+默认情况下，CAN RAW Socket 的普通报文过滤规则允许接收所有匹配接口上的普通经典 CAN 帧，而**错误通知默认不接收，需单独订阅**。假设采用以下配置：
+
+``` c++
+can_err_mask_t err_mask = CAN_ERR_BUSOFF | CAN_ERR_TX_TIMEOUT;
+
+setsockopt(
+    fd_,
+    SOL_CAN_RAW,
+    CAN_RAW_ERR_FILTER,
+    &err_mask,
+    sizeof(err_mask)
+);
+```
+
+它表示订阅两种错误通知：
+
+- `CAN_ERR_BUSOFF`：CAN 控制器进入 Bus-off 状态。
+- `CAN_ERR_TX_TIMEOUT`：发送超时错误。
+
+##### `SO_TIMESTAMPNS_NEW`：开启接受时间戳
+
+接收时间戳属于 Linux Socket 通用功能，并非 CAN 独有的功能，因此位于`SOL_SOCKET`通用选项层。
+
+``` c++
+const int enable_timestamp = 1;
+
+setsockopt(
+    fd_,
+    SOL_SOCKET,				// Socket 通用选项层
+    SO_TIMESTAMPNS_NEW,		// 启用纳秒形式的接收时间戳
+    &enable_timestamp,		// 配置值的地址
+    sizeof(enable_timestamp)
+);
+```
+
+
+
+#### 接受报文
+
+##### `struct can_frame`：存储帧
+
+``` c++
+#include <can.h>
+/**
+ * struct can_frame - Classical CAN frame structure (aka CAN 2.0B)
+ * @can_id:   CAN ID of the frame and CAN_*_FLAG flags, see canid_t definition
+ * @len:      CAN frame payload length in byte (0 .. 8)
+ * @can_dlc:  deprecated name for CAN frame payload length in byte (0 .. 8)
+ * @__pad:    padding
+ * @__res0:   reserved / padding
+ * @len8_dlc: optional DLC value (9 .. 15) at 8 byte payload length
+ *            len8_dlc contains values from 9 .. 15 when the payload length is
+ *            8 bytes but the DLC value (see ISO 11898-1) is greater then 8.
+ *            CAN_CTRLMODE_CC_LEN8_DLC flag has to be enabled in CAN driver.
+ * @data:     CAN frame payload (up to 8 byte)
+ */
+     
+struct can_frame {
+	canid_t can_id;  /* 32 bit CAN_ID + EFF/RTR/ERR flags */
+	union {
+		/* CAN frame payload length in byte (0 .. CAN_MAX_DLEN)
+		 * was previously named can_dlc so we need to carry that
+		 * name for legacy support
+		 */
+		__u8 len;
+		__u8 can_dlc; /* deprecated */
+	} __attribute__((packed)); /* disable padding added in some ABIs */
+	__u8 __pad; /* padding */
+	__u8 __res0; /* reserved / padding */
+	__u8 len8_dlc; /* optional DLC for 8 byte payload length (9 .. 15) */
+	__u8 data[CAN_MAX_DLEN] __attribute__((aligned(8)));
+};
+```
+
+<img src="assets/canid数据结构位图.png" alt="canid数据结构位图" style="zoom:50%;" />
+
+##### `canid_t`：存储 CAN ID
+
+- 标准帧（Standard Frame，SFF）：11 位 ID。
+- 扩展帧（Extended Frame，EFF）：29 位 ID。
+- Linux 的 `frame.can_id`：32 位无符号整数。
+
+| 标志 | 全称                        | 作用                                 |
+| :--- | :-------------------------- | :----------------------------------- |
+| EFF  | Extended Frame Format       | 区分标准帧与扩展帧                   |
+| RTR  | Remote Transmission Request | 远程请求帧（请求其他节点发送数据帧） |
+| ERR  | Error Message Frame Flag    | 标记 Linux CAN 错误通知              |
+
+``` c++
+/* special address description flags for the CAN_ID */
+#define CAN_EFF_FLAG 0x80000000U /* EFF/SFF is set in the MSB */
+#define CAN_RTR_FLAG 0x40000000U /* remote transmission request */
+#define CAN_ERR_FLAG 0x20000000U /* error message frame */
+
+/* valid bits in CAN ID for frame formats */
+#define CAN_SFF_MASK 0x000007FFU /* standard frame format (SFF) */
+#define CAN_EFF_MASK 0x1FFFFFFFU /* extended frame format (EFF) */
+#define CAN_ERR_MASK 0x1FFFFFFFU /* omit EFF, RTR, ERR flags */
+```
+
+##### `recvmsg()` 与 接收缓冲区
+
+接受函数有三种，最大的区别是，`read()` 和 `recv()` 直接接收一个**数据缓冲区地址**，而 `recvmsg()` 接收一个**描述整个接收操作的结构体地址**。
+
+- `read()`：
+
+  ``` c++
+  ssize_t read(
+      int 	fd,
+      void*	buf,
+      size_t 	count
+  );
+  ```
+
+- `recv()`：
+
+  ``` c++
+  ssize_t recv(
+      int 	sockfd,
+      void* 	buf,
+      size_t 	len,
+      int 	flags
+  );
+  ```
+
+- `recvmsg()`：`recvmsg()` 返回的是普通数据（`canid、len等 + data[8]`）部分的接收字节数，**不包含辅助数据的字节数**。
+
+  ``` c++
+  /* Structure describing messages sent by `sendmsg' and received by `recvmsg'.  */
+  struct msghdr
+    {
+      void *msg_name;		/* Address to send to/receive from.  */
+      socklen_t msg_namelen;	/* Length of address data.  */
+  
+      struct iovec *msg_iov;	/* Vector of data to send/receive into.  */
+      size_t msg_iovlen;		/* iovec 结构体的数量  */
+  
+      void  *msg_control;		/* Ancillary data (eg BSD filedesc passing). */
+      size_t msg_controllen;	/* Ancillary data buffer length.
+  				   !! The type should be socklen_t but the
+  				   definition of the kernel is incompatible
+  				   with this.  */
+  
+      int msg_flags;		/* Flags on received message.  */
+    };
+  
+  
+  ssize_t recvmsg(
+      int 			sockfd,
+      struct msghdr* 	msg,
+      int 			flags
+  );
+  ```
+
+  对于`robo_depoly`项目来说，使用 `recvmsg()` 并不是为了提高 CAN 报文的接收速度，而是为了获得更完整的接收信息，除了`can_frame`之外还包含时间戳、丢帧计数等信息。
+
+  另外，`msg_controllen` 是一个既用于输入又用于输出的字段：
+
+  - 调用前：告诉内核缓冲区的容量。
+  - 调用后：告诉应用程序实际返回的辅助数据序列长度。
+
+  因此，如果重复使用同一个 `msghdr`，通常需要在每次调用前重新设置 `msg_controllen`，否则下一次接收可能没有足够的辅助数据缓冲空间。如果辅助数据缓冲区过小，可能出现 `MSG_CTRUNC`，表示辅助数据被截断。
+
+  ---
+
+  `recvmsg()` 并不是把所有数据写入同一块内存，而是根据 `msghdr` 提供的信息，分别将`frame`和`control`写入两个独立的缓冲区。
+
+> **什么是`iovec`？**其实就是数据存储空间的描述。
+
+``` c++
+/* Structure for scatter/gather I/O.  */
+struct iovec
+  {
+    void * iov_base;	/* 数据缓冲区从哪里开始  */
+    size_t iov_len;		/* 数据缓冲区有多大  */
+  };
+
+```
+
+这里有一个重要的 Linux 编程思想：**将数据的存储空间与存储空间的描述分开。**`iovec` 告诉内核应该向哪里写入数据，但真正存放 CAN 帧的是 `frame`。
+
+为什么 Linux 要采用这种设计？因为 `iovec` 还支持多个不连续的缓冲区。例如：
+
+```c++
+iovec buffers[2] = {
+    {buffer1, sizeof(buffer1)},
+    {buffer2, sizeof(buffer2)}
+};
+```
+
+这种机制称为分散/聚集 I/O（Scatter/Gather I/O）。它属于常见的 Linux 编程知识，但当前项目只使用一个缓冲区，所以知道其用途即可，不需要深入。
+
+##### `poll()` 与 非阻塞接收
+
+> **事件等待 + 非阻塞读取（Event-driven I/O + Non-blocking I/O）**
+>
+> 对于初学者而言，最容易产生疑问的是：既然 `poll()` 可以等待数据，为什么还需要设置非阻塞模式？为什么不直接使用 `recvmsg()` 一直等待？
+
+上一轮我们学习了如何创建 Socket 并绑定 `can0`。但 IMU 的发送过程与应用程序的读取过程并**不是同步进行**的。Xsens 不会等到你的程序调用 `recvmsg()` 才发送数据。因此，Linux 内核需要为 Socket 提供**接收队列（Receive Queue）**，临时保存已经到达、尚未被应用程序读取的报文。接收队列的容量并不是无限的。如果应用程序长期处理不过来，队列可能溢出，造成报文丢失。
+
+> **为什么既使用 poll()，又使用非阻塞 `recvmsg()`？**
+
+**只使用阻塞接收：**
+
+``` c++
+while (running) {
+    recvmsg(fd_, &message, 0);
+    // 处理数据
+}
+```
+
+优点是简单，而且没有数据时**不会忙轮询**。
+
+缺点是如果 IMU 突然停止发送，**线程可能长期阻塞在 `recvmsg()` 中**，无法及时重新检查 `running` 状态，影响线程的正常退出。
+
+**只使用非阻塞接收：**
+
+``` c++
+while (running) {
+    recvmsg(fd_, &message, 0);
+    // 处理接收结果
+}
+```
+
+如果不增加其他等待机制，当接收队列为空时，程序仍然不断调用 `recvmsg()`，形成**忙轮询（Busy Polling）**，可能浪费大量 CPU 资源。
+
+**`poll()` + 非阻塞接收：**
+
+``` c++
+while (running) {
+
+    // 等待数据就绪
+    poll(...);
+
+    // 连续读取已有的数据
+    while (running) {
+        recvmsg(...);
+
+        if (没有数据) {
+            break;
+        }
+
+        // 调用 parser 处理数据
+    }
+}
+```
+
+Linux 很多系统调用失败时都会返回 `-1`，但仅凭这个返回值并不能知道具体原因。因此，Linux 提供了 `errno`，用于获得错误原因。对于 `recvmsg()`，常见情况包括：
+
+| 返回结果或错误码 | 含义                            | 常见处理方式     |
+| ---------------- | ------------------------------- | ---------------- |
+| 返回 16          | 读取到一个完整的经典 CAN 帧结构 | 进一步检查并解析 |
+| `EAGAIN`         | 非阻塞接收暂时没有数据          | 回到等待状态     |
+| `EWOULDBLOCK`    | 当前操作如果继续将会阻塞        | 回到等待状态     |
+| `EINTR`          | 系统调用被信号中断              | 根据情况重新尝试 |
+| `EBADF`          | 文件描述符无效                  | 检查资源状态     |
+
+> **内核过滤、Reader 过滤与 Parser 检查是否重复？**
+
+- **内核过滤**：`CAN_RAW_FILTER` 根据 ID 和相关标志筛选报文，**减少无关数据进入接收队列**。
+- **Reader 检查**：处理错误通知，排除不符合 Xsens 接收要求的帧类型，提取标准 ID。
+- **Parser 检查**：按照 传感器 具体协议验证消息 ID、载荷长度并执行解析。
+
+内核过滤主要服务于**接收效率**，Reader 检查负责**帧类型的正确性**，Parser 检查负责**设备协议的正确性**。例如，ID 为 `0x032`、长度为 4 字节的标准数据帧，可以通过上述精确内核过滤和 Reader 的类型检查，但无法通过 Parser 的长度检查。即使配置了内核过滤，Parser 的检查仍然不能删除。
+
 ## 阻塞查询
 
-​	阻塞查询会在线程/进程执行设备操作时如果**不能获取到资源则挂起线程/进程**，直到满足可操作的条件后再进行操作。被挂起的线程/进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足，在驱动程序中使用**等待队列**来实现阻塞线程/进程的唤醒。
+阻塞查询会在线程/进程执行设备操作时如果**不能获取到资源则挂起线程/进程**，直到满足可操作的条件后再进行操作。被挂起的线程/进程进入睡眠状态，从调度器的运行队列移走，直到条件被满足，在驱动程序中使用**等待队列**来实现阻塞线程/进程的唤醒。
 
 ``` c
 // 定义等待队列头部
@@ -3307,12 +3571,12 @@ init_waitqueue_head(&globalfifo_devp[i].w_queue);
 
 
 // 定义等待队列元素
-//  DECLARE_WAITQUEUE(name, tsk);
-	DECLARE_WAITQUEUE(wait, current);
+DECLARE_WAITQUEUE(name, tsk);
+DECLARE_WAITQUEUE(wait, current);
 
 // 添加/移除等待队列，与设置进程状态配合使用
-//  add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
-	add_wait_queue(&dev->w_queue, &wait);
+add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
+add_wait_queue(&dev->w_queue, &wait);
 // 设置进程状态
 	__set_current_state(TASK_INTERRUPTIBLE);
 // 等同于 
@@ -3321,8 +3585,8 @@ init_waitqueue_head(&globalfifo_devp[i].w_queue);
     sleep_on(wait_queue_head *q)
 
 
-//  remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
-	remove_wait_queue(&dev->w_queue, &wait);
+remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
+remove_wait_queue(&dev->w_queue, &wait);
 
 
 // 等待事件
@@ -3342,56 +3606,11 @@ void wake_up_interruptible(wait_queue_head_t *queue);
 在字符设备驱动中，用户空间的程序可能需要**非阻塞地**检查设备是否可读或可写，而不是傻傻地阻塞在 `read()` 或 `write()` 上。`poll`/`select`/`epoll` 系统调用就是为此设计的：
 
 - **场景**：用户程序想同时监控多个文件描述符，看哪个准备好了。
-- **目标**：避免忙等待（busy-waiting），让内核在设备就绪时通知用户。
-
-### `poll`
-
-``` c
- struct pollfd fds[1];
-
-//  设置 pollfd 结构体
-fds[0].fd = fd;
-fds[0].events = POLLIN | POLLOUT;  // 同时监视可读和可写
-fds[0].revents = 0;
-
-//  poll(数组, 数组长度, 超时毫秒)
-num = poll(fds, 1, -1);
-if (num < 0) {
-    perror("poll failed");
-    break;
-}
-
-//  检查 revents，是否可读
-if (fds[0].revents & POLLIN) {
-    memset(buffer, 0, BUFFER_LEN);
-    num = read(fd, buffer, BUFFER_LEN);
-    if (num < 0) {
-        perror("read failed");
-        break;
-    }
-    printf("read %d bytes: %s\n", num, buffer);
-}
-
-//  检查 revents，是否可写
-if (fds[0].revents & POLLOUT) {
-    num = write(fd, buffer, BUFFER_LEN);
-    if (num < 0) {
-        perror("write failed");
-        break;
-    }
-    printf("write %d bytes\n", num);
-}
-```
-
-
-
-### `epoll`
+- **目标**：配合非阻塞接收避免单纯非阻塞接受忙等待（busy-waiting），让内核在设备就绪时通知用户。
 
 ### `select`
 
-`select` 本质是**IO 多路复用**核心接口，用来**单线程同时监控多个文件描述符（fd）**，解决「单个阻塞 IO 卡住，没法处理其他 IO」的问题。
-
----
+`select` 本质是IO 多路复用核心接口，用来**单线程同时监控多个文件描述符（fd）**，解决「单个阻塞 IO 卡住，没法处理其他 IO」的问题。
 
 **单线程监控多个 IO**：不用开多线程，一个线程就能同时等：键盘、串口、网络 socket、设备文件（驱动节点）等多个 fd。
 
@@ -3399,31 +3618,22 @@ if (fds[0].revents & POLLOUT) {
 
 **实现带超时的 IO 操作**：可以给阻塞加超时时间，超时就返回，不会永久卡住。
 
-**适用场景**：嵌入式串口 / 设备监控、轻量级网络服务、多 IO 事件轮询（Linux 早期经典方案）。
-
----
+适用场景：嵌入式串口 / 设备监控、轻量级网络服务、多 IO 事件轮询（Linux 早期经典方案）。
 
 ``` c
 #include <sys/select.h>
 #include <sys/time.h>
 
 /* 返回值：就绪的fd数量, =0(超时) */
-int select(int nfds, 
-           fd_set *readfds, 
-           fd_set *writefds, 
-           fd_set *exceptfds, 
-           struct timeval *timeout);
+int select(int nfds, 					// 待监控的 最大文件描述符 + 1
+           fd_set *readfds, 			// 读事件集合：监控这些 fd 是否有数据可读（最常用）
+           fd_set *writefds, 			// 写事件集合：监控这些 fd 是否可写
+           fd_set *exceptfds, 			// 异常事件集合：监控这些 fd 是否发生异常
+           struct timeval *timeout);	// 超时时间：-NULL：永久阻塞- {0,0}：非阻塞，立即返回- 赋值：定时阻塞，超时返回
 ```
 
-| 参数        | 含义                                                         |
-| ----------- | ------------------------------------------------------------ |
-| `nfds`      | 待监控的**最大文件描述符 + 1**（必须填，内核遍历效率要求）   |
-| `readfds`   | 读事件集合：监控这些 fd**是否有数据可读**（最常用）          |
-| `writefds`  | 写事件集合：监控这些 fd**是否可写**                          |
-| `exceptfds` | 异常事件集合：监控 fd 是否发生异常                           |
-| `timeout`   | 超时时间：- `NULL`：永久阻塞- `{0,0}`：非阻塞，立即返回- 赋值：定时阻塞，超时返回 |
+`fd_set` 是文件描述符集合，必须用以下宏操作，不能直接赋值：
 
-fd_set 是文件描述符集合，必须用以下宏操作，不能直接赋值：
 ``` c
 // 清空整个fd集合
 void FD_ZERO(fd_set *set);
@@ -3437,6 +3647,56 @@ void FD_CLR(int fd, fd_set *set);
 // 判断fd是否在集合中（是否就绪）
 int FD_ISSET(int fd, fd_set *set);
 ```
+
+### `poll`
+
+``` c
+// /usr/include/aarch64-linux-gnu/sys/poll.h
+struct pollfd {
+    int   fd;		// 需要监听的文件描述符
+    short events;	// 希望监听的事件
+    short revents;	// 实际发生的事件
+}; 
+
+
+struct pollfd fds[1];
+
+//  设置 pollfd 结构体,检视哪些 fd 是否 可写还是可读
+fds[0].fd      = fd;
+fds[0].events  = POLLIN | POLLOUT;  // 同时监视可读和可写
+fds[0].revents = 0;
+
+//  poll(pollfd 数组, 数组的长度, 超时毫秒)
+num = poll(fds, 1, -1);
+if (num < 0) {
+    perror("poll failed");
+    break;
+}
+
+//  检查 revents，fd 是否可读
+if (fds[0].revents & POLLIN) {
+    memset(buffer, 0, BUFFER_LEN);
+    num = read(fd, buffer, BUFFER_LEN);
+    if (num < 0) {
+        perror("read failed");
+        break;
+    }
+    printf("read %d bytes: %s\n", num, buffer);
+}
+
+//  检查 revents，fd 是否可写
+if (fds[0].revents & POLLOUT) {
+    num = write(fd, buffer, BUFFER_LEN);
+    if (num < 0) {
+        perror("write failed");
+        break;
+    }
+    printf("write %d bytes\n", num);
+}
+```
+
+### `epoll`
+
 
 # 线程
 
@@ -4981,6 +5241,271 @@ int main(void) {
     }
     
     return 0;
+}
+```
+
+# 时间库
+
+两种库核心都是解决两个问题：
+
+- 现在几点？例如：
+
+  ```
+  2026-08-18 14:30:25
+  ```
+
+  这是**现实世界时间 / wall-clock time**。
+
+- 过了多久？例如：一次 inference 花了 1.37 ms这里根本不关心：`14:30:25`而是在测：Δt=t1−t0。这是**elapsed time / duration**。
+
+  典型用途：
+
+  - inference latency；
+  - 控制周期；
+  - timeout；
+  - jitter。
+
+  这时候应该优先用：`std::chrono::steady_clock`而不是 `system_clock`。
+
+## `<time.h>`
+
+**只有需要和 Linux/POSIX 系统接口交互时**，再直接使用 `<time.h>`。
+
+### `time_t`/`time()`：纪元开始经过的秒数
+
+``` c
+time_t now = time(nullptr);
+```
+
+它通常可以理解成：**Unix Epoch→现在之间经过的秒数**。Unix Epoch 是：1970-01-01 00:00:00 UTC.
+
+但严格说，C/C++ 标准并没有要求 `time_t` 必须就是“Unix 秒数”，只是绝大多数 Linux 系统都是这么实现的。
+
+### `struct tm`/`localtime()`：把秒数拆成年月日
+
+`time_t` 本身不适合人类阅读，所以有：
+
+``` c
+struct tm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+
+    int tm_wday;
+    int tm_yday;
+
+    int tm_isdst;
+};
+```
+
+比如：
+
+``` c
+std::time_t now = std::time(nullptr);
+std::tm* local  = std::localtime(&now);
+```
+
+这就把：`1787034625`解释成：
+
+```
+2026-08-18
+14:30:25
+```
+
+不过这里有两个很经典的坑：
+
+- `tm_year`不是直接的年份，而是：`year−1900`，所以：`local->tm_year + 1900`才是真实年份。
+
+- 而：`tm_mon`范围是：0 ~ 11所以：`local->tm_mon + 1`才是月份。
+
+这就是老 C API 很典型的问题：
+
+> 数据有语义，但是类型系统没有表达这种语义。
+
+### `clock_t`/`clock()`：进程消耗的CPU时间
+
+`clock()` 测量的通常是：进程消耗的 CPU 时间，而不是现实经过时间。比如程序：
+
+```c
+sleep(5);
+```
+
+现实中过了：5s但这个进程可能几乎没有使用 CPU。所以：
+
+```
+clock()
+```
+
+测出来可能远远不到 5 秒。
+
+### `struct timespec`/`clock_gettime()`：可选时钟源（纳秒级）
+
+常用的时钟类型 (`clk_id`)，这是该函数最灵活的地方，可以根据需求选择不同的“时钟源”：
+
+| **时钟类型**               | **描述**                                                     |
+| -------------------------- | ------------------------------------------------------------ |
+| `CLOCK_REALTIME`           | **系统实时时间**（墙上时钟）。反映从 1970 年开始算经过的秒数。如果你手动修改了系统时间，它会跟着变。 |
+| `CLOCK_MONOTONIC`          | **单调时钟**。从系统启动开始计时经过的秒数，不受系统时间修改的影响（对应`std::chrono::steady_clock`）。**最适合用来测量程序运行耗时**。 |
+| `CLOCK_PROCESS_CPUTIME_ID` | **进程 CPU 时间**。统计当前进程在 CPU 上运行的总时间（不包括休眠时间）。 |
+| `CLOCK_THREAD_CPUTIME_ID`  | **线程 CPU 时间**。仅统计当前线程消耗的 CPU 时间。           |
+
+`clock_gettime`比传统的 `time()`（秒级）或 `gettimeofday()`（微秒级）更强大，因为它能达到 **纳秒级（Nanoseconds）** 的精度。
+
+``` c++
+// clk_id: 指定要使用的“时钟类型”（见下文）。
+// *tp: 指向 timespec 结构体的指针，函数会将获取到的时间写入其中。
+// 返回值: 成功返回 0，失败返回 -1。
+int clock_gettime(clockid_t clk_id, struct timespec *tp);
+
+
+struct timespec {
+    time_t   tv_sec;        /* 秒 (seconds) */
+    long     tv_nsec;       /* 纳秒 (nanoseconds: 10^-9 秒) */
+};
+
+
+TIMESPEC2NS(time);//一个宏: struct timespec 结构体（包含秒和纳秒）转换成一个 64 位整数（uint64_t）的纳秒值。
+```
+
+## `<chrono>`
+
+`chrono` 的设计比 `time.h` 高一个抽象层次。它的核心只有三个概念：
+
+									$$Duration + Clock + TimePoint$$
+
+把这三个搞懂，`chrono` 基本就懂了。
+
+### `duration`：一段时间
+
+```c++
+std::chrono::seconds()
+std::chrono::milliseconds()
+std::chrono::microseconds()
+std::chrono::nanoseconds()
+    
+    
+// 可以使用std::chrono::duration_cast<std::chrono::xxseconds>(xx) 进行安全类型转换
+auto us = std::chrono::duration_cast<std::chrono::microseconds>(ns);
+```
+
+都是`duration`，也就是**一段时间有多长**。例如：
+
+```c++
+std::chrono::milliseconds timeout{10};
+```
+
+表示：10ms.不是：某个时间点是 10 ms。而是有一段 10 ms 的长度。
+
+---
+
+实际上：`std::chrono::milliseconds`大致等价于：
+
+```c++
+std::chrono::duration<long long, std::milli>
+```
+
+其中：`std::milli`代表：$10^{-3}s$；
+
+类似：`std::chrono::microseconds`就是：$10^{-6}s$；
+
+类似：`std::chrono::nanoseconds`就是：$10^{-9}s$。
+
+所以 chrono 把**数值和单位放进了类型系统**；这就是它比传统 C API 好很多的核心原因。
+
+可以使用`.count`来获取**这个 duration 以自身单位表示的数值**：
+
+``` c++
+std::chrono::nanoseconds d{1000};  // 返回 1000，而不是0.000001 second
+```
+
+### `time_point`/`xxx_clock::now()`：时间点
+
+如果 `duration` 是过了多久，那么：`time_point`就是时间轴上的某个点。例如：
+
+```c++
+auto start = std::chrono::steady_clock::now();
+```
+
+这里`start`的类型本质上就是：
+
+```c++
+std::chrono::time_point<std::chrono::steady_clock>
+```
+
+---
+
+chrono 里最常用的三个 Clock：
+
+```c++
+std::chrono::system_clock			// 现实世界当前时间;可以与 time_t 互转。适合：日志时间、年月日、timestamp
+std::chrono::steady_clock			// 专门适合测latency。单调时钟，时间不会倒退
+std::chrono::high_resolution_clock
+```
+
+其中真正需要重点掌握前两个。
+
+### `sleep for()`和`sleep until()`
+
+chrono 还能很好地描述休眠。例如：
+
+```c++
+std::this_thread::sleep_for(std::chrono::milliseconds(10));
+```
+
+意思是：休眠大约 10 ms。这里参数就是`duration`；语义是**睡多久**。
+
+---
+
+而：
+
+```c++
+std::this_thread::sleep_until(next);
+```
+
+参数则是：`time_point`，语义是**睡到什么时候**。比如要做一个：1kHz循环，即：T=1ms.很多初学者会写：
+
+```c++
+while (running) {
+    do_work();
+
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(1));
+}
+```
+
+这其实有问题。假设：
+
+```c++
+do_work = 0.2 ms
+sleep   = 1.0 ms
+```
+
+实际周期就是：1.2ms而不是：1ms.还会不断发生 drift。
+
+------
+
+更合理的思路是：
+
+```c++
+using clock = std::chrono::steady_clock;
+
+
+auto next = clock::now();
+
+
+while (running) {
+    next += std::chrono::milliseconds(1);
+
+
+    do_work();
+
+
+    std::this_thread::sleep_until(next);
 }
 ```
 
